@@ -143,6 +143,11 @@ XaLZaEditor::ModuleMeterUI& XaLZaEditor::addModuleMeter(const juce::String& tab,
     auto mm = std::make_unique<ModuleMeterUI>();
     mm->tapIn = tapIn;
     mm->tapOut = tapOut;
+    // tapOut is always TapPre + slotId (see the MeterTap/ModuleSlot comment
+    // in PluginProcessor.h — the two enums are deliberately in the same
+    // Pre..Lim order), so this derives cleanly without a 13th constructor
+    // argument at every one of the 12 call sites below.
+    mm->slotId = tapOut - (int) XaLZaProcessor::TapPre;
     mm->grIndex = grIndex;
 
     mm->bypassParamID = bypassParamID;
@@ -428,6 +433,16 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
             applyPreset(id - 1);
     };
     addAndMakeVisible(presetBox);
+
+    chainOrderBtn.setTooltip("Reorder the 12-module signal chain");
+    chainOrderBtn.onClick = [this]
+    {
+        auto panel = std::make_unique<ChainOrderPanel>(proc);
+        auto& box = juce::CallOutBox::launchAsynchronously(std::move(panel),
+            chainOrderBtn.getScreenBounds(), nullptr);
+        juce::ignoreUnused(box);
+    };
+    addAndMakeVisible(chainOrderBtn);
 
     savePresetBtn.setTooltip("Save the full current plugin state as a preset file");
     loadPresetBtn.setTooltip("Load a previously saved preset file");
@@ -762,7 +777,10 @@ void XaLZaEditor::timerCallback()
     for (auto& mmPtr : moduleMeterStorage)
     {
         auto& mm = *mmPtr;
-        float inL = proc.getMeterDbL(mm.tapIn), inR = proc.getMeterDbR(mm.tapIn);
+        // Live predecessor tap (not the fixed-order mm.tapIn) so this still
+        // reads correctly after the chain has been reordered.
+        int liveTapIn = mm.slotId >= 0 ? proc.getPredecessorTap(mm.slotId) : mm.tapIn;
+        float inL = proc.getMeterDbL(liveTapIn), inR = proc.getMeterDbR(liveTapIn);
         float outL = proc.getMeterDbL(mm.tapOut), outR = proc.getMeterDbR(mm.tapOut);
         mm.meterIn.setDb(inL, inR);
         mm.meterOut.setDb(outL, outR);
@@ -1020,6 +1038,7 @@ void XaLZaEditor::paint(juce::Graphics& g)
     titleArea.removeFromRight(48);    // leave room for LOAD
     titleArea.removeFromRight(48);    // leave room for SAVE
     titleArea.removeFromRight(140);   // leave room for the preset picker
+    titleArea.removeFromRight(58);    // leave room for CHAIN
     g.setFont(juce::Font(juce::FontOptions(11.0f)));
     g.setColour(XaLZaColour::textMuted);
     g.drawText("Vocal Chain", titleArea.reduced(10, 0), juce::Justification::centredRight);
@@ -1093,6 +1112,7 @@ void XaLZaEditor::resized()
     loadPresetBtn.setBounds(titleArea.removeFromRight(48).reduced(4, 5));
     savePresetBtn.setBounds(titleArea.removeFromRight(48).reduced(4, 5));
     presetBox.setBounds(titleArea.removeFromRight(140).reduced(6, 6));
+    chainOrderBtn.setBounds(titleArea.removeFromRight(58).reduced(4, 5));
     auto footerArea = full.removeFromBottom(footerH);
     {
         auto abArea = footerArea.withSizeKeepingCentre(70, footerH).reduced(0, 6);

@@ -740,6 +740,63 @@ private:
     SpectrumAnalyzer harmonics;
 };
 
+/** Chain-order popup content: 12 rows (current processing order, top =
+    first), each with Up/Down buttons that call XaLZaProcessor::moveModule
+    directly — genuinely reorders the DSP chain, not just a display. Meant
+    to be launched via juce::CallOutBox from a title-bar button, so it
+    never has to fight the fixed-pixel module-page layouts for space. */
+class ChainOrderPanel : public juce::Component
+{
+public:
+    explicit ChainOrderPanel(XaLZaProcessor& p) : proc(p)
+    {
+        for (int i = 0; i < XaLZaProcessor::kNumSlots; ++i)
+        {
+            auto* row = rows.add(new Row());
+            addAndMakeVisible(row->label);
+            addAndMakeVisible(row->up);
+            addAndMakeVisible(row->down);
+            row->label.setFont(juce::Font(juce::FontOptions(12.5f)));
+            row->up.setButtonText(juce::CharPointer_UTF8("\xE2\x96\xB2"));
+            row->down.setButtonText(juce::CharPointer_UTF8("\xE2\x96\xBC"));
+        }
+        refresh();
+        setSize(200, XaLZaProcessor::kNumSlots * rowH + 8);
+    }
+
+    void refresh()
+    {
+        for (int pos = 0; pos < XaLZaProcessor::kNumSlots; ++pos)
+        {
+            int slotId = proc.getChainSlotAt(pos);
+            auto* row = rows[pos];
+            row->label.setText(juce::String(pos + 1) + ". " + XaLZaProcessor::slotName(slotId),
+                                juce::dontSendNotification);
+            row->up.onClick = [this, slotId] { proc.moveModule(slotId, -1); refresh(); };
+            row->down.onClick = [this, slotId] { proc.moveModule(slotId, 1); refresh(); };
+            row->up.setEnabled(pos > 0);
+            row->down.setEnabled(pos < XaLZaProcessor::kNumSlots - 1);
+        }
+    }
+
+private:
+    void resized() override
+    {
+        for (int i = 0; i < rows.size(); ++i)
+        {
+            auto area = juce::Rectangle<int>(4, 4 + i * rowH, getWidth() - 8, rowH - 2);
+            rows[i]->down.setBounds(area.removeFromRight(22));
+            rows[i]->up.setBounds(area.removeFromRight(22));
+            rows[i]->label.setBounds(area);
+        }
+    }
+
+    struct Row { juce::Label label; juce::TextButton up, down; };
+    static constexpr int rowH = 22;
+    XaLZaProcessor& proc;
+    juce::OwnedArray<Row> rows;
+};
+
 /**
     Editor layout mirrors the web mockup: a narrow vertical tab rail on
     the left (MACROS + the 12 modules, in the mockup's own tab order),
@@ -780,6 +837,12 @@ private:
         std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> bypassAttachment;
         juce::String bypassParamID;
         int tapIn = 0, tapOut = 0;
+        // Derived from tapOut (which module this page is) — used to look
+        // up the LIVE predecessor tap each frame via
+        // proc.getPredecessorTap(), so the IN meter stays correct after
+        // the chain has been reordered instead of always reading the
+        // original fixed-order tapIn above.
+        int slotId = -1;
         int grIndex = -1;   // -1 = no GR readout for this module
         void setVisible(bool v)
         {
@@ -926,6 +989,11 @@ private:
 
     // Factory preset picker (title bar) — drives the 12 macro knobs.
     juce::ComboBox presetBox;
+
+    // Chain-order popup trigger (title bar) — opens a ChainOrderPanel via
+    // CallOutBox; the panel talks straight to the processor, so there is
+    // nothing to keep in sync here beyond launching it.
+    juce::TextButton chainOrderBtn { "CHAIN" };
 
     // User presets — save/load the FULL plugin state (every real parameter,
     // not just the macros) to a .xalzapreset XML file, so a user's own

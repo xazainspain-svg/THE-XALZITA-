@@ -36,6 +36,7 @@ XaLZaProcessor::XaLZaProcessor()
     for (auto& a : dblScopeL) a.store(0.0f);
     for (auto& a : dblScopeR) a.store(0.0f);
     for (auto& a : macroCcMap) a.store(-1);
+    for (int i = 0; i < kNumSlots; ++i) chainOrder[(size_t) i].store(i);
 }
 
 void XaLZaProcessor::updateMeter(int tap, const juce::AudioBuffer<float>& buf, int numSamples, int numCh)
@@ -325,6 +326,8 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     // ---------------------------------------------------------------
     // 1) PREAMP — HPF, clean gain, tanh "character" blended dry/wet
     // ---------------------------------------------------------------
+    auto runPre = [&]()
+    {
     bool preBypassed = apvts.getRawParameterValue(XID::PreBypass)->load() > 0.5f;
     if (!preBypassed)
     {
@@ -360,10 +363,13 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     }
     updateMeter((int) TapPre, buffer, numSamples, numCh);
     pushRaw((int) RawPre, buffer, numSamples, numCh);
+    };
 
     // ---------------------------------------------------------------
     // 2) GATE — envelope-follower expander with hold, attack, release
     // ---------------------------------------------------------------
+    auto runGate = [&]()
+    {
     bool gateBypassed = apvts.getRawParameterValue(XID::GateBypass)->load() > 0.5f;
     if (!gateBypassed)
     {
@@ -430,10 +436,13 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     }
     updateMeter((int) TapGate, buffer, numSamples, numCh);
     pushRaw((int) RawGate, buffer, numSamples, numCh);
+    };
 
     // ---------------------------------------------------------------
     // 3) DE-ESSER — dynamic peak filter driven by a sibilance-band envelope
     // ---------------------------------------------------------------
+    auto runEss = [&]()
+    {
     bool essBypassed = apvts.getRawParameterValue(XID::EssBypass)->load() > 0.5f;
     if (!essBypassed)
     {
@@ -497,10 +506,13 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         essReductionDbUI.store(0.0f, std::memory_order_relaxed);
     }
     updateMeter((int) TapEss, buffer, numSamples, numCh);
+    };
 
     // ---------------------------------------------------------------
     // 4) GLUE COMP — threshold/ratio via juce::dsp, makeup + dry/wet mix
     // ---------------------------------------------------------------
+    auto runComp = [&]()
+    {
     bool compBypassed = apvts.getRawParameterValue(XID::CompBypass)->load() > 0.5f;
     if (!compBypassed)
     {
@@ -550,10 +562,13 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         updateGr(0, 0.0f, 0.0f);
     }
     updateMeter((int) TapComp, buffer, numSamples, numCh);
+    };
 
     // ---------------------------------------------------------------
     // 5) OPTO — slow program-dependent 2nd compression stage, dry/wet mix
     // ---------------------------------------------------------------
+    auto runOpto = [&]()
+    {
     bool optoBypassed = apvts.getRawParameterValue(XID::OptoBypass)->load() > 0.5f;
     if (!optoBypassed)
     {
@@ -600,10 +615,13 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     }
     updateMeter((int) TapOpto, buffer, numSamples, numCh);
     pushRaw((int) RawOpto, buffer, numSamples, numCh);
+    };
 
     // ---------------------------------------------------------------
     // 6) EQ 550 — 3-band (low shelf @150Hz / mid peak @1kHz / high shelf @6kHz)
     // ---------------------------------------------------------------
+    auto runEq = [&]()
+    {
     if (apvts.getRawParameterValue(XID::EqBypass)->load() <= 0.5f)
     {
         float lowDb   = mt.effectiveByID(XID::EqMacro, XID::EqLow);
@@ -637,6 +655,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             specWritePos.store(pos + 1, std::memory_order_relaxed);
         }
     }
+    };
 
     // ---------------------------------------------------------------
     // 7) RESONANCE — dynamically-tracking de-resonator: a bandpass-detector
@@ -647,6 +666,8 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     //    smooth/near-static, 100% pounces on transient resonant peaks and
     //    releases fast right after.
     // ---------------------------------------------------------------
+    auto runRes = [&]()
+    {
     bool resBypassed = apvts.getRawParameterValue(XID::ResBypass)->load() > 0.5f;
     if (!resBypassed)
     {
@@ -700,11 +721,18 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         resCutDbUI.store(0.0f, std::memory_order_relaxed);
     }
     updateMeter((int) TapRes, buffer, numSamples, numCh);
-    pushRaw((int) RawSatIn, buffer, numSamples, numCh);
+    };
 
     // ---------------------------------------------------------------
     // 8) SATURATOR — tanh drive, tone tilt, soft ceiling, dry/wet mix
     // ---------------------------------------------------------------
+    auto runSat = [&]()
+    {
+    // Tapped right here (Sat's own input, whatever currently precedes it
+    // in the chain) rather than at the end of a fixed "previous" module,
+    // so the SAT page's in-vs-out scope stays correct after a reorder.
+    pushRaw((int) RawSatIn, buffer, numSamples, numCh);
+
     bool satBypassed = apvts.getRawParameterValue(XID::SatBypass)->load() > 0.5f;
     if (!satBypassed)
     {
@@ -757,10 +785,13 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     }
     updateMeter((int) TapSat, buffer, numSamples, numCh);
     pushRaw((int) RawSatOut, buffer, numSamples, numCh);
+    };
 
     // ---------------------------------------------------------------
     // 9) DOUBLER — two modulated delay voices layered on top of the dry signal
     // ---------------------------------------------------------------
+    auto runDbl = [&]()
+    {
     bool dblBypassed = apvts.getRawParameterValue(XID::DblBypass)->load() > 0.5f;
     if (!dblBypassed)
     {
@@ -825,10 +856,13 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             dblScopeWritePos.store(pos + 1, std::memory_order_relaxed);
         }
     }
+    };
 
     // ---------------------------------------------------------------
     // 10) REVERB — pre-delay, size/decay, duck, mixed back in
     // ---------------------------------------------------------------
+    auto runRev = [&]()
+    {
     bool revBypassed = apvts.getRawParameterValue(XID::RevBypass)->load() > 0.5f;
     if (!revBypassed)
     {
@@ -910,10 +944,13 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         }
     }
     updateMeter((int) TapRev, buffer, numSamples, numCh);
+    };
 
     // ---------------------------------------------------------------
     // 11) DELAY — ping-pong, spread, duck, auto-pan LFO on the wet signal
     // ---------------------------------------------------------------
+    auto runDly = [&]()
+    {
     bool dlyBypassed = apvts.getRawParameterValue(XID::DlyBypass)->load() > 0.5f;
     if (!dlyBypassed)
     {
@@ -991,10 +1028,13 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     }
     updateMeter((int) TapDly, buffer, numSamples, numCh);
     pushRaw((int) RawDly, buffer, numSamples, numCh);
+    };
 
     // ---------------------------------------------------------------
     // 12) LIMITER — input trim, ceiling, release, extra tanh clip stage
     // ---------------------------------------------------------------
+    auto runLim = [&]()
+    {
     bool limBypassed = apvts.getRawParameterValue(XID::LimBypass)->load() > 0.5f;
     if (!limBypassed)
     {
@@ -1095,6 +1135,24 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     }
     updateMeter((int) TapLim, buffer, numSamples, numCh);
     pushRaw((int) RawLim, buffer, numSamples, numCh);
+    };
+
+    // ---------------------------------------------------------------
+    // Run the 12 modules above in the user's current chain order (identity
+    // order — Pre, Gate, Ess, Comp, Opto, Eq, Res, Sat, Dbl, Rev, Dly, Lim —
+    // by default, same as the original fixed sequence, so nothing changes
+    // unless the user has actually reordered something via moveModule()).
+    // Each lambda reads/writes `buffer` in place and reads whatever the
+    // chain has produced so far, exactly like the original fixed-order
+    // code did — only WHICH ONE runs at each step is now data-driven.
+    // ---------------------------------------------------------------
+    {
+        const std::array<std::function<void()>, kNumSlots> runners = {
+            runPre, runGate, runEss, runComp, runOpto, runEq, runRes, runSat, runDbl, runRev, runDly, runLim
+        };
+        for (int pos = 0; pos < kNumSlots; ++pos)
+            runners[(size_t) chainOrder[(size_t) pos].load(std::memory_order_relaxed)]();
+    }
 
     // ---------------------------------------------------------------
     // Stereo Width — mid/side, Master utility control (not macro-linked)
@@ -1193,6 +1251,10 @@ void XaLZaProcessor::getStateInformation(juce::MemoryBlock& destData)
     xml->setAttribute("xalzaEditorH", lastEditorHeight);
     for (int i = 0; i < kNumMacros; ++i)
         xml->setAttribute("xalzaCc" + juce::String(i), macroCcMap[(size_t) i].load(std::memory_order_relaxed));
+    juce::String orderStr;
+    for (int i = 0; i < kNumSlots; ++i)
+        orderStr << chainOrder[(size_t) i].load(std::memory_order_relaxed) << (i + 1 < kNumSlots ? "," : "");
+    xml->setAttribute("xalzaChainOrder", orderStr);
     copyXmlToBinary(*xml, destData);
 }
 
@@ -1214,6 +1276,36 @@ void XaLZaProcessor::setStateInformation(const void* data, int sizeInBytes)
             int cc = xml->hasAttribute(key) ? xml->getIntAttribute(key, -1) : -1;
             macroCcMap[(size_t) i].store(juce::jlimit(-1, 127, cc), std::memory_order_relaxed);
         }
+
+        // Chain order: only accept it if it's genuinely a permutation of
+        // 0..kNumSlots-1 — anything else (corrupted state, hand-edited
+        // file) falls back to identity order rather than risk running the
+        // same module twice or dropping one entirely.
+        {
+            std::array<int, kNumSlots> loaded {};
+            for (auto& v : loaded) v = -1;
+            bool valid = xml->hasAttribute("xalzaChainOrder");
+            if (valid)
+            {
+                auto tokens = juce::StringArray::fromTokens(xml->getStringAttribute("xalzaChainOrder"), ",", "");
+                valid = tokens.size() == kNumSlots;
+                if (valid)
+                {
+                    std::array<bool, kNumSlots> seen {};
+                    for (auto& s : seen) s = false;
+                    for (int i = 0; i < kNumSlots; ++i)
+                    {
+                        int v = tokens[i].getIntValue();
+                        if (v < 0 || v >= kNumSlots || seen[(size_t) v]) { valid = false; break; }
+                        seen[(size_t) v] = true;
+                        loaded[(size_t) i] = v;
+                    }
+                }
+            }
+            for (int i = 0; i < kNumSlots; ++i)
+                chainOrder[(size_t) i].store(valid ? loaded[(size_t) i] : i, std::memory_order_relaxed);
+        }
+
         apvts.replaceState(juce::ValueTree::fromXml(*xml));
     }
 }

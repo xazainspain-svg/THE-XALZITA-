@@ -67,6 +67,60 @@ public:
     float getMeterDbL(int tap) const noexcept { return meterDbL[(size_t) juce::jlimit(0, kNumMeterTaps - 1, tap)].load(std::memory_order_relaxed); }
     float getMeterDbR(int tap) const noexcept { return meterDbR[(size_t) juce::jlimit(0, kNumMeterTaps - 1, tap)].load(std::memory_order_relaxed); }
 
+    // ---- Reorderable chain: which of the 12 modules processBlock() runs
+    //      first/second/.../last. Identity order (Pre, Gate, ... Lim, same
+    //      as MeterTap above) by default — matches every original meter/
+    //      raw-tap wiring exactly until the user actually reorders
+    //      something. Enum order here is deliberately identical to
+    //      MeterTap's Pre..Lim run so tapForSlot() below is just an offset. ----
+    enum ModuleSlot
+    {
+        SlotPre = 0, SlotGate, SlotEss, SlotComp, SlotOpto, SlotEq, SlotRes,
+        SlotSat, SlotDbl, SlotRev, SlotDly, SlotLim, kNumSlots
+    };
+    static int tapForSlot(int slotId) noexcept { return (int) TapPre + juce::jlimit(0, kNumSlots - 1, slotId); }
+    static const char* slotName(int slotId) noexcept
+    {
+        static const char* names[kNumSlots] = { "PREAMP", "GATE", "DE-ESSER", "GLUE COMP", "OPTO",
+                                                  "EQ 550", "RESONANCE", "SATURATOR", "DOUBLER",
+                                                  "REVERB", "DELAY", "LIMITER" };
+        return names[(size_t) juce::jlimit(0, kNumSlots - 1, slotId)];
+    }
+
+    // Which slot processes at chain position 'position' (0 = first).
+    int getChainSlotAt(int position) const noexcept { return chainOrder[(size_t) juce::jlimit(0, kNumSlots - 1, position)].load(std::memory_order_relaxed); }
+    // Where slotId currently sits (0 = first, kNumSlots-1 = last).
+    int getChainPosition(int slotId) const noexcept
+    {
+        for (int pos = 0; pos < kNumSlots; ++pos)
+            if (chainOrder[(size_t) pos].load(std::memory_order_relaxed) == slotId)
+                return pos;
+        return 0;
+    }
+    // Swaps slotId with its neighbour in the given direction (-1 = earlier,
+    // +1 = later); a no-op at either end. UI-driven only (reordering is a
+    // rare, deliberate action, not a per-block operation).
+    void moveModule(int slotId, int direction) noexcept
+    {
+        int pos = getChainPosition(slotId);
+        int newPos = juce::jlimit(0, kNumSlots - 1, pos + (direction < 0 ? -1 : 1));
+        if (newPos == pos)
+            return;
+        int other = chainOrder[(size_t) newPos].load(std::memory_order_relaxed);
+        chainOrder[(size_t) newPos].store(slotId, std::memory_order_relaxed);
+        chainOrder[(size_t) pos].store(other, std::memory_order_relaxed);
+    }
+    // Live "input" meter tap for slotId: the previous module's own output
+    // tap at whatever position slotId CURRENTLY sits (or the master input
+    // level if it's first) — recomputed from the live chain order rather
+    // than the fixed pairing the original 12-tab layout assumed, so each
+    // module page's IN meter stays correct after a reorder.
+    int getPredecessorTap(int slotId) const noexcept
+    {
+        int pos = getChainPosition(slotId);
+        return pos == 0 ? (int) TapIn : tapForSlot(getChainSlotAt(pos - 1));
+    }
+
     // Gain-reduction readout (positive dB = amount of reduction): 0=Comp, 1=Opto, 2=Lim
     float getGrDb(int moduleIdx) const noexcept { return grDb[(size_t) juce::jlimit(0, 2, moduleIdx)].load(std::memory_order_relaxed); }
 
@@ -164,6 +218,8 @@ private:
 
     std::array<std::atomic<int>, kNumMacros> macroCcMap;   // -1 = unbound
     std::atomic<int> midiLearnTarget { -1 };                // -1 = not currently learning
+
+    std::array<std::atomic<int>, kNumSlots> chainOrder;    // identity order by default
 
     juce::dsp::IIR::Filter<float> lufsPreL, lufsPreR, lufsRlbL, lufsRlbR;
     float lufsMsL = 0.0f, lufsMsR = 0.0f;
