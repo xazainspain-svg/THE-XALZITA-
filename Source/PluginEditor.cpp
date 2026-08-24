@@ -87,6 +87,44 @@ XaLZaEditor::KnobUI& XaLZaEditor::addKnob(const juce::String& paramID, const juc
     return *knobs.back();
 }
 
+XaLZaEditor::ModuleMeterUI& XaLZaEditor::addModuleMeter(const juce::String& tab, int tapIn, int tapOut, int grIndex)
+{
+    auto it = std::find(tabNames.begin(), tabNames.end(), tab);
+    jassert(it != tabNames.end());
+    auto idx = (size_t) std::distance(tabNames.begin(), it);
+
+    auto mm = std::make_unique<ModuleMeterUI>();
+    mm->tapIn = tapIn;
+    mm->tapOut = tapOut;
+    mm->grIndex = grIndex;
+
+    auto setupLabel = [this] (juce::Label& l, const juce::String& text, bool bold)
+    {
+        l.setText(text, juce::dontSendNotification);
+        l.setJustificationType(juce::Justification::centred);
+        l.setFont(juce::Font(juce::FontOptions(9.0f).withStyle(bold ? "Bold" : "Regular")));
+        l.setColour(juce::Label::textColourId, XaLZaColour::textMuted);
+        addChildComponent(l);
+    };
+    setupLabel(mm->capIn, "IN", true);
+    setupLabel(mm->capOut, "OUT", true);
+    setupLabel(mm->dbIn, "-inf", false);
+    setupLabel(mm->dbOut, "-inf", false);
+
+    mm->grLabel.setJustificationType(juce::Justification::centred);
+    mm->grLabel.setFont(juce::Font(juce::FontOptions(9.5f).withStyle("Bold")));
+    mm->grLabel.setColour(juce::Label::textColourId, XaLZaColour::accent2);
+    addChildComponent(mm->grLabel);
+
+    addChildComponent(mm->meterIn);
+    addChildComponent(mm->meterOut);
+
+    auto* ptr = mm.get();
+    moduleMeterStorage.push_back(std::move(mm));
+    moduleMeterByTab[idx] = ptr;
+    return *ptr;
+}
+
 XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     : AudioProcessorEditor(&p), proc(p)
 {
@@ -95,6 +133,7 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     // ---- Tab order matches the mockup's own tab strip exactly ----
     tabNames = { "MACROS", "PRE", "COMP", "OPTO", "EQ", "SAT", "REV", "DLY", "DBL", "RES", "GATE", "ESS", "LIM" };
     pageKnobs.resize(tabNames.size());
+    moduleMeterByTab.resize(tabNames.size(), nullptr);
 
     // ---- Page 0: MACROS overview — one knob per module + Master panel ----
     struct MacroDef { juce::String id; juce::String label; };
@@ -140,6 +179,36 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     addPage("ESS",  { { XID::EssThresh, "Thresh" }, { XID::EssRange, "Range" }, { XID::EssFreq, "Freq" } });
     addPage("LIM",  { { XID::LimInputGain, "InGain" }, { XID::LimCeiling, "Ceiling" }, { XID::LimRelease, "Release" }, { XID::LimClip, "Clip" } });
 
+    // ---- Per-module IN/OUT meters + GR readouts, tapping the real serial chain ----
+    addModuleMeter("PRE",  (int) XaLZaProcessor::TapIn,   (int) XaLZaProcessor::TapPre,  -1);
+    addModuleMeter("GATE", (int) XaLZaProcessor::TapPre,  (int) XaLZaProcessor::TapGate, -1);
+    addModuleMeter("ESS",  (int) XaLZaProcessor::TapGate, (int) XaLZaProcessor::TapEss,  -1);
+    addModuleMeter("COMP", (int) XaLZaProcessor::TapEss,  (int) XaLZaProcessor::TapComp,  0);
+    addModuleMeter("OPTO", (int) XaLZaProcessor::TapComp, (int) XaLZaProcessor::TapOpto,  1);
+    addModuleMeter("EQ",   (int) XaLZaProcessor::TapOpto, (int) XaLZaProcessor::TapEq,   -1);
+    addModuleMeter("RES",  (int) XaLZaProcessor::TapEq,   (int) XaLZaProcessor::TapRes,  -1);
+    addModuleMeter("SAT",  (int) XaLZaProcessor::TapRes,  (int) XaLZaProcessor::TapSat,  -1);
+    addModuleMeter("DBL",  (int) XaLZaProcessor::TapSat,  (int) XaLZaProcessor::TapDbl,  -1);
+    addModuleMeter("REV",  (int) XaLZaProcessor::TapDbl,  (int) XaLZaProcessor::TapRev,  -1);
+    addModuleMeter("DLY",  (int) XaLZaProcessor::TapRev,  (int) XaLZaProcessor::TapDly,  -1);
+    addModuleMeter("LIM",  (int) XaLZaProcessor::TapDly,  (int) XaLZaProcessor::TapLim,   2);
+
+    // ---- Master mini-panel visualisers: real In/Out meters + a stereo goniometer ----
+    auto setupCap = [this] (juce::Label& l, const juce::String& text)
+    {
+        l.setText(text, juce::dontSendNotification);
+        l.setJustificationType(juce::Justification::centred);
+        l.setFont(juce::Font(juce::FontOptions(9.0f).withStyle("Bold")));
+        l.setColour(juce::Label::textColourId, XaLZaColour::textMuted);
+        addChildComponent(l);
+    };
+    setupCap(masterCapIn, "IN");
+    setupCap(masterCapOut, "OUT");
+    setupCap(goniometerCap, "GONIOMETER");
+    addChildComponent(masterMeterIn);
+    addChildComponent(masterMeterOut);
+    addChildComponent(goniometer);
+
     // ---- Tab rail buttons ----
     for (size_t i = 0; i < tabNames.size(); ++i)
     {
@@ -151,8 +220,9 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
         tabButtons.push_back(std::move(btn));
     }
 
-    setSize(800, 480);
+    setSize(900, 560);
     showPage(0);
+    startTimerHz(30);
 }
 
 XaLZaEditor::~XaLZaEditor()
@@ -178,6 +248,21 @@ void XaLZaEditor::showPage(int index)
         mk->slider.setVisible(currentTab == 0);
         mk->label.setVisible(currentTab == 0);
     }
+
+    bool onMacros = (currentTab == 0);
+    masterMeterIn.setVisible(onMacros);
+    masterMeterOut.setVisible(onMacros);
+    masterCapIn.setVisible(onMacros);
+    masterCapOut.setVisible(onMacros);
+    goniometer.setVisible(onMacros);
+    goniometerCap.setVisible(onMacros);
+
+    for (auto* mm : moduleMeterByTab)
+        if (mm != nullptr)
+            mm->setVisible(false);
+    if (currentTab >= 0 && currentTab < (int) moduleMeterByTab.size() && moduleMeterByTab[(size_t) currentTab] != nullptr)
+        moduleMeterByTab[(size_t) currentTab]->setVisible(true);
+
     for (size_t i = 0; i < tabButtons.size(); ++i)
         tabButtons[i]->setToggleState((int) i == currentTab, juce::dontSendNotification);
 
@@ -200,6 +285,77 @@ void XaLZaEditor::layoutKnobRow(const std::vector<KnobUI*>& row, juce::Rectangle
         k->label.setBounds(lbl);
         k->slider.setBounds(cell.withSizeKeepingCentre(knobW, knobH));
     }
+}
+
+void XaLZaEditor::layoutModuleMeter(ModuleMeterUI& mm, juce::Rectangle<int> area)
+{
+    const int blockW = 46, meterH = 40, capH = 11, dbH = 13, blockGap = 18;
+    const int totalW = blockW * 2 + blockGap;
+
+    auto row = area.removeFromTop(capH + meterH + dbH).withWidth(totalW).withRight(area.getRight());
+    auto inBlock  = row.removeFromLeft(blockW);
+    row.removeFromLeft(blockGap);
+    auto outBlock = row;
+
+    auto layBlock = [&] (juce::Rectangle<int> b, juce::Label& cap, LedMeter& meter, juce::Label& db)
+    {
+        cap.setBounds(b.removeFromTop(capH));
+        meter.setBounds(b.removeFromTop(meterH));
+        db.setBounds(b.removeFromTop(dbH));
+    };
+    layBlock(inBlock, mm.capIn, mm.meterIn, mm.dbIn);
+    layBlock(outBlock, mm.capOut, mm.meterOut, mm.dbOut);
+
+    if (mm.grIndex >= 0)
+    {
+        auto grArea = area.removeFromTop(18).withWidth(totalW).withRight(area.getRight());
+        mm.grLabel.setBounds(grArea);
+    }
+}
+
+void XaLZaEditor::timerCallback()
+{
+    masterMeterIn.setDb(proc.getMeterDbL((int) XaLZaProcessor::TapIn), proc.getMeterDbR((int) XaLZaProcessor::TapIn));
+    masterMeterOut.setDb(proc.getMeterDbL((int) XaLZaProcessor::TapOut), proc.getMeterDbR((int) XaLZaProcessor::TapOut));
+
+    auto fmtDb = [] (float l, float r)
+    {
+        float v = juce::jmax(l, r);
+        return v <= -99.0f ? juce::String("-inf") : juce::String(v, 1);
+    };
+
+    for (auto& mmPtr : moduleMeterStorage)
+    {
+        auto& mm = *mmPtr;
+        float inL = proc.getMeterDbL(mm.tapIn), inR = proc.getMeterDbR(mm.tapIn);
+        float outL = proc.getMeterDbL(mm.tapOut), outR = proc.getMeterDbR(mm.tapOut);
+        mm.meterIn.setDb(inL, inR);
+        mm.meterOut.setDb(outL, outR);
+        mm.dbIn.setText(fmtDb(inL, inR), juce::dontSendNotification);
+        mm.dbOut.setText(fmtDb(outL, outR), juce::dontSendNotification);
+
+        if (mm.grIndex >= 0)
+        {
+            float gr = proc.getGrDb(mm.grIndex);
+            mm.grLabel.setText("GR -" + juce::String(gr, 1) + " dB", juce::dontSendNotification);
+        }
+    }
+
+    if (currentTab == 0)
+    {
+        constexpr int numPts = 300;
+        std::vector<std::pair<float, float>> pts;
+        pts.reserve((size_t) numPts);
+        int pos = proc.getScopeWritePos();
+        for (int i = 0; i < numPts; ++i)
+        {
+            int idx = pos - 1 - i;
+            pts.emplace_back(proc.scopeSampleL(idx), proc.scopeSampleR(idx));
+        }
+        goniometer.setPoints(pts);
+    }
+
+    repaint(getLocalBounds().removeFromBottom(footerH));
 }
 
 void XaLZaEditor::paint(juce::Graphics& g)
@@ -234,6 +390,7 @@ void XaLZaEditor::paint(juce::Graphics& g)
     // Tab rail background
     auto body = getLocalBounds();
     body.removeFromTop(titleBarH);
+    body.removeFromBottom(footerH);
     auto rail = body.removeFromLeft(railW);
     g.setColour(XaLZaColour::panelRaised);
     g.fillRect(rail);
@@ -262,12 +419,30 @@ void XaLZaEditor::paint(juce::Graphics& g)
         g.setFont(juce::Font(juce::FontOptions(11.0f).withStyle("Bold")));
         g.drawText("MASTER", masterPanel.removeFromTop(20), juce::Justification::centred);
     }
+
+    // Footer bar — brand line + a live master-output reading (mockup's .footerbar)
+    auto footer = getLocalBounds().removeFromBottom(footerH);
+    g.setColour(XaLZaColour::panelRaised);
+    g.fillRect(footer);
+    g.setColour(XaLZaColour::borderSoft);
+    g.drawLine(0.0f, (float) footer.getY(), (float) getWidth(), (float) footer.getY(), 1.0f);
+
+    g.setFont(juce::Font(juce::FontOptions(10.0f)));
+    g.setColour(XaLZaColour::textMuted);
+    g.drawText("THE XALZA \xe2\x80\x94 Vocal Chain", footer.reduced(14, 0), juce::Justification::centredLeft);
+
+    float outDb = juce::jmax(proc.getMeterDbL((int) XaLZaProcessor::TapOut), proc.getMeterDbR((int) XaLZaProcessor::TapOut));
+    juce::String outText = outDb <= -99.0f ? "OUT  -inf dB" : ("OUT  " + juce::String(outDb, 1) + " dB");
+    g.setFont(juce::Font(juce::FontOptions(10.5f).withStyle("Bold")));
+    g.setColour(outDb > -1.0f ? XaLZaColour::danger : XaLZaColour::textLabel);
+    g.drawText(outText, footer.reduced(14, 0), juce::Justification::centredRight);
 }
 
 void XaLZaEditor::resized()
 {
     auto full = getLocalBounds();
     full.removeFromTop(titleBarH);
+    full.removeFromBottom(footerH);
 
     auto rail = full.removeFromLeft(railW);
     for (size_t i = 0; i < tabButtons.size(); ++i)
@@ -286,6 +461,28 @@ void XaLZaEditor::resized()
             mk->label.setBounds(lbl);
             mk->slider.setBounds(cell.withSizeKeepingCentre(masterKnobW, masterKnobH));
         }
+
+        masterPanel.removeFromTop(6);
+        {
+            auto meterRow = masterPanel.removeFromTop(11 + 34);
+            int colW = (meterRow.getWidth() - 10) / 2;
+            auto inCol = meterRow.removeFromLeft(colW);
+            meterRow.removeFromLeft(10);
+            auto outCol = meterRow;
+
+            masterCapIn.setBounds(inCol.removeFromTop(11));
+            masterMeterIn.setBounds(inCol);
+            masterCapOut.setBounds(outCol.removeFromTop(11));
+            masterMeterOut.setBounds(outCol);
+        }
+
+        masterPanel.removeFromTop(10);
+        goniometerCap.setBounds(masterPanel.removeFromTop(11));
+        {
+            auto side = juce::jmin(masterPanel.getWidth(), masterPanel.getHeight());
+            goniometer.setBounds(masterPanel.withSizeKeepingCentre(side, side).withY(masterPanel.getY()));
+        }
+
         content.removeFromRight(8);
 
         // 4 columns x 3 rows of macro knobs
@@ -303,6 +500,13 @@ void XaLZaEditor::resized()
     }
     else
     {
+        auto* mm = (currentTab >= 0 && currentTab < (int) moduleMeterByTab.size())
+                       ? moduleMeterByTab[(size_t) currentTab] : nullptr;
+        if (mm != nullptr)
+        {
+            auto meterArea = content.removeFromTop(moduleMeterH).reduced(4, 0);
+            layoutModuleMeter(*mm, meterArea);
+        }
         layoutKnobRow(pageKnobs[(size_t) currentTab], content, fineLabelH, fineKnobW, fineKnobH, fineCellW);
     }
 }

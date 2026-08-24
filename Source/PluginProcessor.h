@@ -46,7 +46,38 @@ public:
     juce::AudioProcessorValueTreeState apvts;
     MacroTouchTracker macroTracker;
 
+    // ---- Metering / visualisers: written on the audio thread, read (lock
+    //      free) by the editor's Timer at ~30Hz. Order matches the real
+    //      serial signal chain in processBlock(). ----
+    enum MeterTap
+    {
+        TapIn = 0, TapPre, TapGate, TapEss, TapComp, TapOpto, TapEq, TapRes,
+        TapSat, TapDbl, TapRev, TapDly, TapLim, TapOut, kNumMeterTaps
+    };
+
+    float getMeterDbL(int tap) const noexcept { return meterDbL[(size_t) juce::jlimit(0, kNumMeterTaps - 1, tap)].load(std::memory_order_relaxed); }
+    float getMeterDbR(int tap) const noexcept { return meterDbR[(size_t) juce::jlimit(0, kNumMeterTaps - 1, tap)].load(std::memory_order_relaxed); }
+
+    // Gain-reduction readout (positive dB = amount of reduction): 0=Comp, 1=Opto, 2=Lim
+    float getGrDb(int moduleIdx) const noexcept { return grDb[(size_t) juce::jlimit(0, 2, moduleIdx)].load(std::memory_order_relaxed); }
+
+    // Goniometer: a lock-free ring of decimated post-chain stereo samples.
+    static constexpr int kScopeSize = 1024; // power of two
+    float scopeSampleL(int i) const noexcept { return scopePointsL[(size_t) (i & (kScopeSize - 1))].load(std::memory_order_relaxed); }
+    float scopeSampleR(int i) const noexcept { return scopePointsR[(size_t) (i & (kScopeSize - 1))].load(std::memory_order_relaxed); }
+    int   getScopeWritePos() const noexcept { return scopeWritePos.load(std::memory_order_relaxed); }
+
 private:
+    void updateMeter(int tap, const juce::AudioBuffer<float>& buf, int numSamples, int numCh);
+    void updateGr(int moduleIdx, float preDb, float postDb);
+
+    std::array<std::atomic<float>, kNumMeterTaps> meterDbL, meterDbR;
+    std::array<std::atomic<float>, 3> grDb;
+    float meterAttCoef = 0.3f, meterRelCoef = 0.9995f;
+
+    std::array<std::atomic<float>, kScopeSize> scopePointsL, scopePointsR;
+    std::atomic<int> scopeWritePos { 0 };
+
     double sr = 44100.0;
 
     // ---- 1) Preamp: HPF, clean gain, tanh "character" blended dry/wet ----

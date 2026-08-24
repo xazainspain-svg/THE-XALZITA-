@@ -16,6 +16,49 @@ XaLZaProcessor::XaLZaProcessor()
       apvts(*this, nullptr, "PARAMS", createXaLZaParameterLayout()),
       macroTracker(apvts)
 {
+    for (auto& a : meterDbL) a.store(-100.0f);
+    for (auto& a : meterDbR) a.store(-100.0f);
+    for (auto& a : grDb) a.store(0.0f);
+    for (auto& a : scopePointsL) a.store(0.0f);
+    for (auto& a : scopePointsR) a.store(0.0f);
+}
+
+void XaLZaProcessor::updateMeter(int tap, const juce::AudioBuffer<float>& buf, int numSamples, int numCh)
+{
+    float peakL = 0.0f, peakR = 0.0f;
+    auto* l = buf.getReadPointer(0);
+    for (int n = 0; n < numSamples; ++n)
+        peakL = juce::jmax(peakL, std::abs(l[n]));
+    if (numCh > 1)
+    {
+        auto* r = buf.getReadPointer(1);
+        for (int n = 0; n < numSamples; ++n)
+            peakR = juce::jmax(peakR, std::abs(r[n]));
+    }
+    else
+    {
+        peakR = peakL;
+    }
+
+    float dbL = juce::Decibels::gainToDecibels(peakL, -100.0f);
+    float dbR = juce::Decibels::gainToDecibels(peakR, -100.0f);
+
+    auto smooth = [this] (std::atomic<float>& state, float target)
+    {
+        float prev = state.load(std::memory_order_relaxed);
+        float coef = target > prev ? meterAttCoef : meterRelCoef;
+        state.store(coef * prev + (1.0f - coef) * target, std::memory_order_relaxed);
+    };
+    smooth(meterDbL[(size_t) tap], dbL);
+    smooth(meterDbR[(size_t) tap], dbR);
+}
+
+void XaLZaProcessor::updateGr(int moduleIdx, float preDb, float postDb)
+{
+    float target = juce::jlimit(0.0f, 24.0f, preDb - postDb);
+    float prev = grDb[(size_t) moduleIdx].load(std::memory_order_relaxed);
+    float coef = target > prev ? meterAttCoef : meterRelCoef;
+    grDb[(size_t) moduleIdx].store(coef * prev + (1.0f - coef) * target, std::memory_order_relaxed);
 }
 
 bool XaLZaProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -91,6 +134,9 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     dlyDuckEnv = 0.0f;
     dblPhase1 = dblPhase2 = 0.0f;
     dlyPanPhase = 0.0f;
+
+    meterAttCoef = onePoleCoef(1.0f, sampleRate);
+    meterRelCoef = onePoleCoef(400.0f, sampleRate);
 }
 
 void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -111,6 +157,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     // Master In Gain
     // ---------------------------------------------------------------
     buffer.applyGain(juce::Decibels::decibelsToGain(apvts.getRawParameterValue(XID::MasterInGain)->load()));
+    updateMeter((int) TapIn, buffer, numSamples, numCh);
 
     juce::dsp::AudioBlock<float> block(buffer);
     juce::dsp::ProcessContextReplacing<float> ctx(block);
@@ -142,6 +189,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             }
         }
     }
+    updateMeter((int) TapPre, buffer, numSamples, numCh);
 
     // ---------------------------------------------------------------
     // 2) GATE — envelope-follower expander with hold, attack, release
@@ -184,6 +232,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             if (numCh > 1) r[n] *= gateGain;
         }
     }
+    updateMeter((int) TapGate, buffer, numSamples, numCh);
 
     // ---------------------------------------------------------------
     // 3) DE-ESSER — dynamic peak filter driven by a sibilance-band envelope
@@ -225,6 +274,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             juce::Decibels::decibelsToGain(essGainDb));
         essDynEq.process(ctx);
     }
+    updateMeter((int) TapEss, buffer, numSamples, numCh);
 
     // ---------------------------------------------------------------
     // 4) GLUE COMP — threshold/ratio via juce::dsp, makeup + dry/wet mix
@@ -245,6 +295,22 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         compressor.setAttack(attackMs);
         compressor.setRelease(releaseMs);
         compressor.process(ctx);
+
+        {
+            float inPk = 0.0f, outPk = 0.0f;
+            for (int ch = 0; ch < numCh; ++ch)
+            {
+                auto* di = dryBuffer.getReadPointer(ch);
+                auto* do_ = buffer.getReadPointer(ch);
+                for (int n = 0; n < numSamples; ++n)
+                {
+                    inPk = juce::jmax(inPk, std::abs(di[n]));
+                    outPk = juce::jmax(outPk, std::abs(do_[n]));
+                }
+            }
+            updateGr(0, juce::Decibels::gainToDecibels(inPk, -100.0f), juce::Decibels::gainToDecibels(outPk, -100.0f));
+        }
+
         buffer.applyGain(juce::Decibels::decibelsToGain(makeup));
 
         for (int ch = 0; ch < numCh; ++ch)
@@ -255,6 +321,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
                 wet[n] = dry[n] + (wet[n] - dry[n]) * mixAmt;
         }
     }
+    updateMeter((int) TapComp, buffer, numSamples, numCh);
 
     // ---------------------------------------------------------------
     // 5) OPTO — slow program-dependent 2nd compression stage, dry/wet mix
@@ -271,6 +338,22 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         optoComp.setThreshold(threshDb);
         optoComp.setRatio(4.0f);
         optoComp.process(ctx);
+
+        {
+            float inPk = 0.0f, outPk = 0.0f;
+            for (int ch = 0; ch < numCh; ++ch)
+            {
+                auto* di = dryBuffer.getReadPointer(ch);
+                auto* do_ = buffer.getReadPointer(ch);
+                for (int n = 0; n < numSamples; ++n)
+                {
+                    inPk = juce::jmax(inPk, std::abs(di[n]));
+                    outPk = juce::jmax(outPk, std::abs(do_[n]));
+                }
+            }
+            updateGr(1, juce::Decibels::gainToDecibels(inPk, -100.0f), juce::Decibels::gainToDecibels(outPk, -100.0f));
+        }
+
         buffer.applyGain(juce::Decibels::decibelsToGain(gainDb));
 
         for (int ch = 0; ch < numCh; ++ch)
@@ -281,6 +364,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
                 wet[n] = dry[n] + (wet[n] - dry[n]) * mixAmt;
         }
     }
+    updateMeter((int) TapOpto, buffer, numSamples, numCh);
 
     // ---------------------------------------------------------------
     // 6) EQ 550 — 3-band (low shelf @150Hz / mid peak @1kHz / high shelf @6kHz)
@@ -298,6 +382,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         eqMidPeak.process(ctx);
         eqHighShelf.process(ctx);
     }
+    updateMeter((int) TapEq, buffer, numSamples, numCh);
 
     // ---------------------------------------------------------------
     // 7) RESONANCE — de-resonator: static notch that tames a harsh peak
@@ -318,6 +403,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         *resNotch.state = *juce::dsp::IIR::Coefficients<float>::makePeakFilter(sr, freq, q, juce::Decibels::decibelsToGain(cutDb));
         resNotch.process(ctx);
     }
+    updateMeter((int) TapRes, buffer, numSamples, numCh);
 
     // ---------------------------------------------------------------
     // 8) SATURATOR — tanh drive, tone tilt, soft ceiling, dry/wet mix
@@ -363,6 +449,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             }
         }
     }
+    updateMeter((int) TapSat, buffer, numSamples, numCh);
 
     // ---------------------------------------------------------------
     // 9) DOUBLER — two modulated delay voices layered on top of the dry signal
@@ -414,6 +501,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             }
         }
     }
+    updateMeter((int) TapDbl, buffer, numSamples, numCh);
 
     // ---------------------------------------------------------------
     // 10) REVERB — pre-delay, size/decay, duck, mixed back in
@@ -486,6 +574,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             }
         }
     }
+    updateMeter((int) TapRev, buffer, numSamples, numCh);
 
     // ---------------------------------------------------------------
     // 11) DELAY — ping-pong, spread, duck, auto-pan LFO on the wet signal
@@ -549,6 +638,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             }
         }
     }
+    updateMeter((int) TapDly, buffer, numSamples, numCh);
 
     // ---------------------------------------------------------------
     // 12) LIMITER — input trim, ceiling, release, extra tanh clip stage
@@ -560,9 +650,29 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         float clipAmt   = mt.effectiveByID(XID::LimMacro, XID::LimClip) / 100.0f;
 
         buffer.applyGain(juce::Decibels::decibelsToGain(inGain));
+
+        float limInPk = 0.0f;
+        for (int ch = 0; ch < numCh; ++ch)
+        {
+            auto* d = buffer.getReadPointer(ch);
+            for (int n = 0; n < numSamples; ++n)
+                limInPk = juce::jmax(limInPk, std::abs(d[n]));
+        }
+
         limiter.setThreshold(ceilingDb);
         limiter.setRelease(releaseMs);
         limiter.process(ctx);
+
+        {
+            float limOutPk = 0.0f;
+            for (int ch = 0; ch < numCh; ++ch)
+            {
+                auto* d = buffer.getReadPointer(ch);
+                for (int n = 0; n < numSamples; ++n)
+                    limOutPk = juce::jmax(limOutPk, std::abs(d[n]));
+            }
+            updateGr(2, juce::Decibels::gainToDecibels(limInPk, -100.0f), juce::Decibels::gainToDecibels(limOutPk, -100.0f));
+        }
 
         if (clipAmt > 0.0005f)
         {
@@ -581,6 +691,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             }
         }
     }
+    updateMeter((int) TapLim, buffer, numSamples, numCh);
 
     // ---------------------------------------------------------------
     // Stereo Width — mid/side, Master utility control (not macro-linked)
@@ -603,6 +714,23 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     // Master Out Gain
     // ---------------------------------------------------------------
     buffer.applyGain(juce::Decibels::decibelsToGain(apvts.getRawParameterValue(XID::MasterOutGain)->load()));
+    updateMeter((int) TapOut, buffer, numSamples, numCh);
+
+    // ---------------------------------------------------------------
+    // Goniometer tap — decimated post-chain stereo samples for the UI's
+    // stereo-field scope (every 4th sample is plenty for a visual trace).
+    // ---------------------------------------------------------------
+    {
+        auto* l = buffer.getReadPointer(0);
+        auto* r = numCh > 1 ? buffer.getReadPointer(1) : l;
+        for (int n = 0; n < numSamples; n += 4)
+        {
+            int pos = scopeWritePos.load(std::memory_order_relaxed);
+            scopePointsL[(size_t) (pos & (kScopeSize - 1))].store(l[n], std::memory_order_relaxed);
+            scopePointsR[(size_t) (pos & (kScopeSize - 1))].store(r[n], std::memory_order_relaxed);
+            scopeWritePos.store(pos + 1, std::memory_order_relaxed);
+        }
+    }
 }
 
 juce::AudioProcessorEditor* XaLZaProcessor::createEditor()
