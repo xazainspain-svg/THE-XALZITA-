@@ -429,7 +429,7 @@ void XaLZaEditor::paint(juce::Graphics& g)
 
     g.setFont(juce::Font(juce::FontOptions(10.0f)));
     g.setColour(XaLZaColour::textMuted);
-    g.drawText("THE XALZA \xe2\x80\x94 Vocal Chain", footer.reduced(14, 0), juce::Justification::centredLeft);
+    g.drawText("THE XALZA - Vocal Chain", footer.reduced(14, 0), juce::Justification::centredLeft);
 
     float outDb = juce::jmax(proc.getMeterDbL((int) XaLZaProcessor::TapOut), proc.getMeterDbR((int) XaLZaProcessor::TapOut));
     juce::String outText = outDb <= -99.0f ? "OUT  -inf dB" : ("OUT  " + juce::String(outDb, 1) + " dB");

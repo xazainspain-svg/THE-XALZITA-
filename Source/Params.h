@@ -15,6 +15,7 @@ namespace XID
     static const juce::String MasterInGain  = "MasterInGain";
     static const juce::String MasterOutGain = "MasterOutGain";
     static const juce::String MasterWidth   = "MasterWidth";
+    static const juce::String MasterBypass  = "MasterBypass";
 
     static const juce::String PreMacro = "PreMacro";
     static const juce::String PreGain  = "PreGain";
@@ -111,6 +112,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     add(XID::MasterInGain, "Master In Gain", -24.0f, 24.0f, 0.0f);
     add(XID::MasterOutGain, "Master Out Gain", -24.0f, 24.0f, 0.0f);
     add(XID::MasterWidth, "Stereo Width", 0.0f, 200.0f, 100.0f);
+    p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{ XID::MasterBypass, uid++ }, "Bypass", false));
 
     add(XID::PreMacro, "Pre Intensity", 0.0f, 100.0f, 0.0f);
     add(XID::PreGain, "Pre Gain", 0.0f, 70.0f, 0.0f);

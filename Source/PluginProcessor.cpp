@@ -151,6 +151,27 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     if (numCh <= 0 || numSamples <= 0)
         return;
 
+    // ---------------------------------------------------------------
+    // Bypass — real, host-independent dry passthrough. Meters/goniometer
+    // still update from the dry signal so the UI doesn't look frozen.
+    // ---------------------------------------------------------------
+    if (apvts.getRawParameterValue(XID::MasterBypass)->load() > 0.5f)
+    {
+        for (int tap = 0; tap < (int) kNumMeterTaps; ++tap)
+            updateMeter(tap, buffer, numSamples, numCh);
+
+        auto* l = buffer.getReadPointer(0);
+        auto* r = numCh > 1 ? buffer.getReadPointer(1) : l;
+        for (int n = 0; n < numSamples; n += 4)
+        {
+            int pos = scopeWritePos.load(std::memory_order_relaxed);
+            scopePointsL[(size_t) (pos & (kScopeSize - 1))].store(l[n], std::memory_order_relaxed);
+            scopePointsR[(size_t) (pos & (kScopeSize - 1))].store(r[n], std::memory_order_relaxed);
+            scopeWritePos.store(pos + 1, std::memory_order_relaxed);
+        }
+        return;
+    }
+
     auto& mt = macroTracker;
 
     // ---------------------------------------------------------------
