@@ -3,23 +3,28 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "PluginProcessor.h"
 
-// Same dark palette as the Max for Live device (build_amxd.py PANEL_BG /
-// PANEL_BG_RAISED / MACRO_ACCENT etc.) so the three deliverables (web
-// mockup, M4L device, VST) all look like the same product.
+// Exact palette from the original web mockup artifact (its CSS custom
+// properties, oklch() converted to sRGB) so the plugin looks like the
+// same product: --panel, --panel-2, --panel-3, --border, --border-soft,
+// --text-hi, --text, --text-muted, --accent, --accent2.
 namespace XaLZaColour
 {
-    static const juce::Colour panelBg     { 0xff252525 };
-    static const juce::Colour panelRaised { 0xff2d2d2d };
-    static const juce::Colour panelBorder { 0xff0f0f0f };
-    static const juce::Colour titleText   { 0xffdbdbdb };
-    static const juce::Colour labelText   { 0xffa1a1a1 };
-    static const juce::Colour macroAccent { 0xfff09421 };
-    static const juce::Colour fineFill    { 0xff7a7a7a };
+    static const juce::Colour panelBg      { 0xff272829 };  // --panel
+    static const juce::Colour panelRaised  { 0xff313233 };  // --panel-2
+    static const juce::Colour panelControl { 0xff3c3d3e };  // --panel-3
+    static const juce::Colour border       { 0xff474849 };  // --border
+    static const juce::Colour borderSoft   { 0xff3c3d3f };  // --border-soft
+    static const juce::Colour textHi       { 0xffe7e8e8 };  // --text-hi
+    static const juce::Colour textLabel    { 0xffb0b1b2 };  // --text
+    static const juce::Colour textMuted    { 0xff747476 };  // --text-muted
+    static const juce::Colour accent       { 0xffe78a45 };  // --accent (warm orange)
+    static const juce::Colour accent2      { 0xff33a3b4 };  // --accent2 (teal)
+    static const juce::Colour danger       { 0xffc74b47 };  // --danger
 }
 
-/** Custom rotary knob drawing: a thin track, an accent- or gray-coloured
-    value arc, a pointer line, and a dark cap — deliberately not the
-    stock JUCE look, so it doesn't read as "generic Max/JUCE patch". */
+/** Rotary knob: thin track, accent- or gray-coloured value arc, a
+    pointer line, dark cap — matches the mockup's SVG knob look
+    (knob-svg circle.trk / .fil / .face). */
 class XaLZaLookAndFeel : public juce::LookAndFeel_V4
 {
 public:
@@ -31,11 +36,12 @@ public:
 };
 
 /**
-    Editor layout mirrors the M4L device's presentation panel: a row of
-    large "macro" knobs (one per module, amber accent) across the top of
-    each module's column, fine-tune knobs stacked below them, and a
-    separate raised "Master" utility panel on the right for In/Out gain
-    and Stereo Width.
+    Editor layout mirrors the web mockup: a narrow vertical tab rail on
+    the left (MACROS + the 12 modules, in the mockup's own tab order),
+    and a content area on the right that shows either the Macros
+    overview (12 macro knobs + a Master mini-panel) or the selected
+    module's fine-tune knobs — one page visible at a time, same as the
+    mockup's single-panel-per-tab layout.
 */
 class XaLZaEditor : public juce::AudioProcessorEditor
 {
@@ -54,25 +60,27 @@ private:
         std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
     };
 
-    struct ModuleColumn
-    {
-        juce::String title;
-        KnobUI* macro = nullptr;
-        std::vector<KnobUI*> fine;
-    };
-
     KnobUI& addKnob(const juce::String& paramID, const juce::String& shortLabel, bool accent);
+    void showPage(int index);
+    void layoutKnobRow(const std::vector<KnobUI*>& row, juce::Rectangle<int> area,
+                        int labelH, int knobW, int knobH, int cellW);
 
-    static constexpr int titleBarH   = 30;
-    static constexpr int marginX     = 12;
-    static constexpr int marginY     = 8;
-    static constexpr int masterW     = 130;
+    static constexpr int titleBarH  = 30;
+    static constexpr int railW      = 68;
+    static constexpr int marginX    = 14;
+    static constexpr int marginY    = 12;
+    static constexpr int masterW    = 130;
+
     static constexpr int macroLabelH = 15;
-    static constexpr int macroKnobW  = 56;
+    static constexpr int macroKnobW  = 58;
     static constexpr int macroKnobH  = 76;
-    static constexpr int fineLabelH  = 12;
-    static constexpr int fineKnobW   = 34;
-    static constexpr int fineKnobH   = 50;
+    static constexpr int macroCellW  = 108;
+
+    static constexpr int fineLabelH = 14;
+    static constexpr int fineKnobW  = 60;
+    static constexpr int fineKnobH  = 82;
+    static constexpr int fineCellW  = 96;
+
     static constexpr int masterLabelH = 13;
     static constexpr int masterKnobW  = 44;
     static constexpr int masterKnobH  = 60;
@@ -80,8 +88,11 @@ private:
     XaLZaProcessor& proc;
     XaLZaLookAndFeel laf;
     std::vector<std::unique_ptr<KnobUI>> knobs;
-    std::vector<ModuleColumn> modules;
-    std::vector<KnobUI*> masterKnobs;
+    std::vector<juce::String> tabNames;
+    std::vector<std::vector<KnobUI*>> pageKnobs;   // one entry per tab
+    std::vector<KnobUI*> masterKnobs;              // shown on the Macros page only
+    std::vector<std::unique_ptr<juce::TextButton>> tabButtons;
+    int currentTab = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(XaLZaEditor)
 };

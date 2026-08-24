@@ -4,12 +4,15 @@
 #include "Params.h"
 
 /**
-    The XaLZa — vocal chain: Preamp -> Compressor -> EQ -> Saturator ->
-    [Reverb + Delay sends, ducked] -> Limiter -> Stereo Width, with
-    Master In/Out gain around the outside. Same 8-module design as the
-    Max for Live device and the web mockup; every macro-linked parameter
-    is resolved each block via MacroTouchTracker so "last touched wins"
-    behaves identically across all three deliverables.
+    The XaLZa — the full 12-module vocal chain from the web mockup:
+
+      Preamp -> Gate -> De-esser -> Glue Comp -> Opto -> EQ 550 ->
+      Resonance -> Saturator -> Doubler -> Reverb -> Delay -> Limiter
+
+    with Master In/Out gain and Stereo Width around the outside. Every
+    macro-linked parameter is resolved each block via MacroTouchTracker
+    so "last touched wins" behaves identically to the web mockup and the
+    Max for Live device.
 */
 class XaLZaProcessor : public juce::AudioProcessor
 {
@@ -46,40 +49,61 @@ public:
 private:
     double sr = 44100.0;
 
-    // Preamp: high-pass filter, clean gain, and a tanh "character" stage
-    // blended in dry/wet (character is not full-on distortion, it's a
-    // subtle warmth control, hence the blend rather than 100% wet).
+    // ---- 1) Preamp: HPF, clean gain, tanh "character" blended dry/wet ----
     juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
                                     juce::dsp::IIR::Coefficients<float>> preHpf;
 
-    // Compressor (attack/release are fixed — only threshold/ratio/makeup
-    // are exposed as controls, matching the M4L device).
+    // ---- 2) Gate: envelope-follower expander/gate with hold ----
+    float gateEnv = 0.0f;
+    float gateGain = 1.0f;   // smoothed linear gain currently applied
+    int   gateHoldCounter = 0;
+
+    // ---- 3) De-esser: dynamic peak filter driven by a sibilance-band ----
+    juce::dsp::IIR::Filter<float> essDetectL, essDetectR;   // band detector (not applied to main signal)
+    float essEnv = 0.0f;
+    float essGainDb = 0.0f;  // smoothed current attenuation (negative dB)
+    juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
+                                    juce::dsp::IIR::Coefficients<float>> essDynEq;
+
+    // ---- 4) Glue Comp ----
     juce::dsp::Compressor<float> compressor;
 
-    // 2-band shelving EQ
-    juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
-                                    juce::dsp::IIR::Coefficients<float>> eqLowShelf;
-    juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
-                                    juce::dsp::IIR::Coefficients<float>> eqHighShelf;
+    // ---- 5) Opto (slow, program-dependent 2nd compressor stage) ----
+    juce::dsp::Compressor<float> optoComp;
 
-    // Reverb + ping-pong delay, both run as parallel sends off the main
-    // signal and mixed back in, each duck-able by the dry signal's level.
+    // ---- 6) EQ 550 — 3-band (low shelf / mid peak / high shelf) ----
+    juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
+                                    juce::dsp::IIR::Coefficients<float>> eqLowShelf, eqMidPeak, eqHighShelf;
+
+    // ---- 7) Resonance — static de-resonator notch (tames a harsh peak) ----
+    juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
+                                    juce::dsp::IIR::Coefficients<float>> resNotch;
+
+    // ---- 8) Saturator — tanh drive + tone tilt + soft ceiling, dry/wet mix ----
+    juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
+                                    juce::dsp::IIR::Coefficients<float>> satTone;
+
+    // ---- 9) Doubler — two modulated delay voices (chorus-style detune) ----
+    juce::dsp::DelayLine<float> dblDelayL, dblDelayR;
+    float dblPhase1 = 0.0f, dblPhase2 = 0.0f;
+
+    // ---- 10) Reverb, with its own pre-delay line + duck envelope ----
     juce::dsp::Reverb reverb;
-    juce::dsp::DelayLine<float> delayL, delayR;
+    juce::dsp::DelayLine<float> revPreDelayL, revPreDelayR;
+    float revDuckEnv = 0.0f;
 
-    // Limiter (ceiling / brickwall stage, with its own input trim)
+    // ---- 11) Delay — ping-pong with spread, duck, and an auto-pan LFO ----
+    juce::dsp::DelayLine<float> delayL, delayR;
+    float dlyDuckEnv = 0.0f;
+    float dlyPanPhase = 0.0f;
+
+    // ---- 12) Limiter — input trim, ceiling, release, extra clip stage ----
     juce::dsp::Limiter<float> limiter;
 
-    // One-pole envelope follower on the dry signal, shared by both sends'
-    // duck amounts (each send has its own Duck knob controlling how much
-    // that envelope pulls its wet level down).
-    float duckEnvShared = 0.0f;
-
-    // Pre-allocated scratch buffers for the reverb/delay sends and the
-    // per-sample duck envelope, sized in prepareToPlay so processBlock()
-    // doesn't allocate.
-    juce::AudioBuffer<float> revBuffer, dlyBuffer;
-    juce::AudioBuffer<float> duckEnvBuffer;
+    // Pre-allocated scratch buffers, sized in prepareToPlay so processBlock()
+    // never allocates on the audio thread.
+    juce::AudioBuffer<float> dryBuffer;               // reused per dry/wet stage
+    juce::AudioBuffer<float> revBuffer, dlyBuffer, dblBuffer;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(XaLZaProcessor)
 };
