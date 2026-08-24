@@ -1,0 +1,29 @@
+name: Compilar The XaLZa (VST3 para Windows)
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Descargar el codigo del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar el proyecto (descarga JUCE)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Compilar el plugin
+        run: cmake --build build --config Release
+
+      - name: Mostrar donde quedo el .vst3 (para depurar si algo falla)
+        shell: bash
+        run: find build -iname "*.vst3" -maxdepth 8 || true
+
+      - name: Subir el .vst3 como resultado descargable
+        uses: actions/upload-artifact@v4
+        with:
+          name: The-XaLZa-VST3-Windows
+          path: build/XaLZa_artefacts/Release/VST3/*.vst3
+          if-no-files-found: error
