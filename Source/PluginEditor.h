@@ -142,7 +142,7 @@ public:
     void pushDb(float db)
     {
         float target = juce::jlimit(0.0f, 1.0f, (db - minDb) / (maxDb - minDb));
-        constexpr float tau = 0.3f;    // seconds — classic VU integration time
+        constexpr float tau = 0.13f;   // seconds — snappier than a classic 300ms VU
         constexpr float dt  = 1.0f / 30.0f;
         float coef = std::exp(-dt / tau);
         smoothed = coef * smoothed + (1.0f - coef) * target;
@@ -231,7 +231,7 @@ public:
                 peak = juce::jmax(peak, fftData[bBin]);
             float db = juce::Decibels::gainToDecibels(peak, -100.0f);
             float norm = juce::jlimit(0.0f, 1.0f, (db + 84.0f) / 84.0f);
-            bars[i] = juce::jmax(norm, bars[i] * 0.72f);   // fast attack, gentle decay
+            bars[i] = juce::jmax(norm, bars[i] * 0.42f);   // fast attack, fast decay — real-time feel
         }
         repaint();
     }
@@ -268,6 +268,130 @@ private:
     float fftData[2 * fftSize];
     float bars[numBars] = {};
     float sampleRateHint = 44100.0f;
+};
+
+/** Oscilloscope-style raw waveform trace. Fed a fixed window of raw,
+    genuinely POST-process samples each frame by the editor's Timer — used
+    for modules whose visualiser is "show me the actual waveform this
+    stage produced" (Opto) rather than a level history. A second trace can
+    be overlaid (e.g. Saturator's processed-vs-dry) — the primary trace
+    (a) is drawn last/brighter so it reads as "the result" over the
+    secondary (b) reference. */
+class WaveformScope : public juce::Component
+{
+public:
+    static constexpr int numPoints = 256;
+
+    void setSamples(const float* trace, const float* trace2 = nullptr)
+    {
+        std::copy(trace, trace + numPoints, a);
+        haveB = (trace2 != nullptr);
+        if (haveB)
+            std::copy(trace2, trace2 + numPoints, b);
+        repaint();
+    }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto bnds = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(bnds);
+        g.setColour(XaLZaColour::borderSoft);
+        g.drawLine(bnds.getX(), bnds.getCentreY(), bnds.getRight(), bnds.getCentreY(), 0.6f);
+        g.setColour(XaLZaColour::border);
+        g.drawRect(bnds, 1.0f);
+
+        auto drawTrace = [&] (const float* d, juce::Colour c)
+        {
+            juce::Path p;
+            for (int i = 0; i < numPoints; ++i)
+            {
+                float x = bnds.getX() + bnds.getWidth() * (float) i / (float) (numPoints - 1);
+                float y = bnds.getCentreY() - juce::jlimit(-1.0f, 1.0f, d[i]) * bnds.getHeight() * 0.46f;
+                if (i == 0) p.startNewSubPath(x, y); else p.lineTo(x, y);
+            }
+            g.setColour(c);
+            g.strokePath(p, juce::PathStrokeType(1.4f));
+        };
+
+        if (haveB)
+            drawTrace(b, XaLZaColour::textMuted.withAlpha(0.65f));
+        drawTrace(a, haveB ? XaLZaColour::accent : XaLZaColour::accent2);
+    }
+
+    float a[numPoints] = {}, b[numPoints] = {};
+    bool haveB = false;
+};
+
+/** Scrolling history line chart — one or two traces — for envelope,
+    gain-reduction, or suppression-depth readouts that read best as "the
+    story over time" rather than a raw waveform. push() takes already
+    normalised [0,1] values (callers map their own dB range) so the same
+    component serves every module's own scale; pass NaN for valueB on
+    single-line modules. Called once per Timer tick (30Hz) so the trace
+    scrolls in real time — no extra smoothing beyond whatever ballistics
+    already live in the processor readout itself. */
+class EnvelopeGraph : public juce::Component
+{
+public:
+    EnvelopeGraph()
+    {
+        histA.fill(std::numeric_limits<float>::quiet_NaN());
+        histB.fill(std::numeric_limits<float>::quiet_NaN());
+    }
+
+    void push(float normA, float normB = std::numeric_limits<float>::quiet_NaN())
+    {
+        histA[(size_t) writePos] = normA;
+        histB[(size_t) writePos] = normB;
+        if (!std::isnan(normB))
+            hasB = true;
+        writePos = (writePos + 1) % histLen;
+        repaint();
+    }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto bnds = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(bnds);
+        g.setColour(XaLZaColour::borderSoft);
+        for (int i = 1; i < 4; ++i)
+        {
+            float y = bnds.getY() + bnds.getHeight() * (float) i / 4.0f;
+            g.drawLine(bnds.getX(), y, bnds.getRight(), y, 0.5f);
+        }
+        g.setColour(XaLZaColour::border);
+        g.drawRect(bnds, 1.0f);
+
+        auto drawLine = [&] (const std::array<float, (size_t) histLen>& hist, juce::Colour c)
+        {
+            juce::Path p;
+            bool started = false;
+            for (int i = 0; i < histLen; ++i)
+            {
+                int idx = (writePos + i) % histLen;
+                float v = hist[(size_t) idx];
+                if (std::isnan(v)) continue;
+                float x = bnds.getX() + bnds.getWidth() * (float) i / (float) (histLen - 1);
+                float y = bnds.getBottom() - juce::jlimit(0.0f, 1.0f, v) * bnds.getHeight();
+                if (!started) { p.startNewSubPath(x, y); started = true; } else p.lineTo(x, y);
+            }
+            g.setColour(c);
+            g.strokePath(p, juce::PathStrokeType(1.6f));
+        };
+
+        drawLine(histA, XaLZaColour::accent2);
+        if (hasB)
+            drawLine(histB, XaLZaColour::accent);
+    }
+
+    static constexpr int histLen = 150;   // 5 seconds of history at 30Hz
+    std::array<float, (size_t) histLen> histA, histB;
+    int writePos = 0;
+    bool hasB = false;
 };
 
 /**
@@ -370,14 +494,43 @@ private:
     juce::TextButton bypassButton { "BYPASS" };
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> bypassAttachment;
 
-    // Module-specific "big" visualisers, shown only on their own page:
-    // a real VU gauge on Preamp (reading the module's input level), and a
-    // real FFT spectrum analyser on EQ 550 (reading the post-EQ signal).
+    // Module-specific "big" visualisers, shown only on their own page. Each
+    // one reads genuinely POST that module's own processing (never the
+    // module's input), wired in natural signal-chain order:
+    //   PRE: analog-style VU gauge (input level)
+    //   GATE: gate-reduction depth history
+    //   ESS: sibilance-band level + reduction depth, dual history
+    //   COMP: gain-reduction + output level, dual history
+    //   OPTO: post-Opto oscilloscope (real raw waveform)
+    //   EQ: real FFT spectrum analyser (post-EQ signal)
+    //   RES: dynamic-suppression depth history
+    //   SAT: waveform in-vs-out oscilloscope (dual trace)
     VUMeter preVu;
     juce::Label preVuTitle;
+    EnvelopeGraph gateEnvGraph;
+    juce::Label gateEnvTitle;
+    EnvelopeGraph essEnvGraph;
+    juce::Label essEnvTitle;
+    EnvelopeGraph compGrGraph;
+    juce::Label compGrTitle;
+    WaveformScope optoScope;
+    juce::Label optoScopeTitle;
     SpectrumAnalyzer eqSpectrum;
     juce::Label eqSpectrumTitle;
-    int preTabIndex = 1, eqTabIndex = 4;   // resolved from tabNames in the constructor
+    EnvelopeGraph resSuppressGraph;
+    juce::Label resSuppressTitle;
+    WaveformScope satScope;
+    juce::Label satScopeTitle;
+
+    // Resolved from tabNames in the constructor.
+    int preTabIndex = 1, gateTabIndex = 10, essTabIndex = 11, compTabIndex = 2,
+        optoTabIndex = 3, eqTabIndex = 4, resTabIndex = 9, satTabIndex = 5;
+
+    // Generic {tab, component, title} list used by showPage()/resized() so
+    // every "big viz" page shares one layout path instead of one
+    // special-case per module.
+    struct BigViz { int tabIndex = -1; juce::Component* comp = nullptr; juce::Label* title = nullptr; };
+    std::vector<BigViz> bigViz;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(XaLZaEditor)
 };

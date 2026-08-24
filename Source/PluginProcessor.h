@@ -73,12 +73,49 @@ public:
     float specSample(int i) const noexcept { return specRing[(size_t) (i & (kSpecSize - 1))].load(std::memory_order_relaxed); }
     int   getSpecWritePos() const noexcept { return specWritePos.load(std::memory_order_relaxed); }
 
+    // Generic raw-sample taps for the remaining per-module visualisers
+    // (oscilloscopes / harmonic bars). Each is genuinely POST that module's
+    // own processing — never the module's input — so every visualiser shows
+    // what that stage actually did to the signal.
+    enum RawTap { RawPre = 0, RawGate, RawSatIn, RawSatOut, RawOpto, kNumRawTaps };
+    static constexpr int kRawSize = 8192; // power of two
+    float rawSample(int tap, int i) const noexcept
+    {
+        auto t = (size_t) juce::jlimit(0, kNumRawTaps - 1, tap);
+        return rawRing[t][(size_t) (i & (kRawSize - 1))].load(std::memory_order_relaxed);
+    }
+    int getRawWritePos(int tap) const noexcept
+    {
+        return rawWritePos[(size_t) juce::jlimit(0, kNumRawTaps - 1, tap)].load(std::memory_order_relaxed);
+    }
+
+    // Preamp HPF cutoff, read directly by the UI to draw an analytic
+    // frequency-response curve (no audio tap needed for that one).
+    float getCurrentHpfHz() const noexcept { return lastHpfHz.load(std::memory_order_relaxed); }
+
+    // Per-block readouts for the modules whose visualiser is an envelope /
+    // suppression-depth line rather than a raw waveform or GR percentage.
+    float getGateGrDb() const noexcept { return gateGrDbUI.load(std::memory_order_relaxed); }
+    float getEssBandDb() const noexcept { return essBandDbUI.load(std::memory_order_relaxed); }
+    float getEssReductionDb() const noexcept { return essReductionDbUI.load(std::memory_order_relaxed); }
+    float getResCutDb() const noexcept { return resCutDbUI.load(std::memory_order_relaxed); }
+
 private:
     void updateMeter(int tap, const juce::AudioBuffer<float>& buf, int numSamples, int numCh);
     void updateGr(int moduleIdx, float preDb, float postDb);
+    void pushRaw(int tap, const juce::AudioBuffer<float>& buf, int numSamples, int numCh);
 
     std::array<std::atomic<float>, kSpecSize> specRing;
     std::atomic<int> specWritePos { 0 };
+
+    std::array<std::array<std::atomic<float>, kRawSize>, kNumRawTaps> rawRing;
+    std::array<std::atomic<int>, kNumRawTaps> rawWritePos;
+    std::atomic<float> lastHpfHz { 20.0f };
+
+    std::atomic<float> gateGrDbUI { 0.0f };
+    std::atomic<float> essBandDbUI { -100.0f };
+    std::atomic<float> essReductionDbUI { 0.0f };
+    std::atomic<float> resCutDbUI { 0.0f };
 
     std::array<std::atomic<float>, kNumMeterTaps> meterDbL, meterDbR;
     std::array<std::atomic<float>, 3> grDb;

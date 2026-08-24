@@ -22,6 +22,8 @@ XaLZaProcessor::XaLZaProcessor()
     for (auto& a : scopePointsL) a.store(0.0f);
     for (auto& a : scopePointsR) a.store(0.0f);
     for (auto& a : specRing) a.store(0.0f);
+    for (auto& ring : rawRing) for (auto& a : ring) a.store(0.0f);
+    for (auto& a : rawWritePos) a.store(0);
 }
 
 void XaLZaProcessor::updateMeter(int tap, const juce::AudioBuffer<float>& buf, int numSamples, int numCh)
@@ -60,6 +62,19 @@ void XaLZaProcessor::updateGr(int moduleIdx, float preDb, float postDb)
     float prev = grDb[(size_t) moduleIdx].load(std::memory_order_relaxed);
     float coef = target > prev ? meterAttCoef : meterRelCoef;
     grDb[(size_t) moduleIdx].store(coef * prev + (1.0f - coef) * target, std::memory_order_relaxed);
+}
+
+void XaLZaProcessor::pushRaw(int tap, const juce::AudioBuffer<float>& buf, int numSamples, int numCh)
+{
+    auto t = (size_t) juce::jlimit(0, kNumRawTaps - 1, tap);
+    auto* l = buf.getReadPointer(0);
+    auto* r = numCh > 1 ? buf.getReadPointer(1) : l;
+    for (int n = 0; n < numSamples; ++n)
+    {
+        int pos = rawWritePos[t].load(std::memory_order_relaxed);
+        rawRing[t][(size_t) (pos & (kRawSize - 1))].store(0.5f * (l[n] + r[n]), std::memory_order_relaxed);
+        rawWritePos[t].store(pos + 1, std::memory_order_relaxed);
+    }
 }
 
 bool XaLZaProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -137,7 +152,7 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     dlyPanPhase = 0.0f;
 
     meterAttCoef = onePoleCoef(1.0f, sampleRate);
-    meterRelCoef = onePoleCoef(400.0f, sampleRate);
+    meterRelCoef = onePoleCoef(130.0f, sampleRate);   // fast, real-time feel — was 400ms
 }
 
 void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -188,8 +203,9 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     // 1) PREAMP — HPF, clean gain, tanh "character" blended dry/wet
     // ---------------------------------------------------------------
     {
-        float hpfHz = mt.effectiveByID(XID::PreMacro, XID::PreHPF);
-        *preHpf.state = *juce::dsp::IIR::Coefficients<float>::makeHighPass(sr, juce::jlimit(20.0f, 500.0f, hpfHz));
+        float hpfHz = juce::jlimit(20.0f, 500.0f, mt.effectiveByID(XID::PreMacro, XID::PreHPF));
+        lastHpfHz.store(hpfHz, std::memory_order_relaxed);
+        *preHpf.state = *juce::dsp::IIR::Coefficients<float>::makeHighPass(sr, hpfHz);
         preHpf.process(ctx);
 
         buffer.applyGain(juce::Decibels::decibelsToGain(mt.effectiveByID(XID::PreMacro, XID::PreGain)));
@@ -212,6 +228,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         }
     }
     updateMeter((int) TapPre, buffer, numSamples, numCh);
+    pushRaw((int) RawPre, buffer, numSamples, numCh);
 
     // ---------------------------------------------------------------
     // 2) GATE — envelope-follower expander with hold, attack, release
@@ -253,8 +270,11 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             l[n] *= gateGain;
             if (numCh > 1) r[n] *= gateGain;
         }
+        gateGrDbUI.store(juce::jlimit(0.0f, 60.0f, -juce::Decibels::gainToDecibels(gateGain, -60.0f)),
+                          std::memory_order_relaxed);
     }
     updateMeter((int) TapGate, buffer, numSamples, numCh);
+    pushRaw((int) RawGate, buffer, numSamples, numCh);
 
     // ---------------------------------------------------------------
     // 3) DE-ESSER — dynamic peak filter driven by a sibilance-band envelope
@@ -295,6 +315,9 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             sr, juce::jlimit(1000.0f, 16000.0f, freqHz), 2.5f,
             juce::Decibels::decibelsToGain(essGainDb));
         essDynEq.process(ctx);
+
+        essBandDbUI.store(juce::Decibels::gainToDecibels(essEnv, -100.0f), std::memory_order_relaxed);
+        essReductionDbUI.store(essGainDb, std::memory_order_relaxed);
     }
     updateMeter((int) TapEss, buffer, numSamples, numCh);
 
@@ -387,6 +410,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         }
     }
     updateMeter((int) TapOpto, buffer, numSamples, numCh);
+    pushRaw((int) RawOpto, buffer, numSamples, numCh);
 
     // ---------------------------------------------------------------
     // 6) EQ 550 — 3-band (low shelf @150Hz / mid peak @1kHz / high shelf @6kHz)
@@ -436,11 +460,13 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         float freq = juce::jlimit(40.0f, 18000.0f, std::sqrt(juce::jmax(1.0f, lowHz) * juce::jmax(1.0f, highHz)));
         float q = juce::jmap(sharpness, 0.0f, 1.0f, 0.5f, 8.0f);
         float cutDb = notchLimit * amount;
+        resCutDbUI.store(cutDb, std::memory_order_relaxed);
 
         *resNotch.state = *juce::dsp::IIR::Coefficients<float>::makePeakFilter(sr, freq, q, juce::Decibels::decibelsToGain(cutDb));
         resNotch.process(ctx);
     }
     updateMeter((int) TapRes, buffer, numSamples, numCh);
+    pushRaw((int) RawSatIn, buffer, numSamples, numCh);
 
     // ---------------------------------------------------------------
     // 8) SATURATOR — tanh drive, tone tilt, soft ceiling, dry/wet mix
@@ -487,6 +513,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         }
     }
     updateMeter((int) TapSat, buffer, numSamples, numCh);
+    pushRaw((int) RawSatOut, buffer, numSamples, numCh);
 
     // ---------------------------------------------------------------
     // 9) DOUBLER — two modulated delay voices layered on top of the dry signal

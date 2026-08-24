@@ -228,7 +228,7 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     bypassAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         proc.apvts, XID::MasterBypass, bypassButton);
 
-    // ---- Preamp VU gauge + EQ spectrum analyser ----
+    // ---- Per-module "big" post-process visualisers, natural chain order ----
     auto setupVizLabel = [this] (juce::Label& l, const juce::String& text)
     {
         l.setText(text, juce::dontSendNotification);
@@ -237,17 +237,48 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
         l.setColour(juce::Label::textColourId, XaLZaColour::textMuted);
         addChildComponent(l);
     };
-    setupVizLabel(preVuTitle, "INPUT LEVEL - VU");
-    setupVizLabel(eqSpectrumTitle, "RESPONSE SPECTRUM (POST-EQ)");
+    setupVizLabel(preVuTitle,         "INPUT LEVEL - VU");
+    setupVizLabel(gateEnvTitle,       "GATE REDUCTION");
+    setupVizLabel(essEnvTitle,        "SIBILANCE BAND + REDUCTION");
+    setupVizLabel(compGrTitle,        "GAIN REDUCTION + OUTPUT");
+    setupVizLabel(optoScopeTitle,     "POST-OPTO OSCILLOSCOPE");
+    setupVizLabel(eqSpectrumTitle,    "RESPONSE SPECTRUM (POST-EQ)");
+    setupVizLabel(resSuppressTitle,   "DYNAMIC SUPPRESSION");
+    setupVizLabel(satScopeTitle,      "WAVEFORM: IN VS OUT");
     addChildComponent(preVu);
+    addChildComponent(gateEnvGraph);
+    addChildComponent(essEnvGraph);
+    addChildComponent(compGrGraph);
+    addChildComponent(optoScope);
     addChildComponent(eqSpectrum);
+    addChildComponent(resSuppressGraph);
+    addChildComponent(satScope);
     eqSpectrum.setSampleRate(proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0);
+
+    auto resolveTab = [this] (const juce::String& tab, int fallback) -> int
     {
-        auto itPre = std::find(tabNames.begin(), tabNames.end(), juce::String("PRE"));
-        if (itPre != tabNames.end()) preTabIndex = (int) std::distance(tabNames.begin(), itPre);
-        auto itEq = std::find(tabNames.begin(), tabNames.end(), juce::String("EQ"));
-        if (itEq != tabNames.end()) eqTabIndex = (int) std::distance(tabNames.begin(), itEq);
-    }
+        auto it = std::find(tabNames.begin(), tabNames.end(), tab);
+        return it != tabNames.end() ? (int) std::distance(tabNames.begin(), it) : fallback;
+    };
+    preTabIndex  = resolveTab("PRE",  preTabIndex);
+    gateTabIndex = resolveTab("GATE", gateTabIndex);
+    essTabIndex  = resolveTab("ESS",  essTabIndex);
+    compTabIndex = resolveTab("COMP", compTabIndex);
+    optoTabIndex = resolveTab("OPTO", optoTabIndex);
+    eqTabIndex   = resolveTab("EQ",   eqTabIndex);
+    resTabIndex  = resolveTab("RES",  resTabIndex);
+    satTabIndex  = resolveTab("SAT",  satTabIndex);
+
+    bigViz = {
+        { preTabIndex,  &preVu,            &preVuTitle },
+        { gateTabIndex, &gateEnvGraph,     &gateEnvTitle },
+        { essTabIndex,  &essEnvGraph,      &essEnvTitle },
+        { compTabIndex, &compGrGraph,      &compGrTitle },
+        { optoTabIndex, &optoScope,        &optoScopeTitle },
+        { eqTabIndex,   &eqSpectrum,       &eqSpectrumTitle },
+        { resTabIndex,  &resSuppressGraph, &resSuppressTitle },
+        { satTabIndex,  &satScope,         &satScopeTitle },
+    };
 
     setSize(900, 560);
     showPage(0);
@@ -295,13 +326,12 @@ void XaLZaEditor::showPage(int index)
     for (size_t i = 0; i < tabButtons.size(); ++i)
         tabButtons[i]->setToggleState((int) i == currentTab, juce::dontSendNotification);
 
-    bool onPre = (currentTab == preTabIndex);
-    preVu.setVisible(onPre);
-    preVuTitle.setVisible(onPre);
-
-    bool onEq = (currentTab == eqTabIndex);
-    eqSpectrum.setVisible(onEq);
-    eqSpectrumTitle.setVisible(onEq);
+    for (auto& bv : bigViz)
+    {
+        bool on = (currentTab == bv.tabIndex);
+        bv.comp->setVisible(on);
+        bv.title->setVisible(on);
+    }
 
     resized();
     repaint();
@@ -379,11 +409,38 @@ void XaLZaEditor::timerCallback()
     }
 
     // Only do the expensive per-tab visualisers' work while their page is
-    // actually showing.
+    // actually showing. Every one of these reads genuinely POST that
+    // module's own processing (never the module's input).
     if (currentTab == preTabIndex)
     {
         preVu.pushDb(juce::jmax(proc.getMeterDbL((int) XaLZaProcessor::TapIn),
                                  proc.getMeterDbR((int) XaLZaProcessor::TapIn)));
+    }
+    else if (currentTab == gateTabIndex)
+    {
+        gateEnvGraph.push(juce::jlimit(0.0f, 1.0f, proc.getGateGrDb() / 60.0f));
+    }
+    else if (currentTab == essTabIndex)
+    {
+        float bandNorm = juce::jlimit(0.0f, 1.0f, (proc.getEssBandDb() + 60.0f) / 60.0f);
+        float redNorm  = juce::jlimit(0.0f, 1.0f, -proc.getEssReductionDb() / 24.0f);
+        essEnvGraph.push(bandNorm, redNorm);
+    }
+    else if (currentTab == compTabIndex)
+    {
+        float grNorm = juce::jlimit(0.0f, 1.0f, proc.getGrDb(0) / 24.0f);
+        float outDbC = juce::jmax(proc.getMeterDbL((int) XaLZaProcessor::TapComp),
+                                   proc.getMeterDbR((int) XaLZaProcessor::TapComp));
+        float outNorm = juce::jlimit(0.0f, 1.0f, (outDbC + 50.0f) / 50.0f);
+        compGrGraph.push(grNorm, outNorm);
+    }
+    else if (currentTab == optoTabIndex)
+    {
+        float buf[WaveformScope::numPoints];
+        int pos = proc.getRawWritePos((int) XaLZaProcessor::RawOpto);
+        for (int i = 0; i < WaveformScope::numPoints; ++i)
+            buf[i] = proc.rawSample((int) XaLZaProcessor::RawOpto, pos - WaveformScope::numPoints + i);
+        optoScope.setSamples(buf);
     }
     else if (currentTab == eqTabIndex)
     {
@@ -393,6 +450,22 @@ void XaLZaEditor::timerCallback()
         for (int i = 0; i < SpectrumAnalyzer::fftSize; ++i)
             specBuf[i] = proc.specSample(pos - SpectrumAnalyzer::fftSize + i);
         eqSpectrum.update(specBuf);
+    }
+    else if (currentTab == resTabIndex)
+    {
+        resSuppressGraph.push(juce::jlimit(0.0f, 1.0f, -proc.getResCutDb() / 24.0f));
+    }
+    else if (currentTab == satTabIndex)
+    {
+        float bufIn[WaveformScope::numPoints], bufOut[WaveformScope::numPoints];
+        int posIn  = proc.getRawWritePos((int) XaLZaProcessor::RawSatIn);
+        int posOut = proc.getRawWritePos((int) XaLZaProcessor::RawSatOut);
+        for (int i = 0; i < WaveformScope::numPoints; ++i)
+        {
+            bufIn[i]  = proc.rawSample((int) XaLZaProcessor::RawSatIn,  posIn  - WaveformScope::numPoints + i);
+            bufOut[i] = proc.rawSample((int) XaLZaProcessor::RawSatOut, posOut - WaveformScope::numPoints + i);
+        }
+        satScope.setSamples(bufOut, bufIn);   // out = primary/accent, in = muted reference
     }
 
     if (currentTab == 0)
@@ -564,7 +637,11 @@ void XaLZaEditor::resized()
             layoutModuleMeter(*mm, meterArea);
         }
 
-        if (currentTab == preTabIndex || currentTab == eqTabIndex)
+        auto* bv = (BigViz*) nullptr;
+        for (auto& b : bigViz)
+            if (b.tabIndex == currentTab) { bv = &b; break; }
+
+        if (bv != nullptr)
         {
             auto knobArea = content.removeFromTop(fineLabelH + fineKnobH + 14);
             layoutKnobRow(pageKnobs[(size_t) currentTab], knobArea, fineLabelH, fineKnobW, fineKnobH, fineCellW);
@@ -573,16 +650,13 @@ void XaLZaEditor::resized()
             auto titleRow = content.removeFromTop(bigVizTitleH);
             auto vizArea = content.removeFromTop(bigVizH);
 
-            if (currentTab == preTabIndex)
-            {
-                preVuTitle.setBounds(titleRow);
-                preVu.setBounds(vizArea.withSizeKeepingCentre(juce::jmin(vizArea.getWidth(), 320), vizArea.getHeight()));
-            }
+            bv->title->setBounds(titleRow);
+            // The VU gauge reads best narrower/centred; every other big viz
+            // (line charts, oscilloscopes, spectrum) fills the full width.
+            if (bv->comp == (juce::Component*) &preVu)
+                bv->comp->setBounds(vizArea.withSizeKeepingCentre(juce::jmin(vizArea.getWidth(), 320), vizArea.getHeight()));
             else
-            {
-                eqSpectrumTitle.setBounds(titleRow);
-                eqSpectrum.setBounds(vizArea);
-            }
+                bv->comp->setBounds(vizArea);
         }
         else
         {
