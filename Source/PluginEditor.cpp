@@ -220,6 +220,35 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
         tabButtons.push_back(std::move(btn));
     }
 
+    // ---- Global bypass button (title bar) — real dry passthrough ----
+    bypassButton.setClickingTogglesState(true);
+    bypassButton.setColour(juce::TextButton::buttonOnColourId, XaLZaColour::accent);
+    bypassButton.setColour(juce::TextButton::textColourOnId, XaLZaColour::panelBg);
+    addAndMakeVisible(bypassButton);
+    bypassAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        proc.apvts, XID::MasterBypass, bypassButton);
+
+    // ---- Preamp VU gauge + EQ spectrum analyser ----
+    auto setupVizLabel = [this] (juce::Label& l, const juce::String& text)
+    {
+        l.setText(text, juce::dontSendNotification);
+        l.setJustificationType(juce::Justification::centredLeft);
+        l.setFont(juce::Font(juce::FontOptions(9.5f).withStyle("Bold")));
+        l.setColour(juce::Label::textColourId, XaLZaColour::textMuted);
+        addChildComponent(l);
+    };
+    setupVizLabel(preVuTitle, "INPUT LEVEL - VU");
+    setupVizLabel(eqSpectrumTitle, "RESPONSE SPECTRUM (POST-EQ)");
+    addChildComponent(preVu);
+    addChildComponent(eqSpectrum);
+    eqSpectrum.setSampleRate(proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0);
+    {
+        auto itPre = std::find(tabNames.begin(), tabNames.end(), juce::String("PRE"));
+        if (itPre != tabNames.end()) preTabIndex = (int) std::distance(tabNames.begin(), itPre);
+        auto itEq = std::find(tabNames.begin(), tabNames.end(), juce::String("EQ"));
+        if (itEq != tabNames.end()) eqTabIndex = (int) std::distance(tabNames.begin(), itEq);
+    }
+
     setSize(900, 560);
     showPage(0);
     startTimerHz(30);
@@ -265,6 +294,14 @@ void XaLZaEditor::showPage(int index)
 
     for (size_t i = 0; i < tabButtons.size(); ++i)
         tabButtons[i]->setToggleState((int) i == currentTab, juce::dontSendNotification);
+
+    bool onPre = (currentTab == preTabIndex);
+    preVu.setVisible(onPre);
+    preVuTitle.setVisible(onPre);
+
+    bool onEq = (currentTab == eqTabIndex);
+    eqSpectrum.setVisible(onEq);
+    eqSpectrumTitle.setVisible(onEq);
 
     resized();
     repaint();
@@ -341,6 +378,23 @@ void XaLZaEditor::timerCallback()
         }
     }
 
+    // Only do the expensive per-tab visualisers' work while their page is
+    // actually showing.
+    if (currentTab == preTabIndex)
+    {
+        preVu.pushDb(juce::jmax(proc.getMeterDbL((int) XaLZaProcessor::TapIn),
+                                 proc.getMeterDbR((int) XaLZaProcessor::TapIn)));
+    }
+    else if (currentTab == eqTabIndex)
+    {
+        eqSpectrum.setSampleRate(proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0);
+        float specBuf[SpectrumAnalyzer::fftSize];
+        int pos = proc.getSpecWritePos();
+        for (int i = 0; i < SpectrumAnalyzer::fftSize; ++i)
+            specBuf[i] = proc.specSample(pos - SpectrumAnalyzer::fftSize + i);
+        eqSpectrum.update(specBuf);
+    }
+
     if (currentTab == 0)
     {
         constexpr int numPts = 300;
@@ -383,6 +437,7 @@ void XaLZaEditor::paint(juce::Graphics& g)
     g.setColour(XaLZaColour::textHi);
     g.setFont(juce::Font(juce::FontOptions(15.0f).withStyle("Bold")));
     g.drawText("THE XALZA", titleArea.reduced(8, 0), juce::Justification::centredLeft);
+    titleArea.removeFromRight(80);   // leave room for the bypass button
     g.setFont(juce::Font(juce::FontOptions(11.0f)));
     g.setColour(XaLZaColour::textMuted);
     g.drawText("Vocal Chain", titleArea.reduced(10, 0), juce::Justification::centredRight);
@@ -441,7 +496,8 @@ void XaLZaEditor::paint(juce::Graphics& g)
 void XaLZaEditor::resized()
 {
     auto full = getLocalBounds();
-    full.removeFromTop(titleBarH);
+    auto titleArea = full.removeFromTop(titleBarH);
+    bypassButton.setBounds(titleArea.removeFromRight(80).reduced(10, 5));
     full.removeFromBottom(footerH);
 
     auto rail = full.removeFromLeft(railW);
@@ -507,6 +563,30 @@ void XaLZaEditor::resized()
             auto meterArea = content.removeFromTop(moduleMeterH).reduced(4, 0);
             layoutModuleMeter(*mm, meterArea);
         }
-        layoutKnobRow(pageKnobs[(size_t) currentTab], content, fineLabelH, fineKnobW, fineKnobH, fineCellW);
+
+        if (currentTab == preTabIndex || currentTab == eqTabIndex)
+        {
+            auto knobArea = content.removeFromTop(fineLabelH + fineKnobH + 14);
+            layoutKnobRow(pageKnobs[(size_t) currentTab], knobArea, fineLabelH, fineKnobW, fineKnobH, fineCellW);
+
+            content.removeFromTop(10);
+            auto titleRow = content.removeFromTop(bigVizTitleH);
+            auto vizArea = content.removeFromTop(bigVizH);
+
+            if (currentTab == preTabIndex)
+            {
+                preVuTitle.setBounds(titleRow);
+                preVu.setBounds(vizArea.withSizeKeepingCentre(juce::jmin(vizArea.getWidth(), 320), vizArea.getHeight()));
+            }
+            else
+            {
+                eqSpectrumTitle.setBounds(titleRow);
+                eqSpectrum.setBounds(vizArea);
+            }
+        }
+        else
+        {
+            layoutKnobRow(pageKnobs[(size_t) currentTab], content, fineLabelH, fineKnobW, fineKnobH, fineCellW);
+        }
     }
 }

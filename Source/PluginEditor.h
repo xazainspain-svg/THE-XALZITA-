@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_extra/juce_gui_extra.h>
+#include <juce_dsp/juce_dsp.h>
 #include "PluginProcessor.h"
 
 // Exact palette from the original web mockup artifact (its CSS custom
@@ -130,6 +131,145 @@ private:
     std::vector<std::pair<float, float>> points;
 };
 
+/** Analog-style VU gauge (semicircular arc, ticks, needle) — matches the
+    mockup's Preamp "Input Level — VU" card. Ballistics live entirely in
+    here: pushDb() is fed a fast peak-ish dB reading, and the needle
+    integrates it with a ~300ms time constant like a real VU instrument,
+    not a peak meter. */
+class VUMeter : public juce::Component
+{
+public:
+    void pushDb(float db)
+    {
+        float target = juce::jlimit(0.0f, 1.0f, (db - minDb) / (maxDb - minDb));
+        constexpr float tau = 0.3f;    // seconds — classic VU integration time
+        constexpr float dt  = 1.0f / 30.0f;
+        float coef = std::exp(-dt / tau);
+        smoothed = coef * smoothed + (1.0f - coef) * target;
+        repaint();
+    }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        float radius = juce::jmin(b.getWidth() * 0.48f, b.getHeight() * 0.82f);
+        juce::Point<float> pivot(b.getCentreX(), b.getBottom() - 10.0f);
+
+        constexpr float startAngle = -2.05f, endAngle = 2.05f;
+
+        juce::Path arc;
+        arc.addCentredArc(pivot.x, pivot.y, radius, radius, 0.0f, startAngle, endAngle, true);
+        g.setColour(XaLZaColour::border);
+        g.strokePath(arc, juce::PathStrokeType(2.0f));
+
+        juce::Path redArc;
+        float redStart = startAngle + 0.86f * (endAngle - startAngle);
+        redArc.addCentredArc(pivot.x, pivot.y, radius, radius, 0.0f, redStart, endAngle, true);
+        g.setColour(XaLZaColour::danger.withAlpha(0.75f));
+        g.strokePath(redArc, juce::PathStrokeType(2.6f));
+
+        for (int i = 0; i <= 8; ++i)
+        {
+            float t = (float) i / 8.0f;
+            float a = startAngle + t * (endAngle - startAngle);
+            juce::Point<float> p1(pivot.x + std::sin(a) * radius * 0.92f, pivot.y - std::cos(a) * radius * 0.92f);
+            juce::Point<float> p2(pivot.x + std::sin(a) * radius * 1.02f, pivot.y - std::cos(a) * radius * 1.02f);
+            g.setColour(t >= 0.86f ? XaLZaColour::danger : XaLZaColour::textMuted);
+            g.drawLine({ p1, p2 }, 1.2f);
+        }
+
+        float angle = startAngle + smoothed * (endAngle - startAngle);
+        juce::Path needle;
+        needle.addRectangle(-1.1f, -radius * 0.9f, 2.2f, radius * 0.9f);
+        needle.applyTransform(juce::AffineTransform::rotation(angle).translated(pivot));
+        g.setColour(XaLZaColour::accent);
+        g.fillPath(needle);
+        g.setColour(XaLZaColour::panelControl);
+        g.fillEllipse(pivot.x - 5.0f, pivot.y - 5.0f, 10.0f, 10.0f);
+        g.setColour(XaLZaColour::accent);
+        g.drawEllipse(pivot.x - 5.0f, pivot.y - 5.0f, 10.0f, 10.0f, 1.4f);
+    }
+
+    static constexpr float minDb = -40.0f, maxDb = 3.0f;
+    float smoothed = 0.0f;
+};
+
+/** Real-time spectrum analyser (log-frequency bar display), matching the
+    mockup's EQ "Response Curve + Spectrum" card. Runs an actual FFT on
+    a window of raw samples handed to it each frame by the editor's
+    Timer — this is genuine frequency analysis, not a fake animation. */
+class SpectrumAnalyzer : public juce::Component
+{
+public:
+    static constexpr int fftOrder = 11;
+    static constexpr int fftSize  = 1 << fftOrder;   // 2048
+
+    SpectrumAnalyzer() : fft(fftOrder), window((size_t) fftSize, juce::dsp::WindowingFunction<float>::hann)
+    {
+        std::fill(std::begin(fftData), std::end(fftData), 0.0f);
+        std::fill(std::begin(bars), std::end(bars), 0.0f);
+    }
+
+    void setSampleRate(double sr) { sampleRateHint = (float) juce::jmax(1000.0, sr); }
+
+    // samples: fftSize raw values, oldest to newest.
+    void update(const float* samples)
+    {
+        std::copy(samples, samples + fftSize, fftData);
+        window.multiplyWithWindowingTable(fftData, (size_t) fftSize);
+        fft.performFrequencyOnlyForwardTransform(fftData);
+
+        for (int i = 0; i < numBars; ++i)
+        {
+            float f0 = 40.0f * std::pow(18000.0f / 40.0f, (float) i / (float) numBars);
+            float f1 = 40.0f * std::pow(18000.0f / 40.0f, (float) (i + 1) / (float) numBars);
+            int bin0 = juce::jlimit(1, fftSize / 2 - 1, (int) (f0 * (float) fftSize / sampleRateHint));
+            int bin1 = juce::jlimit(bin0 + 1, fftSize / 2, (int) (f1 * (float) fftSize / sampleRateHint));
+            float peak = 0.0f;
+            for (int bBin = bin0; bBin < bin1; ++bBin)
+                peak = juce::jmax(peak, fftData[bBin]);
+            float db = juce::Decibels::gainToDecibels(peak, -100.0f);
+            float norm = juce::jlimit(0.0f, 1.0f, (db + 84.0f) / 84.0f);
+            bars[i] = juce::jmax(norm, bars[i] * 0.72f);   // fast attack, gentle decay
+        }
+        repaint();
+    }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(b);
+        g.setColour(XaLZaColour::borderSoft);
+        for (int i = 1; i < 4; ++i)
+        {
+            float y = b.getY() + b.getHeight() * (float) i / 4.0f;
+            g.drawLine(b.getX(), y, b.getRight(), y, 0.5f);
+        }
+        g.setColour(XaLZaColour::border);
+        g.drawRect(b, 1.0f);
+
+        float barW = b.getWidth() / (float) numBars;
+        for (int i = 0; i < numBars; ++i)
+        {
+            float h = bars[i] * b.getHeight();
+            juce::Rectangle<float> barRect(b.getX() + (float) i * barW, b.getBottom() - h,
+                                            barW * 0.78f, h);
+            g.setColour(i >= (int) (numBars * 0.82f) ? XaLZaColour::danger : XaLZaColour::accent2);
+            g.fillRect(barRect);
+        }
+    }
+
+    static constexpr int numBars = 40;
+    juce::dsp::FFT fft;
+    juce::dsp::WindowingFunction<float> window;
+    float fftData[2 * fftSize];
+    float bars[numBars] = {};
+    float sampleRateHint = 44100.0f;
+};
+
 /**
     Editor layout mirrors the web mockup: a narrow vertical tab rail on
     the left (MACROS + the 12 modules, in the mockup's own tab order),
@@ -205,6 +345,8 @@ private:
     static constexpr int masterKnobH  = 60;
 
     static constexpr int moduleMeterH = 92;
+    static constexpr int bigVizTitleH = 16;
+    static constexpr int bigVizH      = 210;
 
     XaLZaProcessor& proc;
     XaLZaLookAndFeel laf;
@@ -222,6 +364,20 @@ private:
     juce::Label masterCapIn, masterCapOut;
     Goniometer goniometer;
     juce::Label goniometerCap;
+
+    // Global bypass — real dry passthrough (see XID::MasterBypass), lives in
+    // the title bar like the mockup's header BYPASS control.
+    juce::TextButton bypassButton { "BYPASS" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> bypassAttachment;
+
+    // Module-specific "big" visualisers, shown only on their own page:
+    // a real VU gauge on Preamp (reading the module's input level), and a
+    // real FFT spectrum analyser on EQ 550 (reading the post-EQ signal).
+    VUMeter preVu;
+    juce::Label preVuTitle;
+    SpectrumAnalyzer eqSpectrum;
+    juce::Label eqSpectrumTitle;
+    int preTabIndex = 1, eqTabIndex = 4;   // resolved from tabNames in the constructor
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(XaLZaEditor)
 };

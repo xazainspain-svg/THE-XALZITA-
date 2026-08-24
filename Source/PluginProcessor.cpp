@@ -21,6 +21,7 @@ XaLZaProcessor::XaLZaProcessor()
     for (auto& a : grDb) a.store(0.0f);
     for (auto& a : scopePointsL) a.store(0.0f);
     for (auto& a : scopePointsR) a.store(0.0f);
+    for (auto& a : specRing) a.store(0.0f);
 }
 
 void XaLZaProcessor::updateMeter(int tap, const juce::AudioBuffer<float>& buf, int numSamples, int numCh)
@@ -404,6 +405,21 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         eqHighShelf.process(ctx);
     }
     updateMeter((int) TapEq, buffer, numSamples, numCh);
+
+    // ---------------------------------------------------------------
+    // Spectrum tap — raw full-rate mono samples for the EQ page's live
+    // spectrum analyser (post-EQ, so it shows what the EQ curve actually did).
+    // ---------------------------------------------------------------
+    {
+        auto* l = buffer.getReadPointer(0);
+        auto* r = numCh > 1 ? buffer.getReadPointer(1) : l;
+        for (int n = 0; n < numSamples; ++n)
+        {
+            int pos = specWritePos.load(std::memory_order_relaxed);
+            specRing[(size_t) (pos & (kSpecSize - 1))].store(0.5f * (l[n] + r[n]), std::memory_order_relaxed);
+            specWritePos.store(pos + 1, std::memory_order_relaxed);
+        }
+    }
 
     // ---------------------------------------------------------------
     // 7) RESONANCE — de-resonator: static notch that tames a harsh peak

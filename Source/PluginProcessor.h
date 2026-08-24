@@ -67,9 +67,18 @@ public:
     float scopeSampleR(int i) const noexcept { return scopePointsR[(size_t) (i & (kScopeSize - 1))].load(std::memory_order_relaxed); }
     int   getScopeWritePos() const noexcept { return scopeWritePos.load(std::memory_order_relaxed); }
 
+    // Spectrum tap: a lock-free ring of raw (full-rate, mono) samples taken
+    // right after EQ 550, for the EQ page's live spectrum analyser.
+    static constexpr int kSpecSize = 8192; // power of two, comfortably >= UI's FFT window
+    float specSample(int i) const noexcept { return specRing[(size_t) (i & (kSpecSize - 1))].load(std::memory_order_relaxed); }
+    int   getSpecWritePos() const noexcept { return specWritePos.load(std::memory_order_relaxed); }
+
 private:
     void updateMeter(int tap, const juce::AudioBuffer<float>& buf, int numSamples, int numCh);
     void updateGr(int moduleIdx, float preDb, float postDb);
+
+    std::array<std::atomic<float>, kSpecSize> specRing;
+    std::atomic<int> specWritePos { 0 };
 
     std::array<std::atomic<float>, kNumMeterTaps> meterDbL, meterDbR;
     std::array<std::atomic<float>, 3> grDb;
