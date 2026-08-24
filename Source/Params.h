@@ -33,6 +33,11 @@ namespace XID
     static const juce::String DlyBypass  = "DlyBypass";
     static const juce::String LimBypass  = "LimBypass";
 
+    // "Listen" / key-cue modes — audition exactly what a detector is
+    // reacting to instead of the plugin's normal output.
+    static const juce::String GateListen = "GateListen";   // hears only what the gate is removing
+    static const juce::String EssListen  = "EssListen";    // hears only the detected sibilance band
+
     static const juce::String PreMacro = "PreMacro";
     static const juce::String PreGain  = "PreGain";
     static const juce::String PreChar  = "PreChar";
@@ -67,6 +72,9 @@ namespace XID
     static const juce::String EqLow   = "EqLow";
     static const juce::String EqMid   = "EqMid";
     static const juce::String EqHigh  = "EqHigh";
+    static const juce::String EqLowFreq  = "EqLowFreq";
+    static const juce::String EqMidFreq  = "EqMidFreq";
+    static const juce::String EqHighFreq = "EqHighFreq";
 
     static const juce::String ResMacro      = "ResMacro";
     static const juce::String ResAmount     = "ResAmount";
@@ -146,6 +154,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     addBypass(XID::RevBypass,  "Reverb Bypass");
     addBypass(XID::DlyBypass,  "Delay Bypass");
     addBypass(XID::LimBypass,  "Limiter Bypass");
+    addBypass(XID::GateListen, "Gate Listen");
+    addBypass(XID::EssListen,  "De-esser Listen");
 
     add(XID::PreMacro, "Pre Intensity", 0.0f, 100.0f, 0.0f);
     add(XID::PreGain, "Pre Gain", 0.0f, 70.0f, 0.0f);
@@ -181,6 +191,12 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     add(XID::EqLow, "EQ Low", -12.0f, 12.0f, 0.0f);
     add(XID::EqMid, "EQ Mid", -12.0f, 12.0f, 0.0f);
     add(XID::EqHigh, "EQ High", -12.0f, 12.0f, 0.0f);
+    // Selectable band centre/corner frequencies — matches the "550"-style
+    // idea of a per-band frequency choice rather than each band being
+    // welded to one fixed frequency.
+    add(XID::EqLowFreq, "EQ Low Freq", 40.0f, 500.0f, 150.0f);
+    add(XID::EqMidFreq, "EQ Mid Freq", 200.0f, 8000.0f, 1000.0f);
+    add(XID::EqHighFreq, "EQ High Freq", 2000.0f, 18000.0f, 6000.0f);
 
     add(XID::ResMacro, "Res Intensity", 0.0f, 100.0f, 0.0f);
     add(XID::ResAmount, "Res Amount", 0.0f, 100.0f, 0.0f);

@@ -46,6 +46,12 @@ public:
     juce::AudioProcessorValueTreeState apvts;
     MacroTouchTracker macroTracker;
 
+    // Last-used editor window size, restored on the next editor open (and
+    // persisted through save/reload via getStateInformation) so a resize
+    // sticks instead of always reopening at the hardcoded default. Only
+    // ever touched on the message thread (editor ctor/resize, state I/O).
+    int lastEditorWidth = 900, lastEditorHeight = 560;
+
     // ---- Metering / visualisers: written on the audio thread, read (lock
     //      free) by the editor's Timer at ~30Hz. Order matches the real
     //      serial signal chain in processBlock(). ----
@@ -111,6 +117,10 @@ public:
     // momentary loudness of the true final output (post-limiter, post-
     // width, post-master-gain) — a real measurement, not a fake animation.
     float getLufs() const noexcept { return lufsUI.load(std::memory_order_relaxed); }
+
+    // Real 4x-oversampled inter-sample true-peak reading of the final
+    // output, in dBTP.
+    float getTruePeakDb() const noexcept { return truePeakDbUI.load(std::memory_order_relaxed); }
 
 private:
     void updateMeter(int tap, const juce::AudioBuffer<float>& buf, int numSamples, int numCh);
@@ -213,8 +223,25 @@ private:
     float dlyDuckEnv = 0.0f;
     float dlyPanPhase = 0.0f;
 
-    // ---- 12) Limiter — input trim, ceiling, release, extra clip stage ----
-    juce::dsp::Limiter<float> limiter;
+    // ---- 12) Limiter — input trim, real look-ahead brickwall, extra clip ----
+    // A genuine look-ahead limiter: incoming (post-input-gain) samples are
+    // written into a ring buffer; the output is that same audio delayed by
+    // limLookaheadSamples, with a gain envelope computed by scanning FORWARD
+    // from each output sample through the lookahead window it's about to
+    // reach — so gain reduction is already in place *before* a peak arrives,
+    // not reacting after the fact like a plain fast limiter. The added
+    // delay is reported to the host via setLatencySamples() for correct
+    // automatic delay compensation.
+    juce::AudioBuffer<float> limLookaheadRing;
+    int limRingSize = 0, limRingMask = 0, limRingWritePos = 0, limLookaheadSamples = 0;
+    float limGainSmoothed = 1.0f;
+
+    // 4x-oversampled true-peak (inter-sample peak) detector on the final
+    // output — a plain sample-peak reading can miss peaks that only appear
+    // between samples once converted back to analogue; this catches those.
+    juce::dsp::Oversampling<float> osTruePeak;
+    juce::AudioBuffer<float> truePeakScratch;
+    std::atomic<float> truePeakDbUI { -100.0f };
 
     // Pre-allocated scratch buffers, sized in prepareToPlay so processBlock()
     // never allocates on the audio thread.

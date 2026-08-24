@@ -17,7 +17,8 @@ XaLZaProcessor::XaLZaProcessor()
       macroTracker(apvts),
       osPreChar(2, 1, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR),
       osSat(2, 1, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR),
-      osLimClip(2, 1, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR)
+      osLimClip(2, 1, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR),
+      osTruePeak(2, 2, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR)   // factor 2^2 = 4x
 {
     for (auto& a : meterDbL) a.store(-100.0f);
     for (auto& a : meterDbR) a.store(-100.0f);
@@ -116,7 +117,6 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     resNotch.prepare(spec);
     satTone.prepare(spec);
     reverb.prepare(spec);
-    limiter.prepare(spec);
 
     essDetectL.prepare(spec);
     essDetectR.prepare(spec);
@@ -132,12 +132,27 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     osPreChar.initProcessing((size_t) samplesPerBlock);
     osSat.initProcessing((size_t) samplesPerBlock);
     osLimClip.initProcessing((size_t) samplesPerBlock);
+    osTruePeak.initProcessing((size_t) samplesPerBlock);
     osPreChar.reset();
     osSat.reset();
     osLimClip.reset();
+    osTruePeak.reset();
+    truePeakScratch.setSize(2, samplesPerBlock, false, false, true);
+
+    // Look-ahead limiter ring: fixed 5ms look-ahead, ring sized generously
+    // (look-ahead window + a full block + margin, rounded up to a power of
+    // two so index wraparound is a cheap bitmask).
+    limLookaheadSamples = juce::jmax(1, (int) std::round(0.005 * sampleRate));
+    limRingSize = (int) juce::nextPowerOfTwo(limLookaheadSamples + samplesPerBlock + 64);
+    limRingMask = limRingSize - 1;
+    limLookaheadRing.setSize(2, limRingSize, false, true, true);
+    limRingWritePos = 0;
+    limGainSmoothed = 1.0f;
+
     setLatencySamples((int) std::round(osPreChar.getLatencyInSamples()
                                         + osSat.getLatencyInSamples()
-                                        + osLimClip.getLatencyInSamples()));
+                                        + osLimClip.getLatencyInSamples())
+                       + limLookaheadSamples);
     masterInSmoothed.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(0.0f));
     masterOutSmoothed.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(0.0f));
     preGainSmoothed.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(0.0f));
@@ -164,7 +179,6 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     compressor.setRelease(250.0f);
     optoComp.setAttack(30.0f);
     optoComp.setRelease(450.0f);
-    limiter.setRelease(80.0f);
 
     juce::dsp::ProcessSpec monoSpec = spec;
     monoSpec.numChannels = 1;
@@ -309,6 +323,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         float detAtt = onePoleCoef(0.5f, sr);
         float detRel = onePoleCoef(50.0f, sr);
         float floorLin = juce::Decibels::decibelsToGain(rangeDb);
+        bool gateListen = apvts.getRawParameterValue(XID::GateListen)->load() > 0.5f;
 
         auto* l = buffer.getWritePointer(0);
         auto* r = numCh > 1 ? buffer.getWritePointer(1) : l;
@@ -330,8 +345,13 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             float gCoef = targetGain > gateGain ? attCoef : relCoef;
             gateGain = gCoef * gateGain + (1.0f - gCoef) * targetGain;
 
-            l[n] *= gateGain;
-            if (numCh > 1) r[n] *= gateGain;
+            // Listen mode: play back only what the gate is cutting out
+            // (dry * (1-gain)) instead of the gated signal — lets you hear
+            // exactly what would be removed, the standard way to dial in a
+            // gate's threshold/range without guessing.
+            float applied = gateListen ? (1.0f - gateGain) : gateGain;
+            l[n] *= applied;
+            if (numCh > 1) r[n] *= applied;
         }
         gateGrDbUI.store(juce::jlimit(0.0f, 60.0f, -juce::Decibels::gainToDecibels(gateGain, -60.0f)),
                           std::memory_order_relaxed);
@@ -362,9 +382,10 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         float detRel = onePoleCoef(60.0f, sr);
         float smAtt  = onePoleCoef(3.0f, sr);
         float smRel  = onePoleCoef(80.0f, sr);
+        bool essListen = apvts.getRawParameterValue(XID::EssListen)->load() > 0.5f;
 
-        auto* l = buffer.getReadPointer(0);
-        auto* r = numCh > 1 ? buffer.getReadPointer(1) : l;
+        auto* l = buffer.getWritePointer(0);
+        auto* r = numCh > 1 ? buffer.getWritePointer(1) : l;
         for (int n = 0; n < numSamples; ++n)
         {
             float fl = essDetectL.processSample(l[n]);
@@ -379,12 +400,24 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
                 : 0.0f;
             float sCoef = targetAtten < essGainDb ? smAtt : smRel;
             essGainDb = sCoef * essGainDb + (1.0f - sCoef) * targetAtten;
+
+            // Listen mode: play back exactly the band the detector is
+            // reacting to, instead of the main signal — bypasses the
+            // dynamic EQ stage entirely for this block's samples.
+            if (essListen)
+            {
+                l[n] = fl;
+                if (numCh > 1) r[n] = fr;
+            }
         }
 
-        *essDynEq.state = *juce::dsp::IIR::Coefficients<float>::makePeakFilter(
-            sr, juce::jlimit(1000.0f, 16000.0f, freqHz), 2.5f,
-            juce::Decibels::decibelsToGain(essGainDb));
-        essDynEq.process(ctx);
+        if (!essListen)
+        {
+            *essDynEq.state = *juce::dsp::IIR::Coefficients<float>::makePeakFilter(
+                sr, juce::jlimit(1000.0f, 16000.0f, freqHz), 2.5f,
+                juce::Decibels::decibelsToGain(essGainDb));
+            essDynEq.process(ctx);
+        }
 
         essBandDbUI.store(juce::Decibels::gainToDecibels(essEnv, -100.0f), std::memory_order_relaxed);
         essReductionDbUI.store(essGainDb, std::memory_order_relaxed);
@@ -506,13 +539,16 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     // ---------------------------------------------------------------
     if (apvts.getRawParameterValue(XID::EqBypass)->load() <= 0.5f)
     {
-        float lowDb  = mt.effectiveByID(XID::EqMacro, XID::EqLow);
-        float midDb  = mt.effectiveByID(XID::EqMacro, XID::EqMid);
-        float highDb = mt.effectiveByID(XID::EqMacro, XID::EqHigh);
+        float lowDb   = mt.effectiveByID(XID::EqMacro, XID::EqLow);
+        float midDb   = mt.effectiveByID(XID::EqMacro, XID::EqMid);
+        float highDb  = mt.effectiveByID(XID::EqMacro, XID::EqHigh);
+        float lowHz   = apvts.getRawParameterValue(XID::EqLowFreq)->load();
+        float midHz   = apvts.getRawParameterValue(XID::EqMidFreq)->load();
+        float highHz  = apvts.getRawParameterValue(XID::EqHighFreq)->load();
 
-        *eqLowShelf.state  = *juce::dsp::IIR::Coefficients<float>::makeLowShelf(sr, 150.0f, 0.707f, juce::Decibels::decibelsToGain(lowDb));
-        *eqMidPeak.state   = *juce::dsp::IIR::Coefficients<float>::makePeakFilter(sr, 1000.0f, 0.9f, juce::Decibels::decibelsToGain(midDb));
-        *eqHighShelf.state = *juce::dsp::IIR::Coefficients<float>::makeHighShelf(sr, 6000.0f, 0.707f, juce::Decibels::decibelsToGain(highDb));
+        *eqLowShelf.state  = *juce::dsp::IIR::Coefficients<float>::makeLowShelf(sr, lowHz, 0.707f, juce::Decibels::decibelsToGain(lowDb));
+        *eqMidPeak.state   = *juce::dsp::IIR::Coefficients<float>::makePeakFilter(sr, midHz, 0.9f, juce::Decibels::decibelsToGain(midDb));
+        *eqHighShelf.state = *juce::dsp::IIR::Coefficients<float>::makeHighShelf(sr, highHz, 0.707f, juce::Decibels::decibelsToGain(highDb));
 
         eqLowShelf.process(ctx);
         eqMidPeak.process(ctx);
@@ -886,9 +922,49 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
                 limInPk = juce::jmax(limInPk, std::abs(d[n]));
         }
 
-        limiter.setThreshold(ceilingDb);
-        limiter.setRelease(releaseMs);
-        limiter.process(ctx);
+        // Real look-ahead brickwall: write this block into the ring, then
+        // for each output sample scan forward through the look-ahead
+        // window (all of which has just been written, so it's always
+        // available) to find the peak that's about to arrive and apply
+        // the needed gain reduction *ahead of* it, not after.
+        {
+            float ceilLinLim = juce::Decibels::decibelsToGain(ceilingDb);
+            float attCoefLim = onePoleCoef(0.3f, sr);         // near-instant — look-ahead already saw it coming
+            float relCoefLim = onePoleCoef(releaseMs, sr);
+
+            int w = limRingWritePos;
+            auto* inL = buffer.getReadPointer(0);
+            auto* inR = numCh > 1 ? buffer.getReadPointer(1) : inL;
+            auto* ringL = limLookaheadRing.getWritePointer(0);
+            auto* ringR = limLookaheadRing.getWritePointer(1);
+            for (int n = 0; n < numSamples; ++n)
+            {
+                ringL[(w + n) & limRingMask] = inL[n];
+                ringR[(w + n) & limRingMask] = numCh > 1 ? inR[n] : inL[n];
+            }
+            limRingWritePos = w + numSamples;
+
+            auto* outL = buffer.getWritePointer(0);
+            auto* outR = numCh > 1 ? buffer.getWritePointer(1) : outL;
+            for (int n = 0; n < numSamples; ++n)
+            {
+                int outPos = w + n - limLookaheadSamples;
+                float peakAhead = 0.0f;
+                for (int k = 0; k <= limLookaheadSamples; ++k)
+                {
+                    int idx = (outPos + k) & limRingMask;
+                    peakAhead = juce::jmax(peakAhead, std::abs(ringL[idx]), std::abs(ringR[idx]));
+                }
+                float targetGain = juce::jmin(1.0f, ceilLinLim / juce::jmax(1.0e-6f, peakAhead));
+                float coef = targetGain < limGainSmoothed ? attCoefLim : relCoefLim;
+                limGainSmoothed = coef * limGainSmoothed + (1.0f - coef) * targetGain;
+
+                int readIdx = outPos & limRingMask;
+                outL[n] = ringL[readIdx] * limGainSmoothed;
+                if (numCh > 1)
+                    outR[n] = ringR[readIdx] * limGainSmoothed;
+            }
+        }
 
         {
             float limOutPk = 0.0f;
@@ -975,6 +1051,25 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     }
 
     // ---------------------------------------------------------------
+    // True-peak (4x-oversampled inter-sample peak) reading of the final
+    // output — catches peaks a plain sample-peak reading would miss.
+    // ---------------------------------------------------------------
+    {
+        for (int ch = 0; ch < numCh; ++ch)
+            truePeakScratch.copyFrom(ch, 0, buffer, ch, 0, numSamples);
+        auto sub = juce::dsp::AudioBlock<float>(truePeakScratch).getSubsetChannelBlock(0, (size_t) numCh);
+        auto osBlock = osTruePeak.processSamplesUp(sub);
+        float peak = 0.0f;
+        for (size_t ch = 0; ch < osBlock.getNumChannels(); ++ch)
+        {
+            auto* d = osBlock.getChannelPointer(ch);
+            for (size_t n = 0; n < osBlock.getNumSamples(); ++n)
+                peak = juce::jmax(peak, std::abs(d[n]));
+        }
+        truePeakDbUI.store(juce::Decibels::gainToDecibels(peak, -100.0f), std::memory_order_relaxed);
+    }
+
+    // ---------------------------------------------------------------
     // Goniometer tap — decimated post-chain stereo samples for the UI's
     // stereo-field scope (every 4th sample is plenty for a visual trace).
     // ---------------------------------------------------------------
@@ -1000,6 +1095,11 @@ void XaLZaProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
     auto state = apvts.copyState();
     std::unique_ptr<juce::XmlElement> xml(state.createXml());
+    // Extra (non-parameter) attributes ride along on the root element —
+    // APVTS ignores unknown attributes on reload, so this is safe to add
+    // without touching the parameter schema.
+    xml->setAttribute("xalzaEditorW", lastEditorWidth);
+    xml->setAttribute("xalzaEditorH", lastEditorHeight);
     copyXmlToBinary(*xml, destData);
 }
 
@@ -1007,7 +1107,16 @@ void XaLZaProcessor::setStateInformation(const void* data, int sizeInBytes)
 {
     std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, sizeInBytes));
     if (xml != nullptr && xml->hasTagName(apvts.state.getType()))
+    {
+        if (xml->hasAttribute("xalzaEditorW") && xml->hasAttribute("xalzaEditorH"))
+        {
+            // Clamped to XaLZaEditor's own setResizeLimits(baseW, baseH, baseW*2, baseH*2)
+            // — keep these in sync if that ever changes.
+            lastEditorWidth  = juce::jlimit(900, 1800, xml->getIntAttribute("xalzaEditorW", 900));
+            lastEditorHeight = juce::jlimit(560, 1120, xml->getIntAttribute("xalzaEditorH", 560));
+        }
         apvts.replaceState(juce::ValueTree::fromXml(*xml));
+    }
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

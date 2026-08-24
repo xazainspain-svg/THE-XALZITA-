@@ -236,6 +236,28 @@ public:
         repaint();
     }
 
+    // Analytic magnitude response of the actual 3-band EQ (same formulas
+    // processBlock uses), overlaid on the live spectrum so you can see
+    // exactly what the curve you dialled in is doing to the signal you're
+    // looking at — not just the raw spectrum on its own.
+    void setEqCurve(float lowDb, float lowHz, float midDb, float midHz,
+                     float highDb, float highHz, double sampleRate)
+    {
+        auto low  = juce::dsp::IIR::Coefficients<float>::makeLowShelf(sampleRate, juce::jmax(1.0f, lowHz), 0.707f, juce::Decibels::decibelsToGain(lowDb));
+        auto mid  = juce::dsp::IIR::Coefficients<float>::makePeakFilter(sampleRate, juce::jmax(1.0f, midHz), 0.9f, juce::Decibels::decibelsToGain(midDb));
+        auto high = juce::dsp::IIR::Coefficients<float>::makeHighShelf(sampleRate, juce::jmax(1.0f, highHz), 0.707f, juce::Decibels::decibelsToGain(highDb));
+
+        for (int i = 0; i <= numBars; ++i)
+        {
+            double f = 40.0 * std::pow(18000.0 / 40.0, (double) i / (double) numBars);
+            double mag = low->getMagnitudeForFrequency(f, sampleRate)
+                       * mid->getMagnitudeForFrequency(f, sampleRate)
+                       * high->getMagnitudeForFrequency(f, sampleRate);
+            curveDb[i] = juce::Decibels::gainToDecibels((float) mag, -24.0f);
+        }
+        repaint();
+    }
+
 private:
     void paint(juce::Graphics& g) override
     {
@@ -260,6 +282,20 @@ private:
             g.setColour(i >= (int) (numBars * 0.82f) ? XaLZaColour::danger : XaLZaColour::accent2);
             g.fillRect(barRect);
         }
+
+        // EQ curve overlay: +-curveRangeDb maps to the full panel height,
+        // centred on 0dB.
+        constexpr float curveRangeDb = 15.0f;
+        juce::Path curve;
+        for (int i = 0; i <= numBars; ++i)
+        {
+            float x = b.getX() + b.getWidth() * (float) i / (float) numBars;
+            float t = juce::jlimit(0.0f, 1.0f, (curveDb[i] + curveRangeDb) / (2.0f * curveRangeDb));
+            float y = b.getBottom() - t * b.getHeight();
+            if (i == 0) curve.startNewSubPath(x, y); else curve.lineTo(x, y);
+        }
+        g.setColour(XaLZaColour::accent);
+        g.strokePath(curve, juce::PathStrokeType(2.0f));
     }
 
     static constexpr int numBars = 40;
@@ -267,6 +303,7 @@ private:
     juce::dsp::WindowingFunction<float> window;
     float fftData[2 * fftSize];
     float bars[numBars] = {};
+    float curveDb[numBars + 1] = {};
     float sampleRateHint = 44100.0f;
 };
 
@@ -407,12 +444,16 @@ public:
         addAndMakeVisible(scope);
         addAndMakeVisible(lufsGraph);
         addAndMakeVisible(lufsLabel);
+        addAndMakeVisible(truePeakLabel);
         lufsLabel.setJustificationType(juce::Justification::centredLeft);
         lufsLabel.setFont(juce::Font(juce::FontOptions(13.0f).withStyle("Bold")));
         lufsLabel.setColour(juce::Label::textColourId, XaLZaColour::textHi);
+        truePeakLabel.setJustificationType(juce::Justification::centredRight);
+        truePeakLabel.setFont(juce::Font(juce::FontOptions(13.0f).withStyle("Bold")));
+        truePeakLabel.setColour(juce::Label::textColourId, XaLZaColour::textHi);
     }
 
-    void update(const float* waveform, float lufsDb)
+    void update(const float* waveform, float lufsDb, float truePeakDb)
     {
         scope.setSamples(waveform);
         float norm = juce::jlimit(0.0f, 1.0f, (lufsDb + 36.0f) / 36.0f);   // -36..0 LUFS window
@@ -420,6 +461,9 @@ public:
         lufsLabel.setText(lufsDb <= -69.5f ? juce::String("LUFS  -inf")
                                             : ("LUFS  " + juce::String(lufsDb, 1)),
                            juce::dontSendNotification);
+        truePeakLabel.setText("TP  " + juce::String(truePeakDb, 1) + " dBTP", juce::dontSendNotification);
+        truePeakLabel.setColour(juce::Label::textColourId,
+                                 truePeakDb > -1.0f ? XaLZaColour::danger : XaLZaColour::textHi);
     }
 
 private:
@@ -430,13 +474,270 @@ private:
         scope.setBounds(top.reduced(0, 2));
         b.removeFromTop(4);
         auto lufsRow = b.removeFromTop(18);
+        truePeakLabel.setBounds(lufsRow.removeFromRight(120));
         lufsLabel.setBounds(lufsRow);
         lufsGraph.setBounds(b);
     }
 
     WaveformScope scope;
     EnvelopeGraph lufsGraph;
+    juce::Label truePeakLabel;
     juce::Label lufsLabel;
+};
+
+/** Analytic input-vs-output transfer curve for a simple hard-knee
+    compressor. This is an honest APPROXIMATION — juce::dsp::Compressor
+    has its own internal knee shape we don't have direct read access to —
+    but it uses the exact same threshold/ratio/makeup/mix values
+    processBlock feeds the real compressor, and the dry/wet mix blend is
+    computed in the LINEAR (amplitude) domain exactly like processBlock
+    does, so the on-screen shape genuinely matches what turning those
+    knobs is doing: where the knee sits, how hard the ratio bites, and how
+    much the Mix knob is softening it back toward the unity diagonal. */
+class TransferCurveView : public juce::Component
+{
+public:
+    static constexpr int numPts = 96;
+    static constexpr float rangeDb = 60.0f;   // axes span -60..0 dB in and out
+
+    void setCurve(float threshDb, float ratio, float makeupDb, float mixAmt)
+    {
+        float makeupLin = juce::Decibels::decibelsToGain(makeupDb);
+        for (int i = 0; i <= numPts; ++i)
+        {
+            float xDb = -rangeDb + rangeDb * (float) i / (float) numPts;
+            float yDbWet = xDb <= threshDb ? xDb : threshDb + (xDb - threshDb) / juce::jmax(1.0f, ratio);
+            float dryLin = juce::Decibels::decibelsToGain(xDb);
+            float wetLin = juce::Decibels::decibelsToGain(yDbWet) * makeupLin;
+            float outLin = dryLin + (wetLin - dryLin) * mixAmt;
+            curveDb[i] = juce::Decibels::gainToDecibels(outLin, -100.0f);
+        }
+        threshNorm = juce::jlimit(0.0f, 1.0f, (threshDb + rangeDb) / rangeDb);
+        repaint();
+    }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(b);
+        g.setColour(XaLZaColour::borderSoft);
+        for (int i = 1; i < 4; ++i)
+        {
+            float x = b.getX() + b.getWidth() * (float) i / 4.0f;
+            float y = b.getY() + b.getHeight() * (float) i / 4.0f;
+            g.drawLine(x, b.getY(), x, b.getBottom(), 0.5f);
+            g.drawLine(b.getX(), y, b.getRight(), y, 0.5f);
+        }
+        g.setColour(XaLZaColour::border);
+        g.drawRect(b, 1.0f);
+
+        auto mapPt = [&] (float xDb, float yDb)
+        {
+            float tx = juce::jlimit(0.0f, 1.0f, (xDb + rangeDb) / rangeDb);
+            float ty = juce::jlimit(0.0f, 1.0f, (yDb + rangeDb) / rangeDb);
+            return juce::Point<float>(b.getX() + tx * b.getWidth(), b.getBottom() - ty * b.getHeight());
+        };
+
+        g.setColour(XaLZaColour::textMuted.withAlpha(0.5f));
+        auto p0 = mapPt(-rangeDb, -rangeDb), p1 = mapPt(0.0f, 0.0f);
+        g.drawLine(p0.x, p0.y, p1.x, p1.y, 1.0f);
+
+        float tx = b.getX() + threshNorm * b.getWidth();
+        g.setColour(XaLZaColour::danger.withAlpha(0.35f));
+        g.drawLine(tx, b.getY(), tx, b.getBottom(), 1.0f);
+
+        juce::Path curve;
+        for (int i = 0; i <= numPts; ++i)
+        {
+            float xDb = -rangeDb + rangeDb * (float) i / (float) numPts;
+            auto pt = mapPt(xDb, curveDb[i]);
+            if (i == 0) curve.startNewSubPath(pt); else curve.lineTo(pt);
+        }
+        g.setColour(XaLZaColour::accent);
+        g.strokePath(curve, juce::PathStrokeType(2.0f));
+
+        g.setColour(XaLZaColour::textMuted);
+        g.setFont(juce::Font(juce::FontOptions(8.5f)));
+        g.drawText("IN dB / OUT dB", b.reduced(3.0f), juce::Justification::topLeft);
+    }
+
+    float curveDb[numPts + 1] = {};
+    float threshNorm = 1.0f;
+};
+
+/** Small standalone frequency-response curve (no bars) — the analytic
+    magnitude of a single filter across the audible band, log-frequency
+    x-axis. Used where a full FFT spectrum would be overkill for what's
+    really just "here's the shape of the one filter this stage applies"
+    (Preamp's HPF). */
+class FreqResponseView : public juce::Component
+{
+public:
+    void setHighPass(float hz, double sampleRate)
+    {
+        auto c = juce::dsp::IIR::Coefficients<float>::makeHighPass(sampleRate, juce::jmax(1.0f, hz));
+        for (int i = 0; i <= numPts; ++i)
+        {
+            double f = 20.0 * std::pow(20000.0 / 20.0, (double) i / (double) numPts);
+            double mag = c->getMagnitudeForFrequency(f, sampleRate);
+            curveDb[i] = juce::Decibels::gainToDecibels((float) mag, -36.0f);
+        }
+        cutoffHz = hz;
+        repaint();
+    }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(b);
+        g.setColour(XaLZaColour::borderSoft);
+        for (int i = 1; i < 4; ++i)
+        {
+            float x = b.getX() + b.getWidth() * (float) i / 4.0f;
+            g.drawLine(x, b.getY(), x, b.getBottom(), 0.5f);
+        }
+        g.setColour(XaLZaColour::border);
+        g.drawRect(b, 1.0f);
+
+        constexpr float rangeDb = 30.0f;
+        juce::Path curve;
+        for (int i = 0; i <= numPts; ++i)
+        {
+            float x = b.getX() + b.getWidth() * (float) i / (float) numPts;
+            float t = juce::jlimit(0.0f, 1.0f, (curveDb[i] + rangeDb) / rangeDb);
+            float y = b.getBottom() - t * b.getHeight();
+            if (i == 0) curve.startNewSubPath(x, y); else curve.lineTo(x, y);
+        }
+        g.setColour(XaLZaColour::accent);
+        g.strokePath(curve, juce::PathStrokeType(2.0f));
+
+        g.setColour(XaLZaColour::textMuted);
+        g.setFont(juce::Font(juce::FontOptions(9.0f)));
+        g.drawText(juce::String((int) cutoffHz) + " Hz HPF", b.reduced(4.0f), juce::Justification::topLeft);
+    }
+
+    static constexpr int numPts = 60;
+    float curveDb[numPts + 1] = {};
+    float cutoffHz = 20.0f;
+};
+
+/** Composite Glue-Comp page view: the existing gain-reduction/output
+    history graph plus the analytic transfer curve, side by side — the
+    moment-to-moment reduction AND the shape of the curve producing it. */
+class CompressorView : public juce::Component
+{
+public:
+    CompressorView() { addAndMakeVisible(grGraph); addAndMakeVisible(curve); }
+
+    void push(float grNorm, float outNorm) { grGraph.push(grNorm, outNorm); }
+    void setCurve(float threshDb, float ratio, float makeupDb, float mixAmt)
+    {
+        curve.setCurve(threshDb, ratio, makeupDb, mixAmt);
+    }
+
+private:
+    void resized() override
+    {
+        auto b = getLocalBounds();
+        auto left = b.removeFromLeft(b.getWidth() / 2);
+        left.removeFromRight(4);
+        grGraph.setBounds(left);
+        curve.setBounds(b);
+    }
+
+    EnvelopeGraph grGraph;
+    TransferCurveView curve;
+};
+
+/** Composite Opto page view: the existing post-Opto oscilloscope plus the
+    analytic transfer curve (Opto's "Reduction" knob maps to an internal
+    threshold at a fixed 4:1 ratio — see processBlock's OPTO block). */
+class OptoView : public juce::Component
+{
+public:
+    OptoView() { addAndMakeVisible(scope); addAndMakeVisible(curve); }
+
+    void setSamples(const float* trace) { scope.setSamples(trace); }
+    void setCurve(float threshDb, float ratio, float makeupDb, float mixAmt)
+    {
+        curve.setCurve(threshDb, ratio, makeupDb, mixAmt);
+    }
+
+private:
+    void resized() override
+    {
+        auto b = getLocalBounds();
+        auto left = b.removeFromLeft(b.getWidth() / 2);
+        left.removeFromRight(4);
+        scope.setBounds(left);
+        curve.setBounds(b);
+    }
+
+    WaveformScope scope;
+    TransferCurveView curve;
+};
+
+/** Composite Preamp page view: the input-level VU gauge, a real FFT
+    "harmonic color" bar view fed genuinely POST the Character waveshaper
+    (so it shows the actual harmonics that stage adds, not a fake
+    animation), and the HPF's analytic frequency-response curve. */
+class PreampView : public juce::Component
+{
+public:
+    PreampView() { addAndMakeVisible(vu); addAndMakeVisible(harmColor); addAndMakeVisible(freqResp); }
+
+    void pushVu(float db) { vu.pushDb(db); }
+    void updateHarmonic(const float* samples) { harmColor.update(samples); }
+    void setHarmonicSampleRate(double sr) { harmColor.setSampleRate(sr); }
+    void setHpf(float hz, double sr) { freqResp.setHighPass(hz, sr); }
+
+private:
+    void resized() override
+    {
+        auto b = getLocalBounds();
+        auto left = b.removeFromLeft(juce::jmin(b.getWidth() / 3, 150));
+        vu.setBounds(left.withSizeKeepingCentre(juce::jmin(left.getWidth(), 130), left.getHeight()));
+        b.removeFromLeft(6);
+        auto mid = b.removeFromLeft(b.getWidth() / 2);
+        mid.removeFromRight(4);
+        harmColor.setBounds(mid);
+        freqResp.setBounds(b);
+    }
+
+    VUMeter vu;
+    SpectrumAnalyzer harmColor;
+    FreqResponseView freqResp;
+};
+
+/** Composite Saturator page view: the existing in-vs-out waveform scope
+    plus a real FFT "harmonic content" bar view fed genuinely POST the
+    saturator (RawSatOut) — shows the actual harmonics the drive/tone/
+    ceiling stage is adding, not a fake animation. */
+class SaturatorView : public juce::Component
+{
+public:
+    SaturatorView() { addAndMakeVisible(scope); addAndMakeVisible(harmonics); }
+
+    void setSamples(const float* out, const float* in) { scope.setSamples(out, in); }
+    void updateHarmonics(const float* samples) { harmonics.update(samples); }
+    void setHarmonicSampleRate(double sr) { harmonics.setSampleRate(sr); }
+
+private:
+    void resized() override
+    {
+        auto b = getLocalBounds();
+        auto left = b.removeFromLeft(b.getWidth() / 2);
+        left.removeFromRight(4);
+        scope.setBounds(left);
+        harmonics.setBounds(b);
+    }
+
+    WaveformScope scope;
+    SpectrumAnalyzer harmonics;
 };
 
 /**
@@ -475,8 +776,9 @@ private:
     {
         LedMeter meterIn, meterOut;
         juce::Label capIn, capOut, dbIn, dbOut, grLabel;
-        juce::TextButton bypassBtn { "BYP" };
+        juce::TextButton bypassBtn { "BYP" }, soloBtn { "SOLO" };
         std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> bypassAttachment;
+        juce::String bypassParamID;
         int tapIn = 0, tapOut = 0;
         int grIndex = -1;   // -1 = no GR readout for this module
         void setVisible(bool v)
@@ -486,6 +788,7 @@ private:
             dbIn.setVisible(v); dbOut.setVisible(v);
             grLabel.setVisible(v && grIndex >= 0);
             bypassBtn.setVisible(v);
+            soloBtn.setVisible(v);
         }
     };
 
@@ -493,11 +796,25 @@ private:
     ModuleMeterUI& addModuleMeter(const juce::String& tab, int tapIn, int tapOut, int grIndex,
                                    const juce::String& bypassParamID);
     void applyPreset(int presetIndex);
+    void toggleSolo(const juce::String& bypassParamID);
+    void updateSoloButtonStates();
     void showPage(int index);
     void layoutKnobRow(const std::vector<KnobUI*>& row, juce::Rectangle<int> area,
                         int labelH, int knobW, int knobH, int cellW);
     void layoutModuleMeter(ModuleMeterUI& mm, juce::Rectangle<int> area);
     void timerCallback() override;
+
+    // Resizable/scalable window: all real layout below is computed once
+    // against this fixed virtual canvas (matching the original mockup's
+    // 900x560 proportions), then uniformly scaled — via contentRoot's
+    // transform for controls/visualisers, and via an equal-and-opposite
+    // Graphics transform in paint() for the hand-drawn background — to
+    // fill whatever real window size the host/user actually resized to.
+    // This keeps every existing pixel-based layout/paint calculation
+    // below correct unchanged; only the two spots that establish the
+    // virtual canvas and apply the transform needed to change.
+    static constexpr int baseW = 900, baseH = 560;
+    juce::Component contentRoot;
 
     static constexpr int titleBarH  = 30;
     static constexpr int footerH    = 34;
@@ -557,21 +874,21 @@ private:
     //   EQ: real FFT spectrum analyser (post-EQ signal)
     //   RES: dynamic-suppression depth history
     //   SAT: waveform in-vs-out oscilloscope (dual trace)
-    VUMeter preVu;
+    PreampView preView;
     juce::Label preVuTitle;
     EnvelopeGraph gateEnvGraph;
     juce::Label gateEnvTitle;
     EnvelopeGraph essEnvGraph;
     juce::Label essEnvTitle;
-    EnvelopeGraph compGrGraph;
+    CompressorView compView;
     juce::Label compGrTitle;
-    WaveformScope optoScope;
+    OptoView optoView;
     juce::Label optoScopeTitle;
     SpectrumAnalyzer eqSpectrum;
     juce::Label eqSpectrumTitle;
     EnvelopeGraph resSuppressGraph;
     juce::Label resSuppressTitle;
-    WaveformScope satScope;
+    SaturatorView satView;
     juce::Label satScopeTitle;
     Goniometer dblGoniometer;
     juce::Label dblGoniometerTitle;
@@ -587,6 +904,11 @@ private:
         optoTabIndex = 3, eqTabIndex = 4, resTabIndex = 9, satTabIndex = 5,
         dblTabIndex = 8, revTabIndex = 6, dlyTabIndex = 7, limTabIndex = 12;
 
+    // "Listen" toggles — Gate and De-esser only, since those are the two
+    // modules with a genuinely distinct detector signal worth auditioning.
+    juce::TextButton gateListenBtn { "LISTEN" }, essListenBtn { "LISTEN" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> gateListenAttachment, essListenAttachment;
+
     // Factory preset picker (title bar) — drives the 12 macro knobs.
     juce::ComboBox presetBox;
 
@@ -597,6 +919,21 @@ private:
     std::unique_ptr<juce::FileChooser> fileChooser;
     void savePresetToFile();
     void loadPresetFromFile();
+
+    // Instant A/B compare (footer): switching slots snapshots whatever was
+    // loaded into the slot you're leaving and recalls the other slot's last
+    // snapshot (or seeds it with the current state, the first time it's
+    // visited) — no file save/load round-trip needed for a quick compare.
+    juce::TextButton abButtonA { "A" }, abButtonB { "B" };
+    juce::ValueTree stateA, stateB;
+    bool onSlotA = true;
+    void switchAbSlot(bool toA);
+
+    // Solo: reuses the existing per-module bypass params — soloing a
+    // module bypasses every OTHER module (remembering their prior states
+    // to restore) rather than needing separate solo DSP.
+    juce::String activeSoloParamID;
+    std::map<juce::String, bool> savedBypassStates;
 
     // Macros-page summary of which modules are currently bypassed, so
     // there's one place to see the whole chain's on/off state at a glance
