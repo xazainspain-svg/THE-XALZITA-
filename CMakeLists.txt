@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(XaLZa VERSION 1.0.0)
+project(XaLZa VERSION 1.1.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,10 +19,22 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(JUCE)
 
+# --- Embedded fonts --------------------------------------------------------
+# Space Grotesk + IBM Plex Mono, the exact two typefaces the original web
+# mockup uses (SIL OFL 1.1, free to embed/redistribute — see
+# Source/Fonts/LICENSE-FONTS.txt). Compiled straight into the plugin binary
+# via JUCE's BinaryData mechanism so the .vst3 never depends on the user
+# having these fonts installed on their system.
+juce_add_binary_data(XaLZaFonts SOURCES
+    Source/Fonts/SpaceGrotesk-Regular.ttf
+    Source/Fonts/SpaceGrotesk-SemiBold.ttf
+    Source/Fonts/IBMPlexMono-Regular.ttf
+    Source/Fonts/IBMPlexMono-Medium.ttf)
+
 juce_add_plugin(XaLZa
     COMPANY_NAME "xaza"
     IS_SYNTH FALSE
-    NEEDS_MIDI_INPUT FALSE
+    NEEDS_MIDI_INPUT TRUE
     NEEDS_MIDI_OUTPUT FALSE
     IS_MIDI_EFFECT FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
@@ -59,6 +71,7 @@ if (LINUX)
 endif()
 
 target_link_libraries(XaLZa PRIVATE
+    XaLZaFonts
     juce::juce_audio_utils
     juce::juce_dsp
     juce::juce_recommended_config_flags

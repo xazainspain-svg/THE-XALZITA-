@@ -2,8 +2,9 @@
 
 Esto es el código fuente completo de un plugin **VST3 real**, escrito en
 C++ con el framework JUCE — el mismo que usan la mayoría de plugins
-comerciales serios. No es un mockup ni una simulación: es una cadena de
-voz completa (8 módulos) que compila a un `.vst3` de verdad.
+comerciales serios. No es un mockup ni una simulación: es la cadena de
+voz completa de 12 módulos (igual que el mockup web original) que
+compila a un `.vst3` de verdad.
 
 **Por qué te doy código fuente y no un `.vst3` ya compilado:** yo trabajo
 en un sandbox Linux en la nube, y un VST3 compilado en Linux no funciona
@@ -17,21 +18,55 @@ paso abajo.
 
 ## Qué hace el plugin
 
-Los mismos 8 módulos que la versión Max for Live y el mockup web, en el
-mismo orden: **Preamp → Compresor → EQ → Saturador → Reverb + Delay
-(en paralelo, con duck) → Limitador → Ancho Estéreo**, más Ganancia de
-Entrada/Salida. 29 parámetros en total. Cada módulo (menos Master) tiene
-un knob "macro" grande que mueve varios parámetros finos a la vez, con
-el mismo comportamiento que las otras dos versiones: si tocas el macro,
-manda el macro; si después tocas un knob fino a mano, ese knob manda
-hasta que vuelvas a tocar el macro ("el último que tocaste gana").
+Los mismos 12 módulos del mockup web original, en el mismo orden de
+señal: **Preamp → Gate → De-esser → Glue Comp → Opto → EQ 550 →
+Resonance → Saturator → Doubler → Reverb → Delay → Limiter**, más
+Ganancia de Entrada/Salida y Ancho Estéreo. La interfaz también está
+organizada igual que el mockup: una pestaña "MACROS" con un knob grande
+por módulo, y una pestaña por módulo con sus controles finos — haz clic
+en el nombre del módulo a la izquierda para verlos.
 
-DSP usado (todo con las librerías estándar de JUCE, no matemática
-inventada): filtro paso-alto y shelving EQ (`juce::dsp::IIR::Filter`),
-compresor (`juce::dsp::Compressor`), saturación tipo tanh a mano,
-reverb (`juce::dsp::Reverb`), delay ping-pong estéreo con feedback
-cruzado (`juce::dsp::DelayLine`), limitador (`juce::dsp::Limiter`), y
-ancho estéreo mid-side hecho a mano.
+Cada módulo tiene un knob "macro" en la pestaña MACROS que mueve varios
+parámetros finos a la vez, con el mismo comportamiento que el mockup
+web: si tocas el macro, manda el macro; si después tocas un knob fino a
+mano, ese knob manda hasta que vuelvas a tocar el macro ("el último que
+tocaste gana"). Los valores de "neutral" (0%) y "carácter completo"
+(100%) de cada macro se copiaron directamente de los presets Flat y
+Warm Lead Vocal del mockup.
+
+DSP usado (todo con las librerías estándar de JUCE más matemática
+estándar de audio, no nada inventado): filtro paso-alto y EQ de 3
+bandas (`juce::dsp::IIR::Filter`), gate por envolvente con hold,
+de-esser dinámico (filtro paso-banda de detección + EQ dinámica),
+compresor Glue + un segundo compresor Opto más lento (`juce::dsp::
+Compressor`, con mezcla dry/wet propia cada uno), un notch de
+resonancia estático, saturación tipo tanh con tono y techo suave,
+doubler con dos voces de delay modulado (chorus), reverb con
+pre-delay y duck (`juce::dsp::Reverb`), delay ping-pong con spread,
+duck y auto-pan (`juce::dsp::DelayLine`), limitador con etapa de clip
+extra (`juce::dsp::Limiter`), y ancho estéreo mid-side hecho a mano.
+
+Una simplificación honesta: el knob "React" (Reactivity) del módulo
+Resonance está reservado para una versión futura que rastree
+dinámicamente el pico resonante — por ahora no hace nada, para no
+fingir un comportamiento que no está implementado.
+
+## Visualizadores (medidores en vivo)
+
+Cada pestaña de módulo tiene sus propios medidores de nivel IN/OUT (barras
+de LEDs, en tiempo real, tomados justo antes y después de ese módulo en
+la cadena de señal real). Comp, Opto y Limiter además muestran un número
+de "GR" (reducción de ganancia) en vivo. El panel MASTER tiene sus
+propios medidores de entrada/salida y un goniómetro (el pequeño gráfico
+X/Y que muestra el campo estéreo de la señal). Abajo del todo hay una
+barra con el nombre del plugin y el nivel de salida general. Todo esto
+lee la señal de audio real que pasa por el plugin — no son animaciones
+de mentira.
+
+Lo que todavía no está (para una futura versión, si lo quieres): las
+gráficas históricas tipo "línea que se mueve en el tiempo" que tiene el
+mockup web para cada módulo, el comparador A/B, y el navegador de
+presets.
 
 ## Dos formas de compilarlo
 
@@ -138,7 +173,7 @@ pero son ~6 GB de instalación y más pasos).
 XaLZa-VST-Source/
   CMakeLists.txt          <- configuración del build (descarga JUCE solo)
   Source/
-    Params.h              <- los 29 parámetros, rangos, y el sistema de macros
+    Params.h              <- los 69 parámetros, rangos, y el sistema de macros
     PluginProcessor.h/.cpp <- todo el DSP (la cadena de audio real)
     PluginEditor.h/.cpp    <- la interfaz gráfica (los knobs)
 ```
