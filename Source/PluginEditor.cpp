@@ -61,12 +61,53 @@ void XaLZaLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, int wid
 // =============================================================================
 // Editor
 // =============================================================================
+namespace
+{
+    // Exact-ID unit lookup (not a substring heuristic — "EqLow"/"EqHigh" are
+    // dB gains while "ResLow"/"ResHigh" are Hz cutoffs, so guessing from
+    // words like "Low"/"High" alone would mislabel one of the two) so every
+    // knob's textbox reads like a real control instead of a bare number.
+    juce::String inferUnitSuffix(const juce::String& id)
+    {
+        static const std::map<juce::String, juce::String> units = {
+            { XID::MasterInGain, " dB" }, { XID::MasterOutGain, " dB" }, { XID::MasterWidth, " %" },
+            { XID::PreGain, " dB" }, { XID::PreChar, " %" }, { XID::PreHPF, " Hz" }, { XID::PreMacro, " %" },
+            { XID::GateThresh, " dB" }, { XID::GateRange, " dB" }, { XID::GateAttack, " ms" },
+            { XID::GateHold, " ms" }, { XID::GateRelease, " ms" }, { XID::GateMacro, " %" },
+            { XID::EssThresh, " dB" }, { XID::EssRange, " dB" }, { XID::EssFreq, " Hz" }, { XID::EssMacro, " %" },
+            { XID::CompThresh, " dB" }, { XID::CompMakeup, " dB" }, { XID::CompAttack, " ms" },
+            { XID::CompRelease, " ms" }, { XID::CompMix, " %" }, { XID::CompRatio, ":1" }, { XID::CompMacro, " %" },
+            { XID::OptoReduction, " %" }, { XID::OptoGain, " dB" }, { XID::OptoMix, " %" }, { XID::OptoMacro, " %" },
+            { XID::EqLow, " dB" }, { XID::EqMid, " dB" }, { XID::EqHigh, " dB" }, { XID::EqMacro, " %" },
+            { XID::ResAmount, " %" }, { XID::ResSharpness, " %" }, { XID::ResReactivity, " %" },
+            { XID::ResNotchLimit, " dB" }, { XID::ResLow, " Hz" }, { XID::ResHigh, " Hz" }, { XID::ResMacro, " %" },
+            { XID::SatDrive, " %" }, { XID::SatTone, " dB" }, { XID::SatCeiling, " dB" }, { XID::SatMix, " %" },
+            { XID::SatMacro, " %" },
+            { XID::DblDetune, " %" }, { XID::DblWidth, " %" }, { XID::DblDelay, " ms" }, { XID::DblMix, " %" },
+            { XID::DblMacro, " %" },
+            { XID::RevSize, " %" }, { XID::RevDecay, " s" }, { XID::RevPreDelay, " ms" }, { XID::RevMix, " %" },
+            { XID::RevDuck, " %" }, { XID::RevDuckRelease, " ms" }, { XID::RevMacro, " %" },
+            { XID::DlyTime, " ms" }, { XID::DlyFeedback, " %" }, { XID::DlySpread, " %" }, { XID::DlyMix, " %" },
+            { XID::DlyDuck, " %" }, { XID::DlyDuckRelease, " ms" }, { XID::DlyPanRate, " Hz" }, { XID::DlyMacro, " %" },
+            { XID::LimInputGain, " dB" }, { XID::LimCeiling, " dB" }, { XID::LimRelease, " ms" },
+            { XID::LimClip, " %" }, { XID::LimMacro, " %" },
+        };
+        auto it = units.find(id);
+        return it != units.end() ? it->second : juce::String();
+    }
+}
+
 XaLZaEditor::KnobUI& XaLZaEditor::addKnob(const juce::String& paramID, const juce::String& shortLabel,
                                            bool accent)
 {
     auto k = std::make_unique<KnobUI>();
     k->slider.getProperties().set("accent", accent);
     k->slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, accent ? 54 : 46, 15);
+    k->slider.setTextValueSuffix(inferUnitSuffix(paramID));
+    // Double-click any knob to snap it back to its default value — real
+    // control, not just decoration.
+    if (auto* param = proc.apvts.getParameter(paramID))
+        k->slider.setDoubleClickReturnValue(true, (double) param->convertFrom0to1(param->getDefaultValue()));
     addChildComponent(k->slider);   // starts hidden — showPage() reveals the current page's knobs
 
     k->label.setText(shortLabel, juce::dontSendNotification);
@@ -87,7 +128,8 @@ XaLZaEditor::KnobUI& XaLZaEditor::addKnob(const juce::String& paramID, const juc
     return *knobs.back();
 }
 
-XaLZaEditor::ModuleMeterUI& XaLZaEditor::addModuleMeter(const juce::String& tab, int tapIn, int tapOut, int grIndex)
+XaLZaEditor::ModuleMeterUI& XaLZaEditor::addModuleMeter(const juce::String& tab, int tapIn, int tapOut, int grIndex,
+                                                          const juce::String& bypassParamID)
 {
     auto it = std::find(tabNames.begin(), tabNames.end(), tab);
     jassert(it != tabNames.end());
@@ -97,6 +139,15 @@ XaLZaEditor::ModuleMeterUI& XaLZaEditor::addModuleMeter(const juce::String& tab,
     mm->tapIn = tapIn;
     mm->tapOut = tapOut;
     mm->grIndex = grIndex;
+
+    mm->bypassBtn.setClickingTogglesState(true);
+    mm->bypassBtn.setColour(juce::TextButton::buttonOnColourId, XaLZaColour::danger);
+    mm->bypassBtn.setColour(juce::TextButton::textColourOnId, XaLZaColour::textHi);
+    mm->bypassBtn.setColour(juce::TextButton::textColourOffId, XaLZaColour::textMuted);
+    mm->bypassBtn.setTooltip("Bypass this module only");
+    addChildComponent(mm->bypassBtn);
+    mm->bypassAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        proc.apvts, bypassParamID, mm->bypassBtn);
 
     auto setupLabel = [this] (juce::Label& l, const juce::String& text, bool bold)
     {
@@ -180,18 +231,18 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     addPage("LIM",  { { XID::LimInputGain, "InGain" }, { XID::LimCeiling, "Ceiling" }, { XID::LimRelease, "Release" }, { XID::LimClip, "Clip" } });
 
     // ---- Per-module IN/OUT meters + GR readouts, tapping the real serial chain ----
-    addModuleMeter("PRE",  (int) XaLZaProcessor::TapIn,   (int) XaLZaProcessor::TapPre,  -1);
-    addModuleMeter("GATE", (int) XaLZaProcessor::TapPre,  (int) XaLZaProcessor::TapGate, -1);
-    addModuleMeter("ESS",  (int) XaLZaProcessor::TapGate, (int) XaLZaProcessor::TapEss,  -1);
-    addModuleMeter("COMP", (int) XaLZaProcessor::TapEss,  (int) XaLZaProcessor::TapComp,  0);
-    addModuleMeter("OPTO", (int) XaLZaProcessor::TapComp, (int) XaLZaProcessor::TapOpto,  1);
-    addModuleMeter("EQ",   (int) XaLZaProcessor::TapOpto, (int) XaLZaProcessor::TapEq,   -1);
-    addModuleMeter("RES",  (int) XaLZaProcessor::TapEq,   (int) XaLZaProcessor::TapRes,  -1);
-    addModuleMeter("SAT",  (int) XaLZaProcessor::TapRes,  (int) XaLZaProcessor::TapSat,  -1);
-    addModuleMeter("DBL",  (int) XaLZaProcessor::TapSat,  (int) XaLZaProcessor::TapDbl,  -1);
-    addModuleMeter("REV",  (int) XaLZaProcessor::TapDbl,  (int) XaLZaProcessor::TapRev,  -1);
-    addModuleMeter("DLY",  (int) XaLZaProcessor::TapRev,  (int) XaLZaProcessor::TapDly,  -1);
-    addModuleMeter("LIM",  (int) XaLZaProcessor::TapDly,  (int) XaLZaProcessor::TapLim,   2);
+    addModuleMeter("PRE",  (int) XaLZaProcessor::TapIn,   (int) XaLZaProcessor::TapPre,  -1, XID::PreBypass);
+    addModuleMeter("GATE", (int) XaLZaProcessor::TapPre,  (int) XaLZaProcessor::TapGate, -1, XID::GateBypass);
+    addModuleMeter("ESS",  (int) XaLZaProcessor::TapGate, (int) XaLZaProcessor::TapEss,  -1, XID::EssBypass);
+    addModuleMeter("COMP", (int) XaLZaProcessor::TapEss,  (int) XaLZaProcessor::TapComp,  0, XID::CompBypass);
+    addModuleMeter("OPTO", (int) XaLZaProcessor::TapComp, (int) XaLZaProcessor::TapOpto,  1, XID::OptoBypass);
+    addModuleMeter("EQ",   (int) XaLZaProcessor::TapOpto, (int) XaLZaProcessor::TapEq,   -1, XID::EqBypass);
+    addModuleMeter("RES",  (int) XaLZaProcessor::TapEq,   (int) XaLZaProcessor::TapRes,  -1, XID::ResBypass);
+    addModuleMeter("SAT",  (int) XaLZaProcessor::TapRes,  (int) XaLZaProcessor::TapSat,  -1, XID::SatBypass);
+    addModuleMeter("DBL",  (int) XaLZaProcessor::TapSat,  (int) XaLZaProcessor::TapDbl,  -1, XID::DblBypass);
+    addModuleMeter("REV",  (int) XaLZaProcessor::TapDbl,  (int) XaLZaProcessor::TapRev,  -1, XID::RevBypass);
+    addModuleMeter("DLY",  (int) XaLZaProcessor::TapRev,  (int) XaLZaProcessor::TapDly,  -1, XID::DlyBypass);
+    addModuleMeter("LIM",  (int) XaLZaProcessor::TapDly,  (int) XaLZaProcessor::TapLim,   2, XID::LimBypass);
 
     // ---- Master mini-panel visualisers: real In/Out meters + a stereo goniometer ----
     auto setupCap = [this] (juce::Label& l, const juce::String& text)
@@ -245,6 +296,10 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     setupVizLabel(eqSpectrumTitle,    "RESPONSE SPECTRUM (POST-EQ)");
     setupVizLabel(resSuppressTitle,   "DYNAMIC SUPPRESSION");
     setupVizLabel(satScopeTitle,      "WAVEFORM: IN VS OUT");
+    setupVizLabel(dblGoniometerTitle, "STEREO FIELD (POST-DOUBLER)");
+    setupVizLabel(revDecayTitle,      "DECAY TAIL (POST-REVERB LEVEL)");
+    setupVizLabel(dlyScopeTitle,      "ECHO WAVEFORM (POST-DELAY)");
+    setupVizLabel(limViewTitle,       "BRICKWALL OUTPUT + LOUDNESS");
     addChildComponent(preVu);
     addChildComponent(gateEnvGraph);
     addChildComponent(essEnvGraph);
@@ -253,6 +308,10 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     addChildComponent(eqSpectrum);
     addChildComponent(resSuppressGraph);
     addChildComponent(satScope);
+    addChildComponent(dblGoniometer);
+    addChildComponent(revDecayGraph);
+    addChildComponent(dlyScope);
+    addChildComponent(limView);
     eqSpectrum.setSampleRate(proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0);
 
     auto resolveTab = [this] (const juce::String& tab, int fallback) -> int
@@ -268,6 +327,10 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     eqTabIndex   = resolveTab("EQ",   eqTabIndex);
     resTabIndex  = resolveTab("RES",  resTabIndex);
     satTabIndex  = resolveTab("SAT",  satTabIndex);
+    dblTabIndex  = resolveTab("DBL",  dblTabIndex);
+    revTabIndex  = resolveTab("REV",  revTabIndex);
+    dlyTabIndex  = resolveTab("DLY",  dlyTabIndex);
+    limTabIndex  = resolveTab("LIM",  limTabIndex);
 
     bigViz = {
         { preTabIndex,  &preVu,            &preVuTitle },
@@ -278,11 +341,53 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
         { eqTabIndex,   &eqSpectrum,       &eqSpectrumTitle },
         { resTabIndex,  &resSuppressGraph, &resSuppressTitle },
         { satTabIndex,  &satScope,         &satScopeTitle },
+        { dblTabIndex,  &dblGoniometer,    &dblGoniometerTitle },
+        { revTabIndex,  &revDecayGraph,    &revDecayTitle },
+        { dlyTabIndex,  &dlyScope,         &dlyScopeTitle },
+        { limTabIndex,  &limView,          &limViewTitle },
     };
+
+    // ---- Factory preset picker (title bar) — drives the 12 macro knobs ----
+    presetBox.setTextWhenNothingSelected("PRESETS");
+    presetBox.setJustificationType(juce::Justification::centred);
+    {
+        int i = 1;
+        for (auto& preset : xalzaFactoryPresets())
+            presetBox.addItem(preset.name, i++);
+    }
+    presetBox.onChange = [this]
+    {
+        int id = presetBox.getSelectedId();
+        if (id > 0)
+            applyPreset(id - 1);
+    };
+    addAndMakeVisible(presetBox);
 
     setSize(900, 560);
     showPage(0);
     startTimerHz(30);
+}
+
+void XaLZaEditor::applyPreset(int presetIndex)
+{
+    auto& presets = xalzaFactoryPresets();
+    if (presetIndex < 0 || presetIndex >= (int) presets.size())
+        return;
+
+    // Driving each macro parameter (rather than every individual real
+    // parameter underneath it) is enough: MacroTouchTracker always treats
+    // "just touched" as the winner, so this reconfigures the whole chain
+    // through the exact same signal path a manual macro turn would use.
+    for (auto& mp : presets[(size_t) presetIndex].macroPercents)
+    {
+        if (auto* param = proc.apvts.getParameter(mp.first))
+        {
+            float norm = juce::jlimit(0.0f, 1.0f, param->convertTo0to1(mp.second));
+            param->beginChangeGesture();
+            param->setValueNotifyingHost(norm);
+            param->endChangeGesture();
+        }
+    }
 }
 
 XaLZaEditor::~XaLZaEditor()
@@ -358,6 +463,8 @@ void XaLZaEditor::layoutModuleMeter(ModuleMeterUI& mm, juce::Rectangle<int> area
 {
     const int blockW = 46, meterH = 40, capH = 11, dbH = 13, blockGap = 18;
     const int totalW = blockW * 2 + blockGap;
+
+    mm.bypassBtn.setBounds(area.getX(), area.getY(), 52, 20);
 
     auto row = area.removeFromTop(capH + meterH + dbH).withWidth(totalW).withRight(area.getRight());
     auto inBlock  = row.removeFromLeft(blockW);
@@ -467,6 +574,41 @@ void XaLZaEditor::timerCallback()
         }
         satScope.setSamples(bufOut, bufIn);   // out = primary/accent, in = muted reference
     }
+    else if (currentTab == dblTabIndex)
+    {
+        constexpr int numPts = 300;
+        std::vector<std::pair<float, float>> pts;
+        pts.reserve((size_t) numPts);
+        int pos = proc.getDblScopeWritePos();
+        for (int i = 0; i < numPts; ++i)
+        {
+            int idx = pos - 1 - i;
+            pts.emplace_back(proc.dblScopeSampleL(idx), proc.dblScopeSampleR(idx));
+        }
+        dblGoniometer.setPoints(pts);
+    }
+    else if (currentTab == revTabIndex)
+    {
+        float outDbR = juce::jmax(proc.getMeterDbL((int) XaLZaProcessor::TapRev),
+                                   proc.getMeterDbR((int) XaLZaProcessor::TapRev));
+        revDecayGraph.push(juce::jlimit(0.0f, 1.0f, (outDbR + 60.0f) / 60.0f));
+    }
+    else if (currentTab == dlyTabIndex)
+    {
+        float buf[WaveformScope::numPoints];
+        int pos = proc.getRawWritePos((int) XaLZaProcessor::RawDly);
+        for (int i = 0; i < WaveformScope::numPoints; ++i)
+            buf[i] = proc.rawSample((int) XaLZaProcessor::RawDly, pos - WaveformScope::numPoints + i);
+        dlyScope.setSamples(buf);
+    }
+    else if (currentTab == limTabIndex)
+    {
+        float buf[WaveformScope::numPoints];
+        int pos = proc.getRawWritePos((int) XaLZaProcessor::RawLim);
+        for (int i = 0; i < WaveformScope::numPoints; ++i)
+            buf[i] = proc.rawSample((int) XaLZaProcessor::RawLim, pos - WaveformScope::numPoints + i);
+        limView.update(buf, proc.getLufs());
+    }
 
     if (currentTab == 0)
     {
@@ -510,7 +652,8 @@ void XaLZaEditor::paint(juce::Graphics& g)
     g.setColour(XaLZaColour::textHi);
     g.setFont(juce::Font(juce::FontOptions(15.0f).withStyle("Bold")));
     g.drawText("THE XALZA", titleArea.reduced(8, 0), juce::Justification::centredLeft);
-    titleArea.removeFromRight(80);   // leave room for the bypass button
+    titleArea.removeFromRight(80);    // leave room for the bypass button
+    titleArea.removeFromRight(140);   // leave room for the preset picker
     g.setFont(juce::Font(juce::FontOptions(11.0f)));
     g.setColour(XaLZaColour::textMuted);
     g.drawText("Vocal Chain", titleArea.reduced(10, 0), juce::Justification::centredRight);
@@ -571,6 +714,7 @@ void XaLZaEditor::resized()
     auto full = getLocalBounds();
     auto titleArea = full.removeFromTop(titleBarH);
     bypassButton.setBounds(titleArea.removeFromRight(80).reduced(10, 5));
+    presetBox.setBounds(titleArea.removeFromRight(140).reduced(6, 6));
     full.removeFromBottom(footerH);
 
     auto rail = full.removeFromLeft(railW);

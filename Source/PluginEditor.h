@@ -394,6 +394,51 @@ private:
     bool hasB = false;
 };
 
+/** Composite Limiter-page view: a real "brickwall" oscilloscope of the
+    post-limiter waveform (the ceiling reads as a visibly flattened top),
+    plus a real (simplified ITU-R BS.1770) K-weighted LUFS numeric readout
+    with a scrolling history line underneath — matches the mockup's
+    "Brickwall Output" + "Loudness - LUFS" pairing for this page. */
+class LimiterView : public juce::Component
+{
+public:
+    LimiterView()
+    {
+        addAndMakeVisible(scope);
+        addAndMakeVisible(lufsGraph);
+        addAndMakeVisible(lufsLabel);
+        lufsLabel.setJustificationType(juce::Justification::centredLeft);
+        lufsLabel.setFont(juce::Font(juce::FontOptions(13.0f).withStyle("Bold")));
+        lufsLabel.setColour(juce::Label::textColourId, XaLZaColour::textHi);
+    }
+
+    void update(const float* waveform, float lufsDb)
+    {
+        scope.setSamples(waveform);
+        float norm = juce::jlimit(0.0f, 1.0f, (lufsDb + 36.0f) / 36.0f);   // -36..0 LUFS window
+        lufsGraph.push(norm);
+        lufsLabel.setText(lufsDb <= -69.5f ? juce::String("LUFS  -inf")
+                                            : ("LUFS  " + juce::String(lufsDb, 1)),
+                           juce::dontSendNotification);
+    }
+
+private:
+    void resized() override
+    {
+        auto b = getLocalBounds();
+        auto top = b.removeFromTop(b.getHeight() / 2);
+        scope.setBounds(top.reduced(0, 2));
+        b.removeFromTop(4);
+        auto lufsRow = b.removeFromTop(18);
+        lufsLabel.setBounds(lufsRow);
+        lufsGraph.setBounds(b);
+    }
+
+    WaveformScope scope;
+    EnvelopeGraph lufsGraph;
+    juce::Label lufsLabel;
+};
+
 /**
     Editor layout mirrors the web mockup: a narrow vertical tab rail on
     the left (MACROS + the 12 modules, in the mockup's own tab order),
@@ -428,6 +473,8 @@ private:
     {
         LedMeter meterIn, meterOut;
         juce::Label capIn, capOut, dbIn, dbOut, grLabel;
+        juce::TextButton bypassBtn { "BYP" };
+        std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> bypassAttachment;
         int tapIn = 0, tapOut = 0;
         int grIndex = -1;   // -1 = no GR readout for this module
         void setVisible(bool v)
@@ -436,11 +483,14 @@ private:
             capIn.setVisible(v); capOut.setVisible(v);
             dbIn.setVisible(v); dbOut.setVisible(v);
             grLabel.setVisible(v && grIndex >= 0);
+            bypassBtn.setVisible(v);
         }
     };
 
     KnobUI& addKnob(const juce::String& paramID, const juce::String& shortLabel, bool accent);
-    ModuleMeterUI& addModuleMeter(const juce::String& tab, int tapIn, int tapOut, int grIndex);
+    ModuleMeterUI& addModuleMeter(const juce::String& tab, int tapIn, int tapOut, int grIndex,
+                                   const juce::String& bypassParamID);
+    void applyPreset(int presetIndex);
     void showPage(int index);
     void layoutKnobRow(const std::vector<KnobUI*>& row, juce::Rectangle<int> area,
                         int labelH, int knobW, int knobH, int cellW);
@@ -521,10 +571,22 @@ private:
     juce::Label resSuppressTitle;
     WaveformScope satScope;
     juce::Label satScopeTitle;
+    Goniometer dblGoniometer;
+    juce::Label dblGoniometerTitle;
+    EnvelopeGraph revDecayGraph;
+    juce::Label revDecayTitle;
+    WaveformScope dlyScope;
+    juce::Label dlyScopeTitle;
+    LimiterView limView;
+    juce::Label limViewTitle;
 
     // Resolved from tabNames in the constructor.
     int preTabIndex = 1, gateTabIndex = 10, essTabIndex = 11, compTabIndex = 2,
-        optoTabIndex = 3, eqTabIndex = 4, resTabIndex = 9, satTabIndex = 5;
+        optoTabIndex = 3, eqTabIndex = 4, resTabIndex = 9, satTabIndex = 5,
+        dblTabIndex = 8, revTabIndex = 6, dlyTabIndex = 7, limTabIndex = 12;
+
+    // Factory preset picker (title bar) — drives the 12 macro knobs.
+    juce::ComboBox presetBox;
 
     // Generic {tab, component, title} list used by showPage()/resized() so
     // every "big viz" page shares one layout path instead of one

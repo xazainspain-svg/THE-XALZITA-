@@ -77,7 +77,7 @@ public:
     // (oscilloscopes / harmonic bars). Each is genuinely POST that module's
     // own processing — never the module's input — so every visualiser shows
     // what that stage actually did to the signal.
-    enum RawTap { RawPre = 0, RawGate, RawSatIn, RawSatOut, RawOpto, kNumRawTaps };
+    enum RawTap { RawPre = 0, RawGate, RawSatIn, RawSatOut, RawOpto, RawDly, RawLim, kNumRawTaps };
     static constexpr int kRawSize = 8192; // power of two
     float rawSample(int tap, int i) const noexcept
     {
@@ -100,6 +100,18 @@ public:
     float getEssReductionDb() const noexcept { return essReductionDbUI.load(std::memory_order_relaxed); }
     float getResCutDb() const noexcept { return resCutDbUI.load(std::memory_order_relaxed); }
 
+    // Post-Doubler stereo scope: a decimated ring of the wet doubler
+    // signal's L/R, genuinely post that module, for the Doubler page's
+    // stereo-field goniometer.
+    float dblScopeSampleL(int i) const noexcept { return dblScopeL[(size_t) (i & (kScopeSize - 1))].load(std::memory_order_relaxed); }
+    float dblScopeSampleR(int i) const noexcept { return dblScopeR[(size_t) (i & (kScopeSize - 1))].load(std::memory_order_relaxed); }
+    int   getDblScopeWritePos() const noexcept { return dblScopeWritePos.load(std::memory_order_relaxed); }
+
+    // Real (simplified, one-pole-integrated) ITU-R BS.1770 K-weighted
+    // momentary loudness of the true final output (post-limiter, post-
+    // width, post-master-gain) — a real measurement, not a fake animation.
+    float getLufs() const noexcept { return lufsUI.load(std::memory_order_relaxed); }
+
 private:
     void updateMeter(int tap, const juce::AudioBuffer<float>& buf, int numSamples, int numCh);
     void updateGr(int moduleIdx, float preDb, float postDb);
@@ -116,6 +128,13 @@ private:
     std::atomic<float> essBandDbUI { -100.0f };
     std::atomic<float> essReductionDbUI { 0.0f };
     std::atomic<float> resCutDbUI { 0.0f };
+
+    std::array<std::atomic<float>, kScopeSize> dblScopeL, dblScopeR;
+    std::atomic<int> dblScopeWritePos { 0 };
+
+    juce::dsp::IIR::Filter<float> lufsPreL, lufsPreR, lufsRlbL, lufsRlbR;
+    float lufsMsL = 0.0f, lufsMsR = 0.0f;
+    std::atomic<float> lufsUI { -70.0f };
 
     std::array<std::atomic<float>, kNumMeterTaps> meterDbL, meterDbR;
     std::array<std::atomic<float>, 3> grDb;

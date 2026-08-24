@@ -17,6 +17,22 @@ namespace XID
     static const juce::String MasterWidth   = "MasterWidth";
     static const juce::String MasterBypass  = "MasterBypass";
 
+    // Per-module bypass — real DSP-level dry passthrough for that one stage
+    // only (everything else in the chain keeps processing normally), so any
+    // module can be A/B'd in isolation.
+    static const juce::String PreBypass  = "PreBypass";
+    static const juce::String GateBypass = "GateBypass";
+    static const juce::String EssBypass  = "EssBypass";
+    static const juce::String CompBypass = "CompBypass";
+    static const juce::String OptoBypass = "OptoBypass";
+    static const juce::String EqBypass   = "EqBypass";
+    static const juce::String ResBypass  = "ResBypass";
+    static const juce::String SatBypass  = "SatBypass";
+    static const juce::String DblBypass  = "DblBypass";
+    static const juce::String RevBypass  = "RevBypass";
+    static const juce::String DlyBypass  = "DlyBypass";
+    static const juce::String LimBypass  = "LimBypass";
+
     static const juce::String PreMacro = "PreMacro";
     static const juce::String PreGain  = "PreGain";
     static const juce::String PreChar  = "PreChar";
@@ -113,6 +129,23 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     add(XID::MasterOutGain, "Master Out Gain", -24.0f, 24.0f, 0.0f);
     add(XID::MasterWidth, "Stereo Width", 0.0f, 200.0f, 100.0f);
     p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{ XID::MasterBypass, uid++ }, "Bypass", false));
+
+    auto addBypass = [&](const juce::String& id, const juce::String& name)
+    {
+        p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{ id, uid++ }, name, false));
+    };
+    addBypass(XID::PreBypass,  "Pre Bypass");
+    addBypass(XID::GateBypass, "Gate Bypass");
+    addBypass(XID::EssBypass,  "De-esser Bypass");
+    addBypass(XID::CompBypass, "Comp Bypass");
+    addBypass(XID::OptoBypass, "Opto Bypass");
+    addBypass(XID::EqBypass,   "EQ Bypass");
+    addBypass(XID::ResBypass,  "Resonance Bypass");
+    addBypass(XID::SatBypass,  "Saturator Bypass");
+    addBypass(XID::DblBypass,  "Doubler Bypass");
+    addBypass(XID::RevBypass,  "Reverb Bypass");
+    addBypass(XID::DlyBypass,  "Delay Bypass");
+    addBypass(XID::LimBypass,  "Limiter Bypass");
 
     add(XID::PreMacro, "Pre Intensity", 0.0f, 100.0f, 0.0f);
     add(XID::PreGain, "Pre Gain", 0.0f, 70.0f, 0.0f);
@@ -244,6 +277,57 @@ inline const std::map<juce::String, std::vector<MacroTarget>>& xalzaMacroMap()
                             {XID::LimRelease, 80.0f, 80.0f}, {XID::LimClip, 0.0f, 10.0f} } },
     };
     return m;
+}
+
+// ---------------------------------------------------------------------------
+// Factory presets — each one just drives the 12 macro knobs to a fixed
+// percentage. Because MacroTouchTracker always treats "just touched" as
+// wins, applying a preset is simply "touch every macro to this value" —
+// the real per-module parameters underneath don't need to move at all,
+// so a preset does exactly what turning all 12 macro knobs by hand would
+// do, through the exact same signal path.
+// ---------------------------------------------------------------------------
+struct XalzaPreset
+{
+    juce::String name;
+    std::vector<std::pair<juce::String, float>> macroPercents;   // {macroID, 0..100}
+};
+
+inline const std::vector<XalzaPreset>& xalzaFactoryPresets()
+{
+    static const std::vector<XalzaPreset> presets = {
+        { "Init (Flat)", {
+            { XID::PreMacro, 0.0f }, { XID::GateMacro, 0.0f }, { XID::EssMacro, 0.0f },
+            { XID::CompMacro, 0.0f }, { XID::OptoMacro, 0.0f }, { XID::EqMacro, 0.0f },
+            { XID::ResMacro, 0.0f }, { XID::SatMacro, 0.0f }, { XID::DblMacro, 0.0f },
+            { XID::RevMacro, 0.0f }, { XID::DlyMacro, 0.0f }, { XID::LimMacro, 0.0f },
+        } },
+        { "Warm Lead Vocal", {
+            { XID::PreMacro, 100.0f }, { XID::GateMacro, 100.0f }, { XID::EssMacro, 100.0f },
+            { XID::CompMacro, 100.0f }, { XID::OptoMacro, 100.0f }, { XID::EqMacro, 100.0f },
+            { XID::ResMacro, 100.0f }, { XID::SatMacro, 100.0f }, { XID::DblMacro, 100.0f },
+            { XID::RevMacro, 100.0f }, { XID::DlyMacro, 100.0f }, { XID::LimMacro, 100.0f },
+        } },
+        { "Bright Pop Vocal", {
+            { XID::PreMacro, 55.0f }, { XID::GateMacro, 70.0f }, { XID::EssMacro, 80.0f },
+            { XID::CompMacro, 85.0f }, { XID::OptoMacro, 40.0f }, { XID::EqMacro, 90.0f },
+            { XID::ResMacro, 60.0f }, { XID::SatMacro, 35.0f }, { XID::DblMacro, 65.0f },
+            { XID::RevMacro, 25.0f }, { XID::DlyMacro, 15.0f }, { XID::LimMacro, 75.0f },
+        } },
+        { "Broadcast / Podcast", {
+            { XID::PreMacro, 40.0f }, { XID::GateMacro, 90.0f }, { XID::EssMacro, 60.0f },
+            { XID::CompMacro, 100.0f }, { XID::OptoMacro, 70.0f }, { XID::EqMacro, 50.0f },
+            { XID::ResMacro, 70.0f }, { XID::SatMacro, 15.0f }, { XID::DblMacro, 0.0f },
+            { XID::RevMacro, 0.0f }, { XID::DlyMacro, 0.0f }, { XID::LimMacro, 90.0f },
+        } },
+        { "Intimate ASMR / Podcast", {
+            { XID::PreMacro, 20.0f }, { XID::GateMacro, 30.0f }, { XID::EssMacro, 50.0f },
+            { XID::CompMacro, 45.0f }, { XID::OptoMacro, 60.0f }, { XID::EqMacro, 35.0f },
+            { XID::ResMacro, 40.0f }, { XID::SatMacro, 10.0f }, { XID::DblMacro, 0.0f },
+            { XID::RevMacro, 10.0f }, { XID::DlyMacro, 0.0f }, { XID::LimMacro, 50.0f },
+        } },
+    };
+    return presets;
 }
 
 /** Listens to every macro + every macro-linked manual parameter, and
