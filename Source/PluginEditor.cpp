@@ -58,6 +58,63 @@ void XaLZaLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, int wid
     g.fillPath(pointer);
 }
 
+// Flat, sharp-cornered button skin — matches the mockup's .icon-btn-box /
+// .seg-btn / .modal-btn (1px hairline border, ~2px corner radius, no
+// gradient or drop shadow), replacing LookAndFeel_V4's rounded/glossy
+// default which was previously only recoloured, not reshaped.
+void XaLZaLookAndFeel::drawButtonBackground(juce::Graphics& g, juce::Button& button, const juce::Colour& backgroundColour,
+                                             bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown)
+{
+    auto bounds = button.getLocalBounds().toFloat().reduced(0.5f);
+    const float cornerSize = 2.0f;
+
+    juce::Colour fill = backgroundColour;
+    if (shouldDrawButtonAsDown)
+        fill = fill.getAlpha() > 0 ? fill.darker(0.25f) : XaLZaColour::panelControl.withAlpha(0.6f);
+    else if (shouldDrawButtonAsHighlighted)
+        fill = fill.getAlpha() > 0 ? fill.brighter(0.1f) : XaLZaColour::panelControl.withAlpha(0.35f);
+
+    if (fill.getAlpha() > 0)
+    {
+        g.setColour(fill);
+        g.fillRoundedRectangle(bounds, cornerSize);
+    }
+
+    // Buttons with a real (non-transparent) base colour always show their
+    // hairline border, like the mockup's permanently-boxed .icon-btn-box;
+    // plain "clickable text" buttons (transparent base, e.g. tab labels,
+    // the About footer link) only pick up the box on hover/press, so they
+    // read as text the rest of the time — same as the mockup's plain links.
+    if (backgroundColour.getAlpha() > 0 || shouldDrawButtonAsHighlighted || shouldDrawButtonAsDown)
+    {
+        g.setColour(XaLZaColour::borderSoft);
+        g.drawRoundedRectangle(bounds, cornerSize, 1.0f);
+    }
+}
+
+// Flat combo box skin — matches the mockup's .preset box, with a thin
+// stroked chevron instead of JUCE's default filled-triangle arrow glyph.
+void XaLZaLookAndFeel::drawComboBox(juce::Graphics& g, int width, int height, bool /*isButtonDown*/,
+                                     int /*buttonX*/, int /*buttonY*/, int buttonW, int /*buttonH*/, juce::ComboBox& /*box*/)
+{
+    auto bounds = juce::Rectangle<int>(0, 0, width, height).toFloat().reduced(0.5f);
+    const float cornerSize = 2.0f;
+
+    g.setColour(XaLZaColour::panelControl);
+    g.fillRoundedRectangle(bounds, cornerSize);
+    g.setColour(XaLZaColour::borderSoft);
+    g.drawRoundedRectangle(bounds, cornerSize, 1.0f);
+
+    auto arrowArea = juce::Rectangle<float>((float) (width - buttonW), 0.0f, (float) buttonW, (float) height);
+    auto c = arrowArea.getCentre();
+    juce::Path arrow;
+    arrow.startNewSubPath(c.x - 3.5f, c.y - 2.0f);
+    arrow.lineTo(c.x, c.y + 2.0f);
+    arrow.lineTo(c.x + 3.5f, c.y - 2.0f);
+    g.setColour(XaLZaColour::textMuted);
+    g.strokePath(arrow, juce::PathStrokeType(1.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+}
+
 // =============================================================================
 // Editor
 // =============================================================================
@@ -1088,6 +1145,20 @@ void XaLZaEditor::paint(juce::Graphics& g)
     g.setFont(juce::Font(juce::FontOptions(10.5f).withStyle("Bold")));
     g.setColour(outDb > -1.0f ? XaLZaColour::danger : XaLZaColour::textLabel);
     g.drawText(outText, footer.reduced(14, 0), juce::Justification::centredRight);
+}
+
+void XaLZaEditor::paintOverChildren(juce::Graphics& g)
+{
+    // Left accent stripe — matches the mockup's `.plugin::before` (a fixed
+    // 4px accent-coloured bar down the whole left edge of the window).
+    // Drawn in paintOverChildren (not paint()) so it sits on top of the
+    // tab rail and contentRoot's children instead of being painted over
+    // by them, since those are separate child Components composited after
+    // the editor's own paint() call returns.
+    float scale = getWidth() > 0 ? (float) getWidth() / (float) baseW : 1.0f;
+    g.addTransform(juce::AffineTransform::scale(scale));
+    g.setColour(XaLZaColour::accent);
+    g.fillRect(0, 0, 4, baseH);
 }
 
 void XaLZaEditor::resized()

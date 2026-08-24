@@ -25,7 +25,11 @@ namespace XaLZaColour
 
 /** Rotary knob: thin track, accent- or gray-coloured value arc, a
     pointer line, dark cap — matches the mockup's SVG knob look
-    (knob-svg circle.trk / .fil / .face). */
+    (knob-svg circle.trk / .fil / .face). Buttons/toggles/combo box are
+    also flattened here (sharp 2px corners, 1px hairline border, no
+    gradient/glossy sheen) to match the mockup's .seg-btn / .icon-btn-box
+    / .toggle-track / .preset flat CSS look instead of stock
+    LookAndFeel_V4's rounded, shaded default. */
 class XaLZaLookAndFeel : public juce::LookAndFeel_V4
 {
 public:
@@ -34,6 +38,12 @@ public:
     void drawRotarySlider(juce::Graphics&, int x, int y, int width, int height,
                            float sliderPosProportional, float rotaryStartAngle,
                            float rotaryEndAngle, juce::Slider&) override;
+
+    void drawButtonBackground(juce::Graphics&, juce::Button&, const juce::Colour& backgroundColour,
+                               bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override;
+
+    void drawComboBox(juce::Graphics&, int width, int height, bool isButtonDown,
+                       int buttonX, int buttonY, int buttonW, int buttonH, juce::ComboBox&) override;
 };
 
 /** Stereo LED-segment level meter — matches the mockup's .led-meter /
@@ -813,6 +823,7 @@ public:
     ~XaLZaEditor() override;
 
     void paint(juce::Graphics&) override;
+    void paintOverChildren(juce::Graphics&) override;
     void resized() override;
 
 private:
