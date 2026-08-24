@@ -1,10 +1,21 @@
 #include "PluginEditor.h"
+#include "BinaryData.h"
 
 // =============================================================================
 // Look and feel
 // =============================================================================
 XaLZaLookAndFeel::XaLZaLookAndFeel()
 {
+    // Embedded fonts — the exact two typefaces the original web mockup uses
+    // (Space Grotesk for UI text, IBM Plex Mono for numeric/technical
+    // readouts), compiled into the binary via BinaryData so no system
+    // install is required. See getTypefaceForFont() below for how every
+    // Font constructed anywhere in the editor resolves to one of these.
+    sansRegular = juce::Typeface::createSystemTypefaceFor(BinaryData::SpaceGroteskRegular_ttf, BinaryData::SpaceGroteskRegular_ttfSize);
+    sansBold    = juce::Typeface::createSystemTypefaceFor(BinaryData::SpaceGroteskSemiBold_ttf, BinaryData::SpaceGroteskSemiBold_ttfSize);
+    monoRegular = juce::Typeface::createSystemTypefaceFor(BinaryData::IBMPlexMonoRegular_ttf, BinaryData::IBMPlexMonoRegular_ttfSize);
+    monoBold    = juce::Typeface::createSystemTypefaceFor(BinaryData::IBMPlexMonoMedium_ttf, BinaryData::IBMPlexMonoMedium_ttfSize);
+
     setColour(juce::Slider::textBoxTextColourId, XaLZaColour::textLabel);
     setColour(juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
     setColour(juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
@@ -14,6 +25,36 @@ XaLZaLookAndFeel::XaLZaLookAndFeel()
     setColour(juce::TextButton::textColourOffId, XaLZaColour::textMuted);
     setColour(juce::TextButton::textColourOnId, XaLZaColour::accent);
     setColour(juce::ComboBox::outlineColourId, juce::Colours::transparentBlack);
+}
+
+juce::Typeface::Ptr XaLZaLookAndFeel::getTypefaceForFont(const juce::Font& f)
+{
+    // Every Font built anywhere in this editor — whether it explicitly asks
+    // for "IBM Plex Mono" (numeric readouts, via monoFont() below) or just
+    // uses the default typeface name (every other label/button, unchanged
+    // call sites) — is routed through here, so this one place decides which
+    // of the four embedded weights actually gets drawn.
+    const bool wantsMono = f.getTypefaceName().containsIgnoreCase("Plex Mono");
+    if (wantsMono)
+        return f.isBold() ? monoBold : monoRegular;
+    return f.isBold() ? sansBold : sansRegular;
+}
+
+juce::Font XaLZaLookAndFeel::monoFont(float size, bool bold)
+{
+    return juce::Font(juce::FontOptions(size).withName("IBM Plex Mono").withStyle(bold ? "Bold" : "Regular"));
+}
+
+juce::Label* XaLZaLookAndFeel::createSliderTextBox(juce::Slider& slider)
+{
+    auto* l = juce::LookAndFeel_V4::createSliderTextBox(slider);
+    l->setFont(monoFont(l->getFont().getHeight()));
+    return l;
+}
+
+juce::Font XaLZaLookAndFeel::getComboBoxFont(juce::ComboBox& box)
+{
+    return monoFont(juce::LookAndFeel_V4::getComboBoxFont(box).getHeight());
 }
 
 void XaLZaLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, int width, int height,
@@ -186,6 +227,18 @@ XaLZaEditor::KnobUI& XaLZaEditor::addKnob(const juce::String& paramID, const juc
     k->attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         proc.apvts, paramID, k->slider);
 
+    // Without an explicit decimal count JUCE guesses from the parameter's
+    // raw float precision, which reads as noise ("0.00000...", "12.847...")
+    // instead of a clean readout — pick a sane digit count from how wide
+    // the parameter's actual range is (a 0-100% knob doesn't need decimals
+    // at all; a 1-50:1 ratio or a small Hz/second range does).
+    {
+        auto range = k->slider.getRange();
+        double span = range.getLength();
+        int decimals = span >= 100.0 ? 0 : (span >= 10.0 ? 1 : 2);
+        k->slider.setNumDecimalPlacesToDisplay(decimals);
+    }
+
     knobs.push_back(std::move(k));
     return *knobs.back();
 }
@@ -237,9 +290,13 @@ XaLZaEditor::ModuleMeterUI& XaLZaEditor::addModuleMeter(const juce::String& tab,
     setupLabel(mm->capOut, "OUT", true);
     setupLabel(mm->dbIn, "-inf", false);
     setupLabel(mm->dbOut, "-inf", false);
+    // dbIn/dbOut are live numeric dB readouts (mockup's mono-font
+    // .knob-value equivalent), unlike the "IN"/"OUT" word captions above.
+    mm->dbIn.setFont(XaLZaLookAndFeel::monoFont(9.0f));
+    mm->dbOut.setFont(XaLZaLookAndFeel::monoFont(9.0f));
 
     mm->grLabel.setJustificationType(juce::Justification::centred);
-    mm->grLabel.setFont(juce::Font(juce::FontOptions(9.5f).withStyle("Bold")));
+    mm->grLabel.setFont(XaLZaLookAndFeel::monoFont(9.5f, true));
     mm->grLabel.setColour(juce::Label::textColourId, XaLZaColour::accent2);
     addChildComponent(mm->grLabel);
 
@@ -296,7 +353,14 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
 
     addPage("PRE",  { { XID::PreGain, "Gain" }, { XID::PreChar, "Char" }, { XID::PreHPF, "HPF" } });
     addPage("COMP", { { XID::CompThresh, "Thresh" }, { XID::CompMakeup, "Makeup" }, { XID::CompAttack, "Attack" },
-                       { XID::CompRelease, "Release" }, { XID::CompMix, "Mix" }, { XID::CompRatio, "Ratio" } });
+                       { XID::CompRelease, "Release" }, { XID::CompMix, "Mix" } });
+    // Ratio is a seg-group of fixed presets (matches the mockup's
+    // compRatioSegs), not a fine-tune knob — laid out in the COMP page's
+    // title row instead of the knob row (see resized()).
+    compRatioSeg = std::make_unique<SegButtonGroup>(proc.apvts, XID::CompRatio,
+        std::vector<SegButtonGroup::Option>{ { "2:1", 2.0f }, { "4:1", 4.0f }, { "8:1", 8.0f },
+                                               { "20:1", 20.0f }, { "Limit", 50.0f } });
+    addChildComponent(*compRatioSeg);
     addPage("OPTO", { { XID::OptoReduction, "Reduction" }, { XID::OptoGain, "Gain" }, { XID::OptoMix, "Mix" } });
     addPage("EQ",   { { XID::EqLow, "Low" }, { XID::EqLowFreq, "Low Freq" },
                        { XID::EqMid, "Mid" }, { XID::EqMidFreq, "Mid Freq" },
@@ -769,6 +833,7 @@ void XaLZaEditor::showPage(int index)
     gateListenBtn.setVisible(currentTab == gateTabIndex);
     gateScBtn.setVisible(currentTab == gateTabIndex);
     essListenBtn.setVisible(currentTab == essTabIndex);
+    compRatioSeg->setVisible(currentTab == compTabIndex);
 
     resized();
     repaint();
@@ -824,6 +889,12 @@ void XaLZaEditor::timerCallback()
 {
     masterMeterIn.setDb(proc.getMeterDbL((int) XaLZaProcessor::TapIn), proc.getMeterDbR((int) XaLZaProcessor::TapIn));
     masterMeterOut.setDb(proc.getMeterDbL((int) XaLZaProcessor::TapOut), proc.getMeterDbR((int) XaLZaProcessor::TapOut));
+
+    // Keeps the highlighted Ratio button in sync with the underlying
+    // CompRatio parameter even when it changes from automation, a preset
+    // load, or the Comp macro — not just from clicking a button here.
+    if (currentTab == compTabIndex)
+        compRatioSeg->refresh();
 
     auto fmtDb = [] (float l, float r)
     {
@@ -1142,7 +1213,7 @@ void XaLZaEditor::paint(juce::Graphics& g)
 
     float outDb = juce::jmax(proc.getMeterDbL((int) XaLZaProcessor::TapOut), proc.getMeterDbR((int) XaLZaProcessor::TapOut));
     juce::String outText = outDb <= -99.0f ? "OUT  -inf dB" : ("OUT  " + juce::String(outDb, 1) + " dB");
-    g.setFont(juce::Font(juce::FontOptions(10.5f).withStyle("Bold")));
+    g.setFont(XaLZaLookAndFeel::monoFont(10.5f, true));
     g.setColour(outDb > -1.0f ? XaLZaColour::danger : XaLZaColour::textLabel);
     g.drawText(outText, footer.reduced(14, 0), juce::Justification::centredRight);
 }
@@ -1276,6 +1347,8 @@ void XaLZaEditor::resized()
             }
             else if (currentTab == essTabIndex)
                 essListenBtn.setBounds(titleRow.removeFromRight(64).reduced(0, 1));
+            else if (currentTab == compTabIndex)
+                compRatioSeg->setBounds(titleRow.removeFromRight(220).reduced(0, 1));
             auto vizArea = content.removeFromTop(bigVizH);
 
             bv->title->setBounds(titleRow);

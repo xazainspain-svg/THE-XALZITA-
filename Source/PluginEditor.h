@@ -44,6 +44,25 @@ public:
 
     void drawComboBox(juce::Graphics&, int width, int height, bool isButtonDown,
                        int buttonX, int buttonY, int buttonW, int buttonH, juce::ComboBox&) override;
+
+    juce::Typeface::Ptr getTypefaceForFont(const juce::Font&) override;
+
+    // Slider readouts and the preset combo box show live numbers/names, so
+    // (matching the mockup's --font-mono usage on .knob-value/.preset-name)
+    // route them to IBM Plex Mono instead of the Space Grotesk every other
+    // Label/Button gets by default.
+    juce::Label* createSliderTextBox(juce::Slider&) override;
+    juce::Font getComboBoxFont(juce::ComboBox&) override;
+
+    // Constructs a Font tagged so getTypefaceForFont() above routes it to
+    // the embedded IBM Plex Mono instead of the default Space Grotesk —
+    // use for numeric/technical readouts (knob values, preset name,
+    // footer CPU/status, chain chips), matching the mockup's split
+    // between --font-sans (labels) and IBM Plex Mono (everything numeric).
+    static juce::Font monoFont(float size, bool bold = false);
+
+private:
+    juce::Typeface::Ptr sansRegular, sansBold, monoRegular, monoBold;
 };
 
 /** Stereo LED-segment level meter — matches the mockup's .led-meter /
@@ -98,6 +117,87 @@ private:
     }
 
     float lastDbL = -100.0f, lastDbR = -100.0f;
+};
+
+/** A row of flat TextButtons standing in for one continuous parameter —
+    matches the mockup's .seg-group/.seg-btn (e.g. Comp's Ratio: 2:1 / 4:1 /
+    8:1 / 20:1 / Limit instead of a bare knob). No new parameter is added:
+    clicking a button just snaps the existing float parameter to that
+    button's value, so old presets/automation keep working unchanged, and
+    refresh() (called every timer tick) highlights whichever button is
+    closest to the parameter's current value — so automation or a preset
+    loading a value that isn't one of the fixed options still shows the
+    nearest option lit rather than none at all. */
+class SegButtonGroup : public juce::Component
+{
+public:
+    struct Option { juce::String label; float value; };
+
+    SegButtonGroup(juce::AudioProcessorValueTreeState& state, juce::String paramID, std::vector<Option> opts)
+        : apvts(state), paramIdToWatch(std::move(paramID)), options(std::move(opts))
+    {
+        for (auto& o : options)
+        {
+            auto* b = buttons.add(new juce::TextButton(o.label));
+            b->setClickingTogglesState(false);   // refresh() drives toggle state, not the click itself
+            b->setColour(juce::TextButton::buttonColourId, XaLZaColour::panelControl);
+            b->setColour(juce::TextButton::buttonOnColourId, XaLZaColour::accent);
+            b->setColour(juce::TextButton::textColourOffId, XaLZaColour::textMuted);
+            b->setColour(juce::TextButton::textColourOnId, XaLZaColour::panelBg);
+            auto v = o.value;
+            b->onClick = [this, v] { setValue(v); };
+            addAndMakeVisible(b);
+        }
+        refresh();
+    }
+
+    void refresh()
+    {
+        if (auto* raw = apvts.getRawParameterValue(paramIdToWatch))
+        {
+            float current = raw->load();
+            int bestIdx = 0;
+            float bestDist = std::numeric_limits<float>::max();
+            for (int i = 0; i < (int) options.size(); ++i)
+            {
+                float d = std::abs(options[(size_t) i].value - current);
+                if (d < bestDist) { bestDist = d; bestIdx = i; }
+            }
+            for (int i = 0; i < buttons.size(); ++i)
+                buttons[i]->setToggleState(i == bestIdx, juce::dontSendNotification);
+        }
+    }
+
+private:
+    void setValue(float v)
+    {
+        if (auto* p = apvts.getParameter(paramIdToWatch))
+        {
+            p->beginChangeGesture();
+            p->setValueNotifyingHost(p->convertTo0to1(v));
+            p->endChangeGesture();
+        }
+        refresh();
+    }
+
+    void resized() override
+    {
+        auto area = getLocalBounds();
+        int n = buttons.size();
+        if (n == 0)
+            return;
+        int w = area.getWidth() / n;
+        for (int i = 0; i < n; ++i)
+        {
+            auto b = (i == n - 1) ? area : area.removeFromLeft(w);
+            buttons[i]->setBounds(b.reduced(1, 0));
+        }
+    }
+
+    juce::AudioProcessorValueTreeState& apvts;
+    juce::String paramIdToWatch;
+    std::vector<Option> options;
+    juce::OwnedArray<juce::TextButton> buttons;
 };
 
 /** Stereo-field scope (X/Y goniometer), matching the mockup's
@@ -766,7 +866,7 @@ public:
             addAndMakeVisible(row->label);
             addAndMakeVisible(row->up);
             addAndMakeVisible(row->down);
-            row->label.setFont(juce::Font(juce::FontOptions(12.5f)));
+            row->label.setFont(XaLZaLookAndFeel::monoFont(12.5f));
             row->up.setButtonText(juce::CharPointer_UTF8("\xE2\x96\xB2"));
             row->down.setButtonText(juce::CharPointer_UTF8("\xE2\x96\xBC"));
         }
@@ -997,6 +1097,12 @@ private:
     // into the plugin's second input bus — the tooltip says so.
     juce::TextButton gateScBtn { "EXT SC" };
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> gateScAttachment;
+
+    // Comp's Ratio is a real seg-group of preset ratios (matches the
+    // mockup's compRatioSegs) instead of a bare knob — see SegButtonGroup
+    // above. Snaps the same existing CompRatio float parameter, so old
+    // presets/automation still work unchanged.
+    std::unique_ptr<SegButtonGroup> compRatioSeg;
 
     // Factory preset picker (title bar) — drives the 12 macro knobs.
     juce::ComboBox presetBox;
