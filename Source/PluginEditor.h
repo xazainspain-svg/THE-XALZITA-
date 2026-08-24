@@ -804,6 +804,14 @@ private:
     void layoutModuleMeter(ModuleMeterUI& mm, juce::Rectangle<int> area);
     void timerCallback() override;
 
+    // MIDI Learn: right-click any of the 12 MACROS-page knobs for a small
+    // popup menu (Learn / Clear). mouseDown identifies which knob was
+    // clicked by comparing against pageKnobs[0] (the macro knobs, in
+    // Params.h's xalzaMacroIDs() order) and shows the menu on the matching
+    // index.
+    void mouseDown(const juce::MouseEvent&) override;
+    juce::TooltipWindow tooltipWindow { this, 500 };
+
     // Resizable/scalable window: all real layout below is computed once
     // against this fixed virtual canvas (matching the original mockup's
     // 900x560 proportions), then uniformly scaled — via contentRoot's
@@ -909,6 +917,13 @@ private:
     juce::TextButton gateListenBtn { "LISTEN" }, essListenBtn { "LISTEN" };
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> gateListenAttachment, essListenAttachment;
 
+    // External sidechain key toggle — Gate only (the standard use case: key
+    // the gate off a different signal, e.g. a click track or a second mic).
+    // Genuinely does nothing unless the host is also actually routing audio
+    // into the plugin's second input bus — the tooltip says so.
+    juce::TextButton gateScBtn { "EXT SC" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> gateScAttachment;
+
     // Factory preset picker (title bar) — drives the 12 macro knobs.
     juce::ComboBox presetBox;
 
@@ -939,6 +954,12 @@ private:
     // there's one place to see the whole chain's on/off state at a glance
     // instead of having to visit every page.
     juce::Label bypassSummaryLabel;
+
+    // Footer brand line, now a real clickable control (was static painted
+    // text) — shows the actual build version and opens a small About box
+    // (chain list, JUCE version, Windows-VST3-only note).
+    juce::TextButton aboutButton { "THE XALZA - Vocal Chain" };
+    void showAboutBox();
 
     // Generic {tab, component, title} list used by showPage()/resized() so
     // every "big viz" page shares one layout path instead of one

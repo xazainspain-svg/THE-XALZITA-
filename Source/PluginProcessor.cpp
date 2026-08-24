@@ -12,7 +12,12 @@ namespace
 XaLZaProcessor::XaLZaProcessor()
     : AudioProcessor(BusesProperties()
           .withInput("Input", juce::AudioChannelSet::stereo(), true)
-          .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
+          .withOutput("Output", juce::AudioChannelSet::stereo(), true)
+          // Optional external key input for the Gate (XID::GateScEnable) —
+          // disabled by default, so a fresh instance behaves exactly as
+          // before unless the user both enables it AND the host routes
+          // something into it.
+          .withInput("Sidechain", juce::AudioChannelSet::stereo(), false)),
       apvts(*this, nullptr, "PARAMS", createXaLZaParameterLayout()),
       macroTracker(apvts),
       osPreChar(2, 1, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR),
@@ -30,6 +35,7 @@ XaLZaProcessor::XaLZaProcessor()
     for (auto& a : rawWritePos) a.store(0);
     for (auto& a : dblScopeL) a.store(0.0f);
     for (auto& a : dblScopeR) a.store(0.0f);
+    for (auto& a : macroCcMap) a.store(-1);
 }
 
 void XaLZaProcessor::updateMeter(int tap, const juce::AudioBuffer<float>& buf, int numSamples, int numCh)
@@ -94,8 +100,19 @@ void XaLZaProcessor::pushRaw(int tap, const juce::AudioBuffer<float>& buf, int n
 
 bool XaLZaProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
 {
-    return layouts.getMainOutputChannelSet() == juce::AudioChannelSet::stereo()
-        && layouts.getMainInputChannelSet() == juce::AudioChannelSet::stereo();
+    if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo()
+        || layouts.getMainInputChannelSet() != juce::AudioChannelSet::stereo())
+        return false;
+
+    // The optional Sidechain bus (input bus 1, Gate's external key) must be
+    // either fully disabled or stereo — nothing else.
+    if (layouts.inputBuses.size() > 1)
+    {
+        auto sc = layouts.inputBuses[1];
+        if (sc != juce::AudioChannelSet::disabled() && sc != juce::AudioChannelSet::stereo())
+            return false;
+    }
+    return true;
 }
 
 void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
@@ -117,6 +134,8 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     resNotch.prepare(spec);
     satTone.prepare(spec);
     reverb.prepare(spec);
+    revWetHpf.prepare(spec);
+    revWetLpf.prepare(spec);
 
     essDetectL.prepare(spec);
     essDetectR.prepare(spec);
@@ -203,6 +222,10 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     delayL.reset();
     delayR.reset();
 
+    dlyFbHpfL.prepare(monoSpec); dlyFbHpfR.prepare(monoSpec);
+    dlyFbLpfL.prepare(monoSpec); dlyFbLpfR.prepare(monoSpec);
+    dlyFbHpfL.reset(); dlyFbHpfR.reset(); dlyFbLpfL.reset(); dlyFbLpfR.reset();
+
     dryBuffer.setSize(2, samplesPerBlock, false, false, true);
     revBuffer.setSize(2, samplesPerBlock, false, false, true);
     dlyBuffer.setSize(2, samplesPerBlock, false, false, true);
@@ -222,7 +245,7 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     meterRelCoef = onePoleCoef(130.0f, sampleRate);   // fast, real-time feel — was 400ms
 }
 
-void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
 
@@ -233,6 +256,39 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     const int numCh = juce::jmin(buffer.getNumChannels(), 2);
     if (numCh <= 0 || numSamples <= 0)
         return;
+
+    // ---------------------------------------------------------------
+    // MIDI Learn / CC control for the 12 macro knobs — a CC message either
+    // binds to whichever macro startMidiLearn() last armed (editor-driven,
+    // via a right-click menu on the macro knob), or, once bound, drives
+    // that macro directly. setValueNotifyingHost from the audio thread is
+    // the standard JUCE pattern for MIDI-mapped parameters (APVTS's
+    // attachments marshal the UI-side update to the message thread
+    // internally), so this is safe here.
+    // ---------------------------------------------------------------
+    for (const auto metadata : midi)
+    {
+        auto msg = metadata.getMessage();
+        if (!msg.isController())
+            continue;
+        int cc = msg.getControllerNumber();
+
+        int learnIdx = midiLearnTarget.load(std::memory_order_relaxed);
+        if (learnIdx >= 0 && learnIdx < kNumMacros)
+        {
+            macroCcMap[(size_t) learnIdx].store(cc, std::memory_order_relaxed);
+            midiLearnTarget.store(-1, std::memory_order_relaxed);
+            continue;
+        }
+
+        for (int i = 0; i < kNumMacros; ++i)
+        {
+            if (macroCcMap[(size_t) i].load(std::memory_order_relaxed) != cc)
+                continue;
+            if (auto* param = apvts.getParameter(xalzaMacroIDs()[(size_t) i]))
+                param->setValueNotifyingHost((float) msg.getControllerValue() / 127.0f);
+        }
+    }
 
     // ---------------------------------------------------------------
     // Bypass — real, host-independent dry passthrough. Meters/goniometer
@@ -325,11 +381,22 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         float floorLin = juce::Decibels::decibelsToGain(rangeDb);
         bool gateListen = apvts.getRawParameterValue(XID::GateListen)->load() > 0.5f;
 
+        // Optional external sidechain key: detect off a separate signal
+        // (routed into the plugin's second input bus) instead of the audio
+        // actually being gated. Falls back to normal self-detection whenever
+        // the toggle is off or the host hasn't actually connected anything
+        // there, so a fresh instance behaves exactly as before.
+        bool gateScEnabled = apvts.getRawParameterValue(XID::GateScEnable)->load() > 0.5f;
+        auto scBuffer = getBusBuffer(buffer, true, 1);
+        bool gateScActive = gateScEnabled && scBuffer.getNumChannels() > 0;
+
         auto* l = buffer.getWritePointer(0);
         auto* r = numCh > 1 ? buffer.getWritePointer(1) : l;
+        auto* detL = gateScActive ? scBuffer.getReadPointer(0) : l;
+        auto* detR = gateScActive ? (scBuffer.getNumChannels() > 1 ? scBuffer.getReadPointer(1) : detL) : r;
         for (int n = 0; n < numSamples; ++n)
         {
-            float rect = std::abs(0.5f * (l[n] + r[n]));
+            float rect = std::abs(0.5f * (detL[n] + detR[n]));
             float dCoef = rect > gateEnv ? detAtt : detRel;
             gateEnv = dCoef * gateEnv + (1.0f - dCoef) * rect;
             float envDb = juce::Decibels::gainToDecibels(gateEnv, -100.0f);
@@ -807,6 +874,16 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         juce::dsp::ProcessContextReplacing<float> revCtx(revBlock);
         reverb.process(revCtx);
 
+        // Wet-only tone shaping — a genuine user-facing filter pair on the
+        // tail, separate from the reverb's own internal room-size/damping
+        // model, so you can clean up boom or tame harshness independently.
+        float wetHpfHz = apvts.getRawParameterValue(XID::RevWetHpf)->load();
+        float wetLpfHz = apvts.getRawParameterValue(XID::RevWetLpf)->load();
+        *revWetHpf.state = *juce::dsp::IIR::Coefficients<float>::makeHighPass(sr, juce::jmax(1.0f, wetHpfHz));
+        *revWetLpf.state = *juce::dsp::IIR::Coefficients<float>::makeLowPass(sr, juce::jmax(20.0f, wetLpfHz));
+        revWetHpf.process(revCtx);
+        revWetLpf.process(revCtx);
+
         if (mixPct > 0.0005f)
         {
             float attCoef = onePoleCoef(5.0f, sr);
@@ -856,6 +933,18 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         delayL.setDelay(delaySamplesL);
         delayR.setDelay(delaySamplesR);
 
+        // Feedback-path filtering — set once per block, applied per-sample
+        // below to whatever gets pushed BACK into the delay line (not the
+        // dry-through). Since it's recirculated, this compounds a little
+        // more each pass, so later repeats read progressively darker/
+        // thinner — the classic analog/tape-echo character.
+        float fbHpfHz = apvts.getRawParameterValue(XID::DlyFbHpf)->load();
+        float fbLpfHz = apvts.getRawParameterValue(XID::DlyFbLpf)->load();
+        auto fbHpfCoeffs = juce::dsp::IIR::Coefficients<float>::makeHighPass(sr, juce::jmax(1.0f, fbHpfHz));
+        auto fbLpfCoeffs = juce::dsp::IIR::Coefficients<float>::makeLowPass(sr, juce::jmax(20.0f, fbLpfHz));
+        dlyFbHpfL.coefficients = fbHpfCoeffs; dlyFbHpfR.coefficients = fbHpfCoeffs;
+        dlyFbLpfL.coefficients = fbLpfCoeffs; dlyFbLpfR.coefficients = fbLpfCoeffs;
+
         auto* inL = buffer.getReadPointer(0);
         auto* inR = numCh > 1 ? buffer.getReadPointer(1) : inL;
         auto* outL = dlyBuffer.getWritePointer(0);
@@ -869,8 +958,10 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         {
             float dL = delayL.popSample(0);
             float dR = delayR.popSample(0);
-            delayL.pushSample(0, inL[n] + dR * fbPct);
-            delayR.pushSample(0, inR[n] + dL * fbPct);
+            float fbL = dlyFbLpfL.processSample(dlyFbHpfL.processSample(dL));
+            float fbR = dlyFbLpfR.processSample(dlyFbHpfR.processSample(dR));
+            delayL.pushSample(0, inL[n] + fbR * fbPct);
+            delayR.pushSample(0, inR[n] + fbL * fbPct);
 
             dlyPanPhase += panW;
             if (dlyPanPhase > juce::MathConstants<float>::twoPi) dlyPanPhase -= juce::MathConstants<float>::twoPi;
@@ -1100,6 +1191,8 @@ void XaLZaProcessor::getStateInformation(juce::MemoryBlock& destData)
     // without touching the parameter schema.
     xml->setAttribute("xalzaEditorW", lastEditorWidth);
     xml->setAttribute("xalzaEditorH", lastEditorHeight);
+    for (int i = 0; i < kNumMacros; ++i)
+        xml->setAttribute("xalzaCc" + juce::String(i), macroCcMap[(size_t) i].load(std::memory_order_relaxed));
     copyXmlToBinary(*xml, destData);
 }
 
@@ -1114,6 +1207,12 @@ void XaLZaProcessor::setStateInformation(const void* data, int sizeInBytes)
             // — keep these in sync if that ever changes.
             lastEditorWidth  = juce::jlimit(900, 1800, xml->getIntAttribute("xalzaEditorW", 900));
             lastEditorHeight = juce::jlimit(560, 1120, xml->getIntAttribute("xalzaEditorH", 560));
+        }
+        for (int i = 0; i < kNumMacros; ++i)
+        {
+            auto key = "xalzaCc" + juce::String(i);
+            int cc = xml->hasAttribute(key) ? xml->getIntAttribute(key, -1) : -1;
+            macroCcMap[(size_t) i].store(juce::jlimit(-1, 127, cc), std::memory_order_relaxed);
         }
         apvts.replaceState(juce::ValueTree::fromXml(*xml));
     }

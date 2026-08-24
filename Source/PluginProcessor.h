@@ -29,7 +29,10 @@ public:
     bool hasEditor() const override { return true; }
 
     const juce::String getName() const override { return "The XaLZa"; }
-    bool acceptsMidi() const override { return false; }
+    // MIDI input is accepted purely for macro-knob MIDI Learn/CC control
+    // (see below) — this remains an audio effect (isMidiEffect stays
+    // false), it just optionally also listens for CC messages.
+    bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
     double getTailLengthSeconds() const override { return 3.0; }
@@ -122,6 +125,21 @@ public:
     // output, in dBTP.
     float getTruePeakDb() const noexcept { return truePeakDbUI.load(std::memory_order_relaxed); }
 
+    // MIDI Learn for the 12 macro knobs: macroIdx indexes Params.h's
+    // xalzaMacroIDs() (same order the editor's MACROS page shows them in).
+    // startMidiLearn arms macroIdx to bind to the NEXT CC message received
+    // in processBlock; the binding (or -1 = unbound) is read back with
+    // getMacroCc() for the editor's tooltip/menu state, and persists across
+    // save/reload via getStateInformation's extra XML attributes.
+    static constexpr int kNumMacros = 12;
+    int  getMacroCc(int macroIdx) const noexcept { return macroCcMap[(size_t) juce::jlimit(0, kNumMacros - 1, macroIdx)].load(std::memory_order_relaxed); }
+    void startMidiLearn(int macroIdx) noexcept { midiLearnTarget.store(macroIdx, std::memory_order_relaxed); }
+    void cancelMidiLearn() noexcept { midiLearnTarget.store(-1, std::memory_order_relaxed); }
+    void clearMidiLearn(int macroIdx) noexcept { macroCcMap[(size_t) juce::jlimit(0, kNumMacros - 1, macroIdx)].store(-1, std::memory_order_relaxed); }
+    bool isMidiLearning(int macroIdx) const noexcept { return midiLearnTarget.load(std::memory_order_relaxed) == macroIdx; }
+
+    juce::String getVersionString() const { return JucePlugin_VersionString; }
+
 private:
     void updateMeter(int tap, const juce::AudioBuffer<float>& buf, int numSamples, int numCh);
     void updateGr(int moduleIdx, float preDb, float postDb);
@@ -143,6 +161,9 @@ private:
 
     std::array<std::atomic<float>, kScopeSize> dblScopeL, dblScopeR;
     std::atomic<int> dblScopeWritePos { 0 };
+
+    std::array<std::atomic<int>, kNumMacros> macroCcMap;   // -1 = unbound
+    std::atomic<int> midiLearnTarget { -1 };                // -1 = not currently learning
 
     juce::dsp::IIR::Filter<float> lufsPreL, lufsPreR, lufsRlbL, lufsRlbR;
     float lufsMsL = 0.0f, lufsMsR = 0.0f;
@@ -217,11 +238,22 @@ private:
     juce::dsp::Reverb reverb;
     juce::dsp::DelayLine<float> revPreDelayL, revPreDelayR;
     float revDuckEnv = 0.0f;
+    // Wet-only tone shaping (post juce::dsp::Reverb, pre mix-back) — a
+    // genuine user-facing filter pair, separate from the reverb's own
+    // internal room-size/damping model.
+    juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
+                                    juce::dsp::IIR::Coefficients<float>> revWetHpf, revWetLpf;
 
     // ---- 11) Delay — ping-pong with spread, duck, and an auto-pan LFO ----
     juce::dsp::DelayLine<float> delayL, delayR;
     float dlyDuckEnv = 0.0f;
     float dlyPanPhase = 0.0f;
+    // Feedback-path-only filtering (mono per channel — this loop is already
+    // sample-by-sample, so plain juce::dsp::IIR::Filter<float>::processSample
+    // is simpler here than a block ProcessorDuplicator): each repeat that
+    // recirculates through the delay line picks up a bit more HPF/LPF,
+    // giving the classic analog/tape-echo "repeats get darker" character.
+    juce::dsp::IIR::Filter<float> dlyFbHpfL, dlyFbHpfR, dlyFbLpfL, dlyFbLpfR;
 
     // ---- 12) Limiter — input trim, real look-ahead brickwall, extra clip ----
     // A genuine look-ahead limiter: incoming (post-input-gain) samples are

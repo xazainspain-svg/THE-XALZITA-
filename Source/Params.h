@@ -38,6 +38,11 @@ namespace XID
     static const juce::String GateListen = "GateListen";   // hears only what the gate is removing
     static const juce::String EssListen  = "EssListen";    // hears only the detected sibilance band
 
+    // Gate's optional external sidechain key (needs the host to actually
+    // route audio into the plugin's second input bus — off by default so a
+    // fresh instance behaves exactly as before).
+    static const juce::String GateScEnable = "GateScEnable";
+
     static const juce::String PreMacro = "PreMacro";
     static const juce::String PreGain  = "PreGain";
     static const juce::String PreChar  = "PreChar";
@@ -103,6 +108,11 @@ namespace XID
     static const juce::String RevMix           = "RevMix";
     static const juce::String RevDuck          = "RevDuck";
     static const juce::String RevDuckRelease   = "RevDuckRelease";
+    // Tone-shaping on the WET tail only (post juce::dsp::Reverb) — lets you
+    // clean up boom or tame harshness without touching the internal
+    // room-size/damping model.
+    static const juce::String RevWetHpf        = "RevWetHpf";
+    static const juce::String RevWetLpf        = "RevWetLpf";
 
     static const juce::String DlyMacro       = "DlyMacro";
     static const juce::String DlyTime        = "DlyTime";
@@ -112,6 +122,11 @@ namespace XID
     static const juce::String DlyDuck        = "DlyDuck";
     static const juce::String DlyDuckRelease = "DlyDuckRelease";
     static const juce::String DlyPanRate     = "DlyPanRate";
+    // Filtering in the FEEDBACK path only (not the dry-through) — since it's
+    // recirculated, this compounds a little more on each repeat, giving the
+    // classic analog/tape-echo "repeats get darker and thinner" character.
+    static const juce::String DlyFbHpf       = "DlyFbHpf";
+    static const juce::String DlyFbLpf       = "DlyFbLpf";
 
     static const juce::String LimMacro     = "LimMacro";
     static const juce::String LimInputGain = "LimInputGain";
@@ -156,6 +171,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     addBypass(XID::LimBypass,  "Limiter Bypass");
     addBypass(XID::GateListen, "Gate Listen");
     addBypass(XID::EssListen,  "De-esser Listen");
+    addBypass(XID::GateScEnable, "Gate External Sidechain");
 
     add(XID::PreMacro, "Pre Intensity", 0.0f, 100.0f, 0.0f);
     add(XID::PreGain, "Pre Gain", 0.0f, 70.0f, 0.0f);
@@ -225,6 +241,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     add(XID::RevMix, "Rev Mix", 0.0f, 100.0f, 0.0f);
     add(XID::RevDuck, "Rev Duck", 0.0f, 100.0f, 70.0f);
     add(XID::RevDuckRelease, "Rev Duck Release", 20.0f, 800.0f, 220.0f);
+    add(XID::RevWetHpf, "Rev Wet HPF", 20.0f, 1000.0f, 150.0f);
+    add(XID::RevWetLpf, "Rev Wet LPF", 1000.0f, 18000.0f, 12000.0f);
 
     add(XID::DlyMacro, "Dly Intensity", 0.0f, 100.0f, 0.0f);
     add(XID::DlyTime, "Dly Time", 20.0f, 1000.0f, 250.0f);
@@ -234,6 +252,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     add(XID::DlyDuck, "Dly Duck", 0.0f, 100.0f, 70.0f);
     add(XID::DlyDuckRelease, "Dly Duck Release", 20.0f, 800.0f, 220.0f);
     add(XID::DlyPanRate, "Dly Pan Rate", 0.05f, 4.0f, 0.5f);
+    add(XID::DlyFbHpf, "Dly Feedback HPF", 20.0f, 2000.0f, 120.0f);
+    add(XID::DlyFbLpf, "Dly Feedback LPF", 1000.0f, 18000.0f, 8000.0f);
 
     add(XID::LimMacro, "Lim Intensity", 0.0f, 100.0f, 0.0f);
     add(XID::LimInputGain, "Lim Input Gain", -12.0f, 12.0f, 0.0f);
@@ -242,6 +262,19 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     add(XID::LimClip, "Lim Clip", 0.0f, 100.0f, 0.0f);
 
     return {p.begin(), p.end()};
+}
+
+// Fixed, canonical order of the 12 macro IDs — matches the editor's own
+// MACROS-page knob order (PluginEditor.cpp's macroDefs). Used to index
+// MIDI-learn CC bindings by a stable small int rather than a string map,
+// while staying in lockstep with what the UI actually shows at each index.
+inline const std::vector<juce::String>& xalzaMacroIDs()
+{
+    static const std::vector<juce::String> ids = {
+        XID::PreMacro, XID::CompMacro, XID::OptoMacro, XID::EqMacro, XID::SatMacro, XID::RevMacro,
+        XID::DlyMacro, XID::DblMacro, XID::ResMacro, XID::GateMacro, XID::EssMacro, XID::LimMacro,
+    };
+    return ids;
 }
 
 // ---------------------------------------------------------------------------

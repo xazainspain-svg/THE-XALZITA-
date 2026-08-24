@@ -88,8 +88,10 @@ namespace
             { XID::DblMacro, " %" },
             { XID::RevSize, " %" }, { XID::RevDecay, " s" }, { XID::RevPreDelay, " ms" }, { XID::RevMix, " %" },
             { XID::RevDuck, " %" }, { XID::RevDuckRelease, " ms" }, { XID::RevMacro, " %" },
+            { XID::RevWetHpf, " Hz" }, { XID::RevWetLpf, " Hz" },
             { XID::DlyTime, " ms" }, { XID::DlyFeedback, " %" }, { XID::DlySpread, " %" }, { XID::DlyMix, " %" },
             { XID::DlyDuck, " %" }, { XID::DlyDuckRelease, " ms" }, { XID::DlyPanRate, " Hz" }, { XID::DlyMacro, " %" },
+            { XID::DlyFbHpf, " Hz" }, { XID::DlyFbLpf, " Hz" },
             { XID::LimInputGain, " dB" }, { XID::LimCeiling, " dB" }, { XID::LimRelease, " ms" },
             { XID::LimClip, " %" }, { XID::LimMacro, " %" },
         };
@@ -209,6 +211,13 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     for (auto& md : macroDefs)
         pageKnobs[0].push_back(&addKnob(md.id, md.label, true));
 
+    // MIDI Learn: pageKnobs[0] now holds exactly the 12 macro knobs, in the
+    // same order as Params.h's xalzaMacroIDs() (both built from macroDefs'
+    // order) — register this editor as a mouse listener on each slider so
+    // mouseDown() can identify which macro a right-click landed on.
+    for (auto* k : pageKnobs[0])
+        k->slider.addMouseListener(this, false);
+
     masterKnobs.push_back(&addKnob(XID::MasterInGain, "In Gain", false));
     masterKnobs.push_back(&addKnob(XID::MasterOutGain, "Out Gain", false));
     masterKnobs.push_back(&addKnob(XID::MasterWidth, "Width", false));
@@ -232,10 +241,11 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
                        { XID::EqHigh, "High" }, { XID::EqHighFreq, "High Freq" } });
     addPage("SAT",  { { XID::SatDrive, "Drive" }, { XID::SatTone, "Tone" }, { XID::SatCeiling, "Ceiling" }, { XID::SatMix, "Mix" } });
     addPage("REV",  { { XID::RevSize, "Size" }, { XID::RevDecay, "Decay" }, { XID::RevPreDelay, "PreDelay" },
-                       { XID::RevMix, "Mix" }, { XID::RevDuck, "Duck" }, { XID::RevDuckRelease, "DuckRel" } });
+                       { XID::RevMix, "Mix" }, { XID::RevDuck, "Duck" }, { XID::RevDuckRelease, "DuckRel" },
+                       { XID::RevWetHpf, "Wet HPF" }, { XID::RevWetLpf, "Wet LPF" } });
     addPage("DLY",  { { XID::DlyTime, "Time" }, { XID::DlyFeedback, "Fdbk" }, { XID::DlySpread, "Spread" },
                        { XID::DlyMix, "Mix" }, { XID::DlyDuck, "Duck" }, { XID::DlyDuckRelease, "DuckRel" },
-                       { XID::DlyPanRate, "PanRate" } });
+                       { XID::DlyPanRate, "PanRate" }, { XID::DlyFbHpf, "Fbk HPF" }, { XID::DlyFbLpf, "Fbk LPF" } });
     addPage("DBL",  { { XID::DblDetune, "Detune" }, { XID::DblWidth, "Width" }, { XID::DblDelay, "Delay" }, { XID::DblMix, "Mix" } });
     addPage("RES",  { { XID::ResAmount, "Amount" }, { XID::ResSharpness, "Sharp" }, { XID::ResReactivity, "React" },
                        { XID::ResNotchLimit, "NotchLim" }, { XID::ResLow, "Low" }, { XID::ResHigh, "High" } });
@@ -279,6 +289,18 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     bypassSummaryLabel.setColour(juce::Label::textColourId, XaLZaColour::textMuted);
     bypassSummaryLabel.setText("ALL MODULES ACTIVE", juce::dontSendNotification);
     addChildComponent(bypassSummaryLabel);
+
+    // Footer brand/About control — styled to read as plain label text
+    // (no border/fill) but genuinely clickable, showing the real build
+    // version and a short About box.
+    aboutButton.setButtonText("THE XALZA - Vocal Chain  v" + proc.getVersionString());
+    aboutButton.setColour(juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
+    aboutButton.setColour(juce::TextButton::buttonOnColourId, juce::Colours::transparentBlack);
+    aboutButton.setColour(juce::TextButton::textColourOffId, XaLZaColour::textMuted);
+    aboutButton.setColour(juce::TextButton::textColourOnId, XaLZaColour::textMuted);
+    aboutButton.setTooltip("About The XaLZa");
+    aboutButton.onClick = [this] { showAboutBox(); };
+    addAndMakeVisible(aboutButton);
 
     // ---- Tab rail buttons ----
     for (size_t i = 0; i < tabNames.size(); ++i)
@@ -347,6 +369,16 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
         proc.apvts, XID::GateListen, gateListenBtn);
     essListenAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         proc.apvts, XID::EssListen, essListenBtn);
+
+    gateScBtn.setClickingTogglesState(true);
+    gateScBtn.setColour(juce::TextButton::buttonOnColourId, XaLZaColour::accent2);
+    gateScBtn.setColour(juce::TextButton::textColourOnId, XaLZaColour::panelBg);
+    gateScBtn.setTooltip("Key the gate off the plugin's Sidechain input bus instead of "
+                          "its own signal - only does anything if your host is actually "
+                          "routing audio into that bus");
+    addChildComponent(gateScBtn);
+    gateScAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        proc.apvts, XID::GateScEnable, gateScBtn);
 
     auto resolveTab = [this] (const juce::String& tab, int fallback) -> int
     {
@@ -524,6 +556,55 @@ void XaLZaEditor::updateSoloButtonStates()
         mmPtr->soloBtn.setToggleState(activeSoloParamID == mmPtr->bypassParamID, juce::dontSendNotification);
 }
 
+void XaLZaEditor::mouseDown(const juce::MouseEvent& e)
+{
+    if (!e.mods.isRightButtonDown())
+        return;
+
+    for (int i = 0; i < (int) pageKnobs[0].size(); ++i)
+    {
+        if (e.eventComponent != &pageKnobs[0][(size_t) i]->slider)
+            continue;
+
+        int boundCc = proc.getMacroCc(i);
+        juce::PopupMenu menu;
+        menu.addItem(1, boundCc >= 0 ? ("MIDI Learn... (currently CC " + juce::String(boundCc) + ")")
+                                      : "MIDI Learn...");
+        if (boundCc >= 0)
+            menu.addItem(2, "Clear MIDI Learn");
+
+        menu.showMenuAsync(juce::PopupMenu::Options(), [this, i] (int result)
+        {
+            if (result == 1)
+            {
+                proc.startMidiLearn(i);
+                juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon,
+                    "MIDI Learn",
+                    "Move a MIDI CC knob or fader now to bind it to this macro.",
+                    "OK");
+            }
+            else if (result == 2)
+            {
+                proc.clearMidiLearn(i);
+            }
+        });
+        return;
+    }
+}
+
+void XaLZaEditor::showAboutBox()
+{
+    juce::String msg;
+    msg << "The XaLZa v" << proc.getVersionString() << "\n\n"
+        << "12-module vocal chain (Windows VST3):\n"
+        << "Preamp - Gate - De-esser - Glue Comp - Opto - EQ 550 -\n"
+        << "Resonance - Saturator - Doubler - Reverb - Delay - Limiter\n\n"
+        << "Built with JUCE " << juce::String(JUCE_MAJOR_VERSION) << "."
+        << juce::String(JUCE_MINOR_VERSION) << "." << juce::String(JUCE_BUILDNUMBER) << ".\n"
+        << "macOS/AU is intentionally not built yet.";
+    juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon, "About The XaLZa", msg, "OK");
+}
+
 void XaLZaEditor::switchAbSlot(bool toA)
 {
     if (toA == onSlotA)
@@ -614,6 +695,7 @@ void XaLZaEditor::showPage(int index)
         bv.title->setVisible(on);
     }
     gateListenBtn.setVisible(currentTab == gateTabIndex);
+    gateScBtn.setVisible(currentTab == gateTabIndex);
     essListenBtn.setVisible(currentTab == essTabIndex);
 
     resized();
@@ -731,6 +813,19 @@ void XaLZaEditor::timerCallback()
                                     juce::dontSendNotification);
         bypassSummaryLabel.setColour(juce::Label::textColourId,
                                       bypassed.isEmpty() ? XaLZaColour::textMuted : XaLZaColour::danger);
+
+        // MIDI Learn state, reflected as each macro knob's tooltip (right-
+        // click shows the actual Learn/Clear menu — this is just the
+        // hover-discoverable summary of current binding state).
+        for (int i = 0; i < (int) pageKnobs[0].size(); ++i)
+        {
+            juce::String tip = proc.isMidiLearning(i)
+                ? "Waiting for a MIDI CC... (right-click to cancel by re-learning)"
+                : (proc.getMacroCc(i) >= 0
+                       ? ("Bound to MIDI CC " + juce::String(proc.getMacroCc(i)) + " - right-click to change")
+                       : juce::String("Right-click for MIDI Learn"));
+            pageKnobs[0][(size_t) i]->slider.setTooltip(tip);
+        }
     }
 
     // Only do the expensive per-tab visualisers' work while their page is
@@ -969,10 +1064,6 @@ void XaLZaEditor::paint(juce::Graphics& g)
     g.setColour(XaLZaColour::borderSoft);
     g.drawLine(0.0f, (float) footer.getY(), (float) baseW, (float) footer.getY(), 1.0f);
 
-    g.setFont(juce::Font(juce::FontOptions(10.0f)));
-    g.setColour(XaLZaColour::textMuted);
-    g.drawText("THE XALZA - Vocal Chain", footer.reduced(14, 0), juce::Justification::centredLeft);
-
     float outDb = juce::jmax(proc.getMeterDbL((int) XaLZaProcessor::TapOut), proc.getMeterDbR((int) XaLZaProcessor::TapOut));
     juce::String outText = outDb <= -99.0f ? "OUT  -inf dB" : ("OUT  " + juce::String(outDb, 1) + " dB");
     g.setFont(juce::Font(juce::FontOptions(10.5f).withStyle("Bold")));
@@ -1008,6 +1099,7 @@ void XaLZaEditor::resized()
         abButtonA.setBounds(abArea.removeFromLeft(33));
         abButtonB.setBounds(abArea.removeFromRight(33));
     }
+    aboutButton.setBounds(footerArea.removeFromLeft(220).reduced(10, 4));
 
     auto rail = full.removeFromLeft(railW);
     for (size_t i = 0; i < tabButtons.size(); ++i)
@@ -1087,7 +1179,10 @@ void XaLZaEditor::resized()
             content.removeFromTop(10);
             auto titleRow = content.removeFromTop(bigVizTitleH);
             if (currentTab == gateTabIndex)
+            {
                 gateListenBtn.setBounds(titleRow.removeFromRight(64).reduced(0, 1));
+                gateScBtn.setBounds(titleRow.removeFromRight(64).reduced(0, 1));
+            }
             else if (currentTab == essTabIndex)
                 essListenBtn.setBounds(titleRow.removeFromRight(64).reduced(0, 1));
             auto vizArea = content.removeFromTop(bigVizH);
