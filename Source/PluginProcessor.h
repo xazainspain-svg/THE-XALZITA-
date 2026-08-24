@@ -116,6 +116,8 @@ private:
     void updateMeter(int tap, const juce::AudioBuffer<float>& buf, int numSamples, int numCh);
     void updateGr(int moduleIdx, float preDb, float postDb);
     void pushRaw(int tap, const juce::AudioBuffer<float>& buf, int numSamples, int numCh);
+    static void applySmoothedGainDb(juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>& smoother,
+                                     juce::AudioBuffer<float>& buf, float targetDb, int numSamples);
 
     std::array<std::atomic<float>, kSpecSize> specRing;
     std::atomic<int> specWritePos { 0 };
@@ -145,6 +147,13 @@ private:
 
     double sr = 44100.0;
 
+    // Smoothed gain stages — every "instant" dB->gain applied straight to
+    // the buffer used to jump on every block when its parameter changed
+    // (or was automated), which can click/zipper. Each of these now ramps
+    // over ~20ms instead of stepping.
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> masterInSmoothed, masterOutSmoothed,
+        preGainSmoothed, compMakeupSmoothed, optoGainSmoothed, limInGainSmoothed;
+
     // ---- 1) Preamp: HPF, clean gain, tanh "character" blended dry/wet ----
     juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
                                     juce::dsp::IIR::Coefficients<float>> preHpf;
@@ -171,13 +180,24 @@ private:
     juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
                                     juce::dsp::IIR::Coefficients<float>> eqLowShelf, eqMidPeak, eqHighShelf;
 
-    // ---- 7) Resonance — static de-resonator notch (tames a harsh peak) ----
+    // ---- 7) Resonance — dynamically-tracking de-resonator notch: a
+    //      bandpass-detector envelope (speed set by ResReactivity) drives
+    //      how hard the notch bites in real time, rather than a fixed cut ----
     juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
                                     juce::dsp::IIR::Coefficients<float>> resNotch;
+    juce::dsp::IIR::Filter<float> resDetectL, resDetectR;
+    float resEnv = 0.0f, resCutSmoothed = 0.0f;
 
     // ---- 8) Saturator — tanh drive + tone tilt + soft ceiling, dry/wet mix ----
     juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
                                     juce::dsp::IIR::Coefficients<float>> satTone;
+
+    // 2x oversampling around every tanh/waveshaping stage in the chain
+    // (Preamp Character, Saturator, Limiter's extra clip stage) — pushes
+    // the fold-back aliasing those nonlinearities generate up above
+    // Nyquist before it can alias back down, audibly. Low-latency
+    // polyphase-IIR halfband filters, so the added group delay is tiny.
+    juce::dsp::Oversampling<float> osPreChar, osSat, osLimClip;
 
     // ---- 9) Doubler — two modulated delay voices (chorus-style detune) ----
     juce::dsp::DelayLine<float> dblDelayL, dblDelayR;

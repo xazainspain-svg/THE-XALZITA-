@@ -330,6 +330,20 @@ inline const std::vector<XalzaPreset>& xalzaFactoryPresets()
     return presets;
 }
 
+/** Reverse lookup: which macro (if any) lists paramID as one of its
+    targets. Returns an empty string for a parameter that isn't
+    macro-linked at all (e.g. CompRatio, DlyTime) or that is itself a
+    macro. Used by the editor to show which knobs are currently macro-
+    controlled vs manually overridden. */
+inline juce::String macroForParam(const juce::String& paramID)
+{
+    for (auto& [macroID, targets] : xalzaMacroMap())
+        for (auto& t : targets)
+            if (t.paramID == paramID)
+                return macroID;
+    return {};
+}
+
 /** Listens to every macro + every macro-linked manual parameter, and
     answers "what's the effective value of this parameter right now" by
     comparing touch order. Lock-free: safe to query from the audio thread. */
@@ -379,6 +393,19 @@ public:
         auto macroPct = *apvts.getRawParameterValue(macroID) / 100.0f;
         return juce::jmap(juce::jlimit(0.0f, 1.0f, macroPct), 0.0f, 1.0f,
                            target.neutral, target.full);
+    }
+
+    /** For the editor: does paramID's own macro currently take precedence
+        over its manual knob (i.e. would effective() blend toward the
+        macro right now)? Safe to call from the UI thread — plain atomic
+        reads. Returns false if either ID isn't tracked. */
+    bool isMacroWinning(const juce::String& macroID, const juce::String& paramID) const
+    {
+        auto itM = touch.find(macroID);
+        auto itP = touch.find(paramID);
+        if (itM == touch.end() || itP == touch.end())
+            return false;
+        return itM->second.load(std::memory_order_relaxed) > itP->second.load(std::memory_order_relaxed);
     }
 
     /** Convenience overload: looks up the MacroTarget for (macroID, paramID) in

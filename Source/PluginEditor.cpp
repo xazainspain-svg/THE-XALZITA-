@@ -101,6 +101,8 @@ XaLZaEditor::KnobUI& XaLZaEditor::addKnob(const juce::String& paramID, const juc
                                            bool accent)
 {
     auto k = std::make_unique<KnobUI>();
+    k->paramID = paramID;
+    k->macroID = accent ? juce::String() : macroForParam(paramID);   // macro knobs themselves have no "override" state
     k->slider.getProperties().set("accent", accent);
     k->slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, accent ? 54 : 46, 15);
     k->slider.setTextValueSuffix(inferUnitSuffix(paramID));
@@ -260,6 +262,12 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     addChildComponent(masterMeterOut);
     addChildComponent(goniometer);
 
+    bypassSummaryLabel.setJustificationType(juce::Justification::centredLeft);
+    bypassSummaryLabel.setFont(juce::Font(juce::FontOptions(10.0f).withStyle("Bold")));
+    bypassSummaryLabel.setColour(juce::Label::textColourId, XaLZaColour::textMuted);
+    bypassSummaryLabel.setText("ALL MODULES ACTIVE", juce::dontSendNotification);
+    addChildComponent(bypassSummaryLabel);
+
     // ---- Tab rail buttons ----
     for (size_t i = 0; i < tabNames.size(); ++i)
     {
@@ -363,9 +371,63 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     };
     addAndMakeVisible(presetBox);
 
+    savePresetBtn.setTooltip("Save the full current plugin state as a preset file");
+    loadPresetBtn.setTooltip("Load a previously saved preset file");
+    savePresetBtn.onClick = [this] { savePresetToFile(); };
+    loadPresetBtn.onClick = [this] { loadPresetFromFile(); };
+    addAndMakeVisible(savePresetBtn);
+    addAndMakeVisible(loadPresetBtn);
+
     setSize(900, 560);
     showPage(0);
     startTimerHz(30);
+}
+
+namespace
+{
+    juce::File xalzaPresetsFolder()
+    {
+        auto dir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+                       .getChildFile("XaLZa Presets");
+        dir.createDirectory();
+        return dir;
+    }
+}
+
+void XaLZaEditor::savePresetToFile()
+{
+    fileChooser = std::make_unique<juce::FileChooser>(
+        "Save XaLZa preset", xalzaPresetsFolder(), "*.xalzapreset");
+    auto flags = juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::warnAboutOverwriting;
+    fileChooser->launchAsync(flags, [this] (const juce::FileChooser& fc)
+    {
+        auto file = fc.getResult();
+        if (file == juce::File())
+            return;
+        if (file.getFileExtension().isEmpty())
+            file = file.withFileExtension("xalzapreset");
+
+        auto state = proc.apvts.copyState();
+        std::unique_ptr<juce::XmlElement> xml(state.createXml());
+        if (xml != nullptr)
+            xml->writeTo(file);
+    });
+}
+
+void XaLZaEditor::loadPresetFromFile()
+{
+    fileChooser = std::make_unique<juce::FileChooser>(
+        "Load XaLZa preset", xalzaPresetsFolder(), "*.xalzapreset");
+    fileChooser->launchAsync(juce::FileBrowserComponent::openMode, [this] (const juce::FileChooser& fc)
+    {
+        auto file = fc.getResult();
+        if (file == juce::File() || !file.existsAsFile())
+            return;
+
+        std::unique_ptr<juce::XmlElement> xml(juce::XmlDocument::parse(file));
+        if (xml != nullptr && xml->hasTagName(proc.apvts.state.getType()))
+            proc.apvts.replaceState(juce::ValueTree::fromXml(*xml));
+    });
 }
 
 void XaLZaEditor::applyPreset(int presetIndex)
@@ -421,6 +483,7 @@ void XaLZaEditor::showPage(int index)
     masterCapOut.setVisible(onMacros);
     goniometer.setVisible(onMacros);
     goniometerCap.setVisible(onMacros);
+    bypassSummaryLabel.setVisible(onMacros);
 
     for (auto* mm : moduleMeterByTab)
         if (mm != nullptr)
@@ -513,6 +576,45 @@ void XaLZaEditor::timerCallback()
             float gr = proc.getGrDb(mm.grIndex);
             mm.grLabel.setText("GR -" + juce::String(gr, 1) + " dB", juce::dontSendNotification);
         }
+    }
+
+    // Macro-vs-manual override indicator: only the current page's own
+    // fine-tune knobs need checking. Teal label = the macro is driving
+    // this knob right now; default colour = the manual value is winning.
+    if (currentTab >= 0 && currentTab < (int) pageKnobs.size())
+    {
+        for (auto* k : pageKnobs[(size_t) currentTab])
+        {
+            if (k->macroID.isEmpty())
+                continue;
+            bool winning = proc.macroTracker.isMacroWinning(k->macroID, k->paramID);
+            if (winning != k->lastMacroWinning)
+            {
+                k->lastMacroWinning = winning;
+                k->label.setColour(juce::Label::textColourId,
+                                    winning ? XaLZaColour::accent2 : XaLZaColour::textLabel);
+            }
+        }
+    }
+
+    // Macros-page summary: which modules are bypassed right now, at a glance.
+    if (currentTab == 0)
+    {
+        static const std::vector<std::pair<juce::String, juce::String>> bypassIds = {
+            { XID::PreBypass, "PRE" }, { XID::GateBypass, "GATE" }, { XID::EssBypass, "ESS" },
+            { XID::CompBypass, "COMP" }, { XID::OptoBypass, "OPTO" }, { XID::EqBypass, "EQ" },
+            { XID::ResBypass, "RES" }, { XID::SatBypass, "SAT" }, { XID::DblBypass, "DBL" },
+            { XID::RevBypass, "REV" }, { XID::DlyBypass, "DLY" }, { XID::LimBypass, "LIM" },
+        };
+        juce::StringArray bypassed;
+        for (auto& bp : bypassIds)
+            if (proc.apvts.getRawParameterValue(bp.first)->load() > 0.5f)
+                bypassed.add(bp.second);
+        bypassSummaryLabel.setText(bypassed.isEmpty() ? juce::String("ALL MODULES ACTIVE")
+                                                       : ("BYPASSED: " + bypassed.joinIntoString(", ")),
+                                    juce::dontSendNotification);
+        bypassSummaryLabel.setColour(juce::Label::textColourId,
+                                      bypassed.isEmpty() ? XaLZaColour::textMuted : XaLZaColour::danger);
     }
 
     // Only do the expensive per-tab visualisers' work while their page is
@@ -653,6 +755,8 @@ void XaLZaEditor::paint(juce::Graphics& g)
     g.setFont(juce::Font(juce::FontOptions(15.0f).withStyle("Bold")));
     g.drawText("THE XALZA", titleArea.reduced(8, 0), juce::Justification::centredLeft);
     titleArea.removeFromRight(80);    // leave room for the bypass button
+    titleArea.removeFromRight(48);    // leave room for LOAD
+    titleArea.removeFromRight(48);    // leave room for SAVE
     titleArea.removeFromRight(140);   // leave room for the preset picker
     g.setFont(juce::Font(juce::FontOptions(11.0f)));
     g.setColour(XaLZaColour::textMuted);
@@ -714,6 +818,8 @@ void XaLZaEditor::resized()
     auto full = getLocalBounds();
     auto titleArea = full.removeFromTop(titleBarH);
     bypassButton.setBounds(titleArea.removeFromRight(80).reduced(10, 5));
+    loadPresetBtn.setBounds(titleArea.removeFromRight(48).reduced(4, 5));
+    savePresetBtn.setBounds(titleArea.removeFromRight(48).reduced(4, 5));
     presetBox.setBounds(titleArea.removeFromRight(140).reduced(6, 6));
     full.removeFromBottom(footerH);
 
@@ -757,6 +863,8 @@ void XaLZaEditor::resized()
         }
 
         content.removeFromRight(8);
+        bypassSummaryLabel.setBounds(content.removeFromBottom(16));
+        content.removeFromBottom(4);
 
         // 4 columns x 3 rows of macro knobs
         const int cols = 4;

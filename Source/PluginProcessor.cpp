@@ -14,7 +14,10 @@ XaLZaProcessor::XaLZaProcessor()
           .withInput("Input", juce::AudioChannelSet::stereo(), true)
           .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
       apvts(*this, nullptr, "PARAMS", createXaLZaParameterLayout()),
-      macroTracker(apvts)
+      macroTracker(apvts),
+      osPreChar(2, 1, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR),
+      osSat(2, 1, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR),
+      osLimClip(2, 1, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR)
 {
     for (auto& a : meterDbL) a.store(-100.0f);
     for (auto& a : meterDbR) a.store(-100.0f);
@@ -66,6 +69,15 @@ void XaLZaProcessor::updateGr(int moduleIdx, float preDb, float postDb)
     grDb[(size_t) moduleIdx].store(coef * prev + (1.0f - coef) * target, std::memory_order_relaxed);
 }
 
+void XaLZaProcessor::applySmoothedGainDb(juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>& smoother,
+                                          juce::AudioBuffer<float>& buf, float targetDb, int numSamples)
+{
+    smoother.setTargetValue(juce::Decibels::decibelsToGain(targetDb));
+    float g0 = smoother.getCurrentValue();
+    float g1 = smoother.skip(numSamples);
+    buf.applyGainRamp(0, numSamples, g0, g1);
+}
+
 void XaLZaProcessor::pushRaw(int tap, const juce::AudioBuffer<float>& buf, int numSamples, int numCh)
 {
     auto t = (size_t) juce::jlimit(0, kNumRawTaps - 1, tap);
@@ -108,6 +120,30 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
     essDetectL.prepare(spec);
     essDetectR.prepare(spec);
+    resDetectL.prepare(spec);
+    resDetectR.prepare(spec);
+    resEnv = 0.0f;
+    resCutSmoothed = 0.0f;
+
+    for (auto* s : { &masterInSmoothed, &masterOutSmoothed, &preGainSmoothed,
+                      &compMakeupSmoothed, &optoGainSmoothed, &limInGainSmoothed })
+        s->reset(sampleRate, 0.02);   // ~20ms ramp — kills zipper noise, still feels instant
+
+    osPreChar.initProcessing((size_t) samplesPerBlock);
+    osSat.initProcessing((size_t) samplesPerBlock);
+    osLimClip.initProcessing((size_t) samplesPerBlock);
+    osPreChar.reset();
+    osSat.reset();
+    osLimClip.reset();
+    setLatencySamples((int) std::round(osPreChar.getLatencyInSamples()
+                                        + osSat.getLatencyInSamples()
+                                        + osLimClip.getLatencyInSamples()));
+    masterInSmoothed.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(0.0f));
+    masterOutSmoothed.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(0.0f));
+    preGainSmoothed.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(0.0f));
+    compMakeupSmoothed.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(0.0f));
+    optoGainSmoothed.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(0.0f));
+    limInGainSmoothed.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(0.0f));
 
     // Simplified ITU-R BS.1770 K-weighting chain for the Limiter page's real
     // LUFS readout: stage 1 is a +4dB high-shelf @ 1500Hz, stage 2 is a
@@ -210,7 +246,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     // ---------------------------------------------------------------
     // Master In Gain
     // ---------------------------------------------------------------
-    buffer.applyGain(juce::Decibels::decibelsToGain(apvts.getRawParameterValue(XID::MasterInGain)->load()));
+    applySmoothedGainDb(masterInSmoothed, buffer, apvts.getRawParameterValue(XID::MasterInGain)->load(), numSamples);
     updateMeter((int) TapIn, buffer, numSamples, numCh);
 
     juce::dsp::AudioBlock<float> block(buffer);
@@ -227,23 +263,29 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         *preHpf.state = *juce::dsp::IIR::Coefficients<float>::makeHighPass(sr, hpfHz);
         preHpf.process(ctx);
 
-        buffer.applyGain(juce::Decibels::decibelsToGain(mt.effectiveByID(XID::PreMacro, XID::PreGain)));
+        applySmoothedGainDb(preGainSmoothed, buffer, mt.effectiveByID(XID::PreMacro, XID::PreGain), numSamples);
 
         float charAmt = mt.effectiveByID(XID::PreMacro, XID::PreChar) / 100.0f;
         if (charAmt > 0.0005f)
         {
             float drive = juce::jmap(charAmt, 0.0f, 1.0f, 1.0f, 5.0f);
             float norm = std::tanh(drive);
-            for (int ch = 0; ch < numCh; ++ch)
+
+            // 2x-oversampled tanh — keeps the aliasing this waveshaper would
+            // otherwise fold back into the audible band from ever forming.
+            auto sub = block.getSubsetChannelBlock(0, (size_t) numCh);
+            auto osBlock = osPreChar.processSamplesUp(sub);
+            for (size_t ch = 0; ch < osBlock.getNumChannels(); ++ch)
             {
-                auto* d = buffer.getWritePointer(ch);
-                for (int n = 0; n < numSamples; ++n)
+                auto* d = osBlock.getChannelPointer(ch);
+                for (size_t n = 0; n < osBlock.getNumSamples(); ++n)
                 {
                     float dry = d[n];
                     float wet = std::tanh(dry * drive) / norm;
                     d[n] = dry + (wet - dry) * charAmt;
                 }
             }
+            osPreChar.processSamplesDown(sub);
         }
     }
     updateMeter((int) TapPre, buffer, numSamples, numCh);
@@ -393,7 +435,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             updateGr(0, juce::Decibels::gainToDecibels(inPk, -100.0f), juce::Decibels::gainToDecibels(outPk, -100.0f));
         }
 
-        buffer.applyGain(juce::Decibels::decibelsToGain(makeup));
+        applySmoothedGainDb(compMakeupSmoothed, buffer, makeup, numSamples);
 
         for (int ch = 0; ch < numCh; ++ch)
         {
@@ -442,7 +484,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             updateGr(1, juce::Decibels::gainToDecibels(inPk, -100.0f), juce::Decibels::gainToDecibels(outPk, -100.0f));
         }
 
-        buffer.applyGain(juce::Decibels::decibelsToGain(gainDb));
+        applySmoothedGainDb(optoGainSmoothed, buffer, gainDb, numSamples);
 
         for (int ch = 0; ch < numCh; ++ch)
         {
@@ -494,9 +536,13 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     }
 
     // ---------------------------------------------------------------
-    // 7) RESONANCE — de-resonator: static notch that tames a harsh peak
-    //    between ResLow/ResHigh; ResReactivity is reserved for a future
-    //    dynamically-tracking version and has no effect yet.
+    // 7) RESONANCE — dynamically-tracking de-resonator: a bandpass-detector
+    //    envelope centred on the ResLow..ResHigh band drives how hard the
+    //    notch bites in real time (only engaging when that band is
+    //    actually resonating), instead of a fixed always-on cut.
+    //    ResReactivity now genuinely controls the follower's speed: 0% is
+    //    smooth/near-static, 100% pounces on transient resonant peaks and
+    //    releases fast right after.
     // ---------------------------------------------------------------
     bool resBypassed = apvts.getRawParameterValue(XID::ResBypass)->load() > 0.5f;
     if (!resBypassed)
@@ -504,12 +550,41 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         float amount     = mt.effectiveByID(XID::ResMacro, XID::ResAmount) / 100.0f;
         float sharpness  = mt.effectiveByID(XID::ResMacro, XID::ResSharpness) / 100.0f;
         float notchLimit = mt.effectiveByID(XID::ResMacro, XID::ResNotchLimit);
+        float reactivity = mt.effectiveByID(XID::ResMacro, XID::ResReactivity) / 100.0f;
         float lowHz      = mt.effectiveByID(XID::ResMacro, XID::ResLow);
         float highHz     = mt.effectiveByID(XID::ResMacro, XID::ResHigh);
 
         float freq = juce::jlimit(40.0f, 18000.0f, std::sqrt(juce::jmax(1.0f, lowHz) * juce::jmax(1.0f, highHz)));
         float q = juce::jmap(sharpness, 0.0f, 1.0f, 0.5f, 8.0f);
-        float cutDb = notchLimit * amount;
+        float bandQ = juce::jlimit(0.3f, 6.0f, freq / juce::jmax(20.0f, highHz - lowHz));
+
+        auto detCoeffs = juce::dsp::IIR::Coefficients<float>::makeBandPass(sr, freq, bandQ);
+        *resDetectL.coefficients = *detCoeffs;
+        *resDetectR.coefficients = *detCoeffs;
+
+        float attMs = juce::jmap(reactivity, 0.0f, 1.0f, 25.0f, 1.5f);
+        float relMs = juce::jmap(reactivity, 0.0f, 1.0f, 300.0f, 25.0f);
+        float detAtt = onePoleCoef(attMs, sr);
+        float detRel = onePoleCoef(relMs, sr);
+        float cutSmoothCoef = onePoleCoef(juce::jmax(3.0f, relMs * 0.5f), sr);
+
+        auto* l = buffer.getReadPointer(0);
+        auto* r = numCh > 1 ? buffer.getReadPointer(1) : l;
+        float cutDb = resCutSmoothed;
+        for (int n = 0; n < numSamples; ++n)
+        {
+            float fl = resDetectL.processSample(l[n]);
+            float fr = numCh > 1 ? resDetectR.processSample(r[n]) : fl;
+            float rect = std::abs(0.5f * (fl + fr));
+            float dCoef = rect > resEnv ? detAtt : detRel;
+            resEnv = dCoef * resEnv + (1.0f - dCoef) * rect;
+
+            float envDb = juce::Decibels::gainToDecibels(resEnv, -100.0f);
+            float depthNorm = juce::jlimit(0.0f, 1.0f, (envDb + 40.0f) / 34.0f);   // -40..-6dB band-energy window
+            float targetCut = notchLimit * amount * depthNorm;
+            resCutSmoothed = cutSmoothCoef * resCutSmoothed + (1.0f - cutSmoothCoef) * targetCut;
+            cutDb = resCutSmoothed;
+        }
         resCutDbUI.store(cutDb, std::memory_order_relaxed);
 
         *resNotch.state = *juce::dsp::IIR::Coefficients<float>::makePeakFilter(sr, freq, q, juce::Decibels::decibelsToGain(cutDb));
@@ -517,6 +592,8 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     }
     else
     {
+        resEnv = 0.0f;
+        resCutSmoothed = 0.0f;
         resCutDbUI.store(0.0f, std::memory_order_relaxed);
     }
     updateMeter((int) TapRes, buffer, numSamples, numCh);
@@ -544,17 +621,24 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             float norm = std::tanh(driveAmt);
             float ceilLin = juce::Decibels::decibelsToGain(ceilDb);
 
-            for (int ch = 0; ch < numCh; ++ch)
+            // 2x-oversampled — this is the hardest-driven waveshaper in the
+            // chain, so it's the one that benefits most from anti-aliasing.
             {
-                auto* d = buffer.getWritePointer(ch);
-                for (int n = 0; n < numSamples; ++n)
+                auto sub = block.getSubsetChannelBlock(0, (size_t) numCh);
+                auto osBlock = osSat.processSamplesUp(sub);
+                for (size_t ch = 0; ch < osBlock.getNumChannels(); ++ch)
                 {
-                    float dry = d[n];
-                    float wet = std::tanh(dry * driveAmt) / norm;
-                    if (std::abs(wet) > ceilLin)
-                        wet = ceilLin * std::tanh(wet / ceilLin); // soft-knee clamp toward ceiling (tanh is odd, sign preserved)
-                    d[n] = wet;
+                    auto* d = osBlock.getChannelPointer(ch);
+                    for (size_t n = 0; n < osBlock.getNumSamples(); ++n)
+                    {
+                        float dry = d[n];
+                        float wet = std::tanh(dry * driveAmt) / norm;
+                        if (std::abs(wet) > ceilLin)
+                            wet = ceilLin * std::tanh(wet / ceilLin); // soft-knee clamp toward ceiling (tanh is odd, sign preserved)
+                        d[n] = wet;
+                    }
                 }
+                osSat.processSamplesDown(sub);
             }
 
             satTone.process(ctx);
@@ -792,7 +876,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         float releaseMs = mt.effectiveByID(XID::LimMacro, XID::LimRelease);
         float clipAmt   = mt.effectiveByID(XID::LimMacro, XID::LimClip) / 100.0f;
 
-        buffer.applyGain(juce::Decibels::decibelsToGain(inGain));
+        applySmoothedGainDb(limInGainSmoothed, buffer, inGain, numSamples);
 
         float limInPk = 0.0f;
         for (int ch = 0; ch < numCh; ++ch)
@@ -822,16 +906,20 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             float ceilLin = juce::Decibels::decibelsToGain(ceilingDb);
             float driveAmt = 3.0f;
             float norm = std::tanh(driveAmt);
-            for (int ch = 0; ch < numCh; ++ch)
+
+            auto sub = block.getSubsetChannelBlock(0, (size_t) numCh);
+            auto osBlock = osLimClip.processSamplesUp(sub);
+            for (size_t ch = 0; ch < osBlock.getNumChannels(); ++ch)
             {
-                auto* d = buffer.getWritePointer(ch);
-                for (int n = 0; n < numSamples; ++n)
+                auto* d = osBlock.getChannelPointer(ch);
+                for (size_t n = 0; n < osBlock.getNumSamples(); ++n)
                 {
                     float dry = d[n];
                     float wet = ceilLin * std::tanh(dry / juce::jmax(0.0001f, ceilLin) * driveAmt) / norm;
                     d[n] = dry + (wet - dry) * clipAmt;
                 }
             }
+            osLimClip.processSamplesDown(sub);
         }
     }
     else
@@ -861,7 +949,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     // ---------------------------------------------------------------
     // Master Out Gain
     // ---------------------------------------------------------------
-    buffer.applyGain(juce::Decibels::decibelsToGain(apvts.getRawParameterValue(XID::MasterOutGain)->load()));
+    applySmoothedGainDb(masterOutSmoothed, buffer, apvts.getRawParameterValue(XID::MasterOutGain)->load(), numSamples);
     updateMeter((int) TapOut, buffer, numSamples, numCh);
 
     // ---------------------------------------------------------------

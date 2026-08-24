@@ -463,6 +463,8 @@ private:
         juce::Slider slider { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::TextBoxBelow };
         juce::Label label;
         std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
+        juce::String paramID, macroID;   // macroID empty = not macro-linked (no override indicator)
+        bool lastMacroWinning = false;   // last-known state, so we only repaint on an actual change
     };
 
     // A module's fine-tune page gets its own IN/OUT LED meters (tapping the
@@ -587,6 +589,19 @@ private:
 
     // Factory preset picker (title bar) — drives the 12 macro knobs.
     juce::ComboBox presetBox;
+
+    // User presets — save/load the FULL plugin state (every real parameter,
+    // not just the macros) to a .xalzapreset XML file, so a user's own
+    // exact settings can be recalled later or shared with someone else.
+    juce::TextButton savePresetBtn { "SAVE" }, loadPresetBtn { "LOAD" };
+    std::unique_ptr<juce::FileChooser> fileChooser;
+    void savePresetToFile();
+    void loadPresetFromFile();
+
+    // Macros-page summary of which modules are currently bypassed, so
+    // there's one place to see the whole chain's on/off state at a glance
+    // instead of having to visit every page.
+    juce::Label bypassSummaryLabel;
 
     // Generic {tab, component, title} list used by showPage()/resized() so
     // every "big viz" page shares one layout path instead of one
