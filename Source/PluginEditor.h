@@ -67,20 +67,66 @@ private:
 
 /** Stereo LED-segment level meter — matches the mockup's .led-meter /
     .led stacks. Fed a dB value per channel from the editor's Timer;
-    does no audio-thread work itself. */
+    does no audio-thread work itself.
+    Real peak-hold ballistics (a bright single-segment marker that snaps
+    to a new peak instantly and only falls back down after a hold time,
+    like every real hardware/plugin meter — iZotope Insight's Levels
+    panel is the reference this was built against) plus a proper clip
+    light (the top segment latches red for a few seconds once a channel
+    gets near 0 dBFS, instead of only flashing for the one frame it
+    actually happened) — neither existed before; the meter used to be
+    just the raw fast-attack/slow-release body with nothing held. */
 class LedMeter : public juce::Component
 {
 public:
     void setDb(float dbL, float dbR)
     {
-        if (std::abs(dbL - lastDbL) > 0.05f || std::abs(dbR - lastDbR) > 0.05f)
+        updateChannel(dbL, heldL, holdFramesLeftL, clipLatchFramesLeftL);
+        updateChannel(dbR, heldR, holdFramesLeftR, clipLatchFramesLeftR);
+
+        if (std::abs(dbL - lastDbL) > 0.05f || std::abs(dbR - lastDbR) > 0.05f
+            || std::abs(heldL - lastHeldL) > 0.05f || std::abs(heldR - lastHeldR) > 0.05f)
         {
             lastDbL = dbL; lastDbR = dbR;
+            lastHeldL = heldL; lastHeldR = heldR;
             repaint();
         }
     }
 
+    // What the meter is currently holding as each channel's peak — a
+    // Label elsewhere can mirror this instead of a raw, jittery number
+    // that changes every frame and is unreadable in real use.
+    float getHeldDbL() const noexcept { return heldL; }
+    float getHeldDbR() const noexcept { return heldR; }
+
 private:
+    static void updateChannel(float db, float& held, int& holdFramesLeft, int& clipFramesLeft)
+    {
+        constexpr float clipThresholdDb = -0.3f;
+        constexpr int   holdFrames      = 45;   // ~1.5s at the editor's 30Hz Timer
+        constexpr float decayDbPerFrame = 0.7f; // ~21 dB/s fall-off once the hold expires
+        constexpr int   clipLatchFrames = 90;   // ~3s — long enough to actually read the clip
+
+        if (db >= held)
+        {
+            held = db;
+            holdFramesLeft = holdFrames;
+        }
+        else if (holdFramesLeft > 0)
+        {
+            --holdFramesLeft;
+        }
+        else
+        {
+            held = juce::jmax(db, held - decayDbPerFrame);
+        }
+
+        if (held >= clipThresholdDb)
+            clipFramesLeft = clipLatchFrames;
+        else if (clipFramesLeft > 0)
+            --clipFramesLeft;
+    }
+
     void paint(juce::Graphics& g) override
     {
         auto full = getLocalBounds().toFloat();
@@ -88,35 +134,98 @@ private:
         float colW = (full.getWidth() - gap) * 0.5f;
         auto colL = full.removeFromLeft(colW);
         full.removeFromLeft(gap);
-        drawColumn(g, colL, lastDbL);
-        drawColumn(g, full, lastDbR);
+        drawColumn(g, colL, lastDbL, lastHeldL, clipLatchFramesLeftL > 0);
+        drawColumn(g, full, lastDbR, lastHeldR, clipLatchFramesLeftR > 0);
     }
 
-    static void drawColumn(juce::Graphics& g, juce::Rectangle<float> col, float db)
+    static void drawColumn(juce::Graphics& g, juce::Rectangle<float> col, float db, float heldDb, bool clipped)
     {
         constexpr int numSeg = 12;
         constexpr float minDb = -50.0f, maxDb = 0.0f;
         float t = juce::jlimit(0.0f, 1.0f, (db - minDb) / (maxDb - minDb));
         int lit = (int) std::round(t * (float) numSeg);
+        float tHeld = juce::jlimit(0.0f, 1.0f, (heldDb - minDb) / (maxDb - minDb));
+        int peakSeg = juce::jlimit(0, numSeg - 1, (int) std::round(tHeld * (float) numSeg) - 1);
         float segH = col.getHeight() / (float) numSeg;
 
         for (int i = 0; i < numSeg; ++i)
         {
             auto seg = col.removeFromBottom(segH).reduced(0.5f, 0.7f);
             bool on = i < lit;
+            bool isPeak = (i == peakSeg);
+            bool isClipSeg = clipped && i == numSeg - 1;
             juce::Colour c = XaLZaColour::panelControl;
-            if (on)
+            if (on || isPeak || isClipSeg)
             {
-                if (i >= numSeg - 2)      c = XaLZaColour::danger;
-                else if (i >= numSeg - 4) c = XaLZaColour::accent;
-                else                      c = XaLZaColour::accent2;
+                if (isClipSeg)             c = XaLZaColour::danger;
+                else if (i >= numSeg - 2)  c = XaLZaColour::danger;
+                else if (i >= numSeg - 4)  c = XaLZaColour::accent;
+                else                       c = XaLZaColour::accent2;
             }
+            // The peak-hold marker itself always reads as a bright,
+            // distinct highlight (not just "whatever colour that segment
+            // would be") so it's legible as a held marker and not
+            // mistaken for the continuously-lit body — matches the
+            // white peak cap sitting on Insight's grey level bars.
+            if (isPeak && !isClipSeg)
+                c = XaLZaColour::textHi;
             g.setColour(c);
             g.fillRect(seg);
         }
     }
 
     float lastDbL = -100.0f, lastDbR = -100.0f;
+    float heldL = -100.0f, heldR = -100.0f;
+    float lastHeldL = -100.0f, lastHeldR = -100.0f;
+    int holdFramesLeftL = 0, holdFramesLeftR = 0;
+    int clipLatchFramesLeftL = 0, clipLatchFramesLeftR = 0;
+};
+
+/** Compact gain-reduction meter for the three dynamics modules (Comp,
+    Opto, Limiter) — a number over a fill bar, the same "read the number,
+    confirm it with a bar" pattern Insight uses for its Levels panel.
+    Before this, the only GR feedback anywhere was a bare text label that
+    just changed digits with zero sense of how deep the reduction was. */
+class GrMeter : public juce::Component
+{
+public:
+    void setGrDb(float db)
+    {
+        db = juce::jlimit(0.0f, 24.0f, db);
+        if (std::abs(db - lastDb) > 0.05f)
+        {
+            lastDb = db;
+            repaint();
+        }
+    }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelControl);
+        g.fillRect(b);
+
+        constexpr float maxDb = 24.0f;
+        float t = juce::jlimit(0.0f, 1.0f, lastDb / maxDb);
+        if (t > 0.0f)
+        {
+            auto fill = b.reduced(1.0f);
+            fill = fill.removeFromLeft(fill.getWidth() * t);
+            juce::Colour c = lastDb >= 12.0f ? XaLZaColour::danger : XaLZaColour::accent;
+            g.setColour(c.withAlpha(0.85f));
+            g.fillRect(fill);
+        }
+
+        g.setColour(XaLZaColour::borderSoft);
+        g.drawRect(b, 1.0f);
+
+        g.setColour(XaLZaColour::textHi);
+        g.setFont(XaLZaLookAndFeel::monoFont(9.5f, true));
+        g.drawText("GR -" + juce::String(lastDb, 1) + " dB", b, juce::Justification::centred);
+    }
+
+    float lastDb = 0.0f;
 };
 
 /** A row of flat TextButtons standing in for one continuous parameter —
@@ -1332,7 +1441,8 @@ private:
     struct ModuleMeterUI
     {
         LedMeter meterIn, meterOut;
-        juce::Label capIn, capOut, dbIn, dbOut, grLabel;
+        juce::Label capIn, capOut, dbIn, dbOut;
+        GrMeter grMeter;
         juce::TextButton bypassBtn { "BYP" }, soloBtn { "SOLO" };
         std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> bypassAttachment;
         juce::String bypassParamID;
@@ -1349,7 +1459,7 @@ private:
             meterIn.setVisible(v); meterOut.setVisible(v);
             capIn.setVisible(v); capOut.setVisible(v);
             dbIn.setVisible(v); dbOut.setVisible(v);
-            grLabel.setVisible(v && grIndex >= 0);
+            grMeter.setVisible(v && grIndex >= 0);
             bypassBtn.setVisible(v);
             soloBtn.setVisible(v);
         }
@@ -1426,6 +1536,11 @@ private:
     // Master mini-panel visualisers (shown on the Macros page only)
     LedMeter masterMeterIn, masterMeterOut;
     juce::Label masterCapIn, masterCapOut;
+    // Held-peak dB readouts under the master bars — every per-module meter
+    // already paired its bar with a number; the master In/Out pair was the
+    // one meter in the whole plugin showing a bar with no number next to
+    // it at all.
+    juce::Label masterDbIn, masterDbOut;
     Goniometer goniometer;
     juce::Label goniometerCap;
 

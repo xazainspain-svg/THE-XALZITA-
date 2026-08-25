@@ -357,10 +357,7 @@ XaLZaEditor::ModuleMeterUI& XaLZaEditor::addModuleMeter(const juce::String& tab,
     mm->dbIn.setFont(XaLZaLookAndFeel::monoFont(9.0f));
     mm->dbOut.setFont(XaLZaLookAndFeel::monoFont(9.0f));
 
-    mm->grLabel.setJustificationType(juce::Justification::centred);
-    mm->grLabel.setFont(XaLZaLookAndFeel::monoFont(9.5f, true));
-    mm->grLabel.setColour(juce::Label::textColourId, XaLZaColour::accent2);
-    addChildComponent(mm->grLabel);
+    addChildComponent(mm->grMeter);
 
     addChildComponent(mm->meterIn);
     addChildComponent(mm->meterOut);
@@ -566,6 +563,19 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     addChildComponent(masterMeterIn);
     addChildComponent(masterMeterOut);
     addChildComponent(goniometer);
+
+    // Held-peak numbers under the master bars — same mono-font readout
+    // every per-module meter already has, just missing here before.
+    auto setupMasterDb = [this] (juce::Label& l)
+    {
+        l.setText("-inf", juce::dontSendNotification);
+        l.setJustificationType(juce::Justification::centred);
+        l.setFont(XaLZaLookAndFeel::monoFont(9.0f));
+        l.setColour(juce::Label::textColourId, XaLZaColour::textMuted);
+        addChildComponent(l);
+    };
+    setupMasterDb(masterDbIn);
+    setupMasterDb(masterDbOut);
 
     masterLoudnessLabel.setJustificationType(juce::Justification::centred);
     masterLoudnessLabel.setFont(XaLZaLookAndFeel::monoFont(11.0f, true));
@@ -989,6 +999,8 @@ void XaLZaEditor::showPage(int index)
     masterMeterOut.setVisible(onMacros);
     masterCapIn.setVisible(onMacros);
     masterCapOut.setVisible(onMacros);
+    masterDbIn.setVisible(onMacros);
+    masterDbOut.setVisible(onMacros);
     goniometer.setVisible(onMacros);
     goniometerCap.setVisible(onMacros);
     masterLoudnessLabel.setVisible(onMacros);
@@ -1086,15 +1098,45 @@ void XaLZaEditor::layoutModuleMeter(ModuleMeterUI& mm, juce::Rectangle<int> area
 
     if (mm.grIndex >= 0)
     {
-        auto grArea = area.removeFromTop(18).withWidth(totalW).withRight(area.getRight());
-        mm.grLabel.setBounds(grArea);
+        auto grArea = area.removeFromTop(20).withWidth(totalW).withRight(area.getRight());
+        mm.grMeter.setBounds(grArea);
     }
 }
 
 void XaLZaEditor::timerCallback()
 {
+    // fmtHeld reads the METER's held-peak value (see LedMeter::getHeldDbL/R
+    // above), not the raw per-block dB — a number that changes every single
+    // 30Hz frame is unreadable in practice; holding it for ~1.5s and then
+    // letting it fall is what every real peak meter (hardware or plugin,
+    // Insight included) actually does, and now the numbers finally agree
+    // with what the bar is visually holding instead of jittering on their
+    // own separate, faster ballistics.
+    auto heldMaxDb = [] (const LedMeter& m) { return juce::jmax(m.getHeldDbL(), m.getHeldDbR()); };
+    auto fmtHeld = [] (float v)
+    {
+        return v <= -99.0f ? juce::String("-inf") : juce::String(v, 1);
+    };
+    // Same three colour tiers the meter's own top segments already use, so
+    // the number and the bar always agree about how hot the signal is
+    // instead of the number staying one flat colour regardless of level.
+    auto colourForDb = [] (float v)
+    {
+        if (v >= -0.3f) return XaLZaColour::danger;
+        if (v >= -6.0f) return XaLZaColour::accent;
+        return XaLZaColour::textMuted;
+    };
+    auto updateDbLabel = [&] (juce::Label& l, const LedMeter& m)
+    {
+        float v = heldMaxDb(m);
+        l.setText(fmtHeld(v), juce::dontSendNotification);
+        l.setColour(juce::Label::textColourId, colourForDb(v));
+    };
+
     masterMeterIn.setDb(proc.getMeterDbL((int) XaLZaProcessor::TapIn), proc.getMeterDbR((int) XaLZaProcessor::TapIn));
     masterMeterOut.setDb(proc.getMeterDbL((int) XaLZaProcessor::TapOut), proc.getMeterDbR((int) XaLZaProcessor::TapOut));
+    updateDbLabel(masterDbIn, masterMeterIn);
+    updateDbLabel(masterDbOut, masterMeterOut);
 
     if (currentTab == 0)
     {
@@ -1137,12 +1179,6 @@ void XaLZaEditor::timerCallback()
     if (currentTab == essTabIndex)
         essBandSeg->refresh();
 
-    auto fmtDb = [] (float l, float r)
-    {
-        float v = juce::jmax(l, r);
-        return v <= -99.0f ? juce::String("-inf") : juce::String(v, 1);
-    };
-
     for (auto& mmPtr : moduleMeterStorage)
     {
         auto& mm = *mmPtr;
@@ -1153,14 +1189,11 @@ void XaLZaEditor::timerCallback()
         float outL = proc.getMeterDbL(mm.tapOut), outR = proc.getMeterDbR(mm.tapOut);
         mm.meterIn.setDb(inL, inR);
         mm.meterOut.setDb(outL, outR);
-        mm.dbIn.setText(fmtDb(inL, inR), juce::dontSendNotification);
-        mm.dbOut.setText(fmtDb(outL, outR), juce::dontSendNotification);
+        updateDbLabel(mm.dbIn, mm.meterIn);
+        updateDbLabel(mm.dbOut, mm.meterOut);
 
         if (mm.grIndex >= 0)
-        {
-            float gr = proc.getGrDb(mm.grIndex);
-            mm.grLabel.setText("GR -" + juce::String(gr, 1) + " dB", juce::dontSendNotification);
-        }
+            mm.grMeter.setGrDb(proc.getGrDb(mm.grIndex));
     }
 
     // Macro-vs-manual override indicator: only the current page's own
@@ -1629,16 +1662,18 @@ void XaLZaEditor::resized()
 
         masterPanel.removeFromTop(6);
         {
-            auto meterRow = masterPanel.removeFromTop(11 + 34);
+            auto meterRow = masterPanel.removeFromTop(11 + 34 + 13);
             int colW = (meterRow.getWidth() - 10) / 2;
             auto inCol = meterRow.removeFromLeft(colW);
             meterRow.removeFromLeft(10);
             auto outCol = meterRow;
 
             masterCapIn.setBounds(inCol.removeFromTop(11));
-            masterMeterIn.setBounds(inCol);
+            masterMeterIn.setBounds(inCol.removeFromTop(34));
+            masterDbIn.setBounds(inCol);
             masterCapOut.setBounds(outCol.removeFromTop(11));
-            masterMeterOut.setBounds(outCol);
+            masterMeterOut.setBounds(outCol.removeFromTop(34));
+            masterDbOut.setBounds(outCol);
         }
 
         masterPanel.removeFromTop(8);
