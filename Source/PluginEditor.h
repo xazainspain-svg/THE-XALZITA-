@@ -1005,8 +1005,10 @@ private:
         g.strokePath(p, juce::PathStrokeType(2.0f));
 
         g.setColour(XaLZaColour::textMuted);
-        g.setFont(juce::Font(juce::FontOptions(8.5f)));
-        g.drawText("WET GAIN AFTER TRANSIENT (-" + juce::String((int) std::round(depth * 100)) + "% DIP)",
+        g.setFont(juce::Font(juce::FontOptions(8.0f)));
+        // Shortened from a longer sentence that overflowed this card's
+        // narrow width and got clipped — confirmed from a screen recording.
+        g.drawText("-" + juce::String((int) std::round(depth * 100)) + "% DIP",
                    b.reduced(3.0f), juce::Justification::topLeft);
     }
 
@@ -1110,8 +1112,12 @@ private:
             float barH = barArea.getHeight() * depthNorm;
             auto bar = juce::Rectangle<float>(barArea.getX(), barArea.getBottom() - barH, barArea.getWidth(), barH);
 
-            g.setColour(XaLZaColour::accent.withAlpha(0.25f));
-            g.fillRect(barArea);
+            // A faint outline (not a filled translucent track) so the actual
+            // bar height stays readable at a glance instead of looking
+            // permanently "mostly full" — confirmed as a real legibility
+            // problem from an actual screen recording, not just guessed.
+            g.setColour(XaLZaColour::borderSoft);
+            g.drawRect(barArea, 1.0f);
             g.setColour(XaLZaColour::accent);
             g.fillRect(bar);
 

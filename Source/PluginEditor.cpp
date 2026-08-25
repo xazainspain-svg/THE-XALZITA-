@@ -255,15 +255,34 @@ XaLZaEditor::KnobUI& XaLZaEditor::addKnob(const juce::String& paramID, const juc
         // generic ~6-decimal format ("0.000000") no matter what we ask
         // the Slider to do. Overriding textFromValueFunction ourselves,
         // AFTER the attachment sets its own, is what actually wins.
+        //
+        // Two real bugs lived here that only showed up at runtime (never
+        // caught by compiling, since this is a Windows-only VST3 built via
+        // CI with no local way to actually run/see the UI):
+        //  1) Slider::getTextFromValue() ALWAYS appends getTextValueSuffix()
+        //     AFTER calling textFromValueFunction (see juce_Slider.cpp) — so
+        //     a lambda that also appended the suffix produced it twice
+        //     ("0.0 dB dB"). Fixed by returning just the number here and
+        //     letting the Slider append the suffix itself, exactly once.
+        //  2) The attachment's own constructor already calls
+        //     sendInitialUpdate() + slider.valueChanged() *before* we get a
+        //     chance to install our override below, so the very first
+        //     paint of every knob used the attachment's buggy 6-decimal
+        //     text — visible until the user actually dragged that specific
+        //     knob (that's why some knobs looked "fixed" on screen and
+        //     others didn't: only the ones a preset/automation had touched
+        //     since load had ever re-rendered). Fixed by forcing one
+        //     updateText() call right after installing the new function.
         juce::String suffix = k->slider.getTextValueSuffix();
-        k->slider.textFromValueFunction = [decimals, suffix] (double v)
+        k->slider.textFromValueFunction = [decimals] (double v)
         {
-            return juce::String(v, decimals) + suffix;
+            return juce::String(v, decimals);
         };
         k->slider.valueFromTextFunction = [suffix] (const juce::String& text)
         {
             return text.upToFirstOccurrenceOf(suffix, false, false).trim().getDoubleValue();
         };
+        k->slider.updateText();
     }
 
     knobs.push_back(std::move(k));
