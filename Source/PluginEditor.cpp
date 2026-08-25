@@ -273,10 +273,26 @@ XaLZaEditor::KnobUI& XaLZaEditor::addKnob(const juce::String& paramID, const juc
         //     others didn't: only the ones a preset/automation had touched
         //     since load had ever re-rendered). Fixed by forcing one
         //     updateText() call right after installing the new function.
+        //  3) juce::String(double, int numberOfDecimalPlaces) only forces
+        //     fixed-precision formatting when numberOfDecimalPlaces > 0 (see
+        //     StackArrayStream::writeDouble in juce_String.cpp — the
+        //     std::ios_base::fixed flag + precision() call are inside an
+        //     `if (numDecPlaces > 0)` guard). With decimals == 0 that guard
+        //     is skipped entirely and the value falls through to the
+        //     std::ostream default ("general") format instead, which prints
+        //     up to 6 significant digits and keeps fractional digits for
+        //     any non-whole value — e.g. a Fbk HPF value of 1688.16 rendered
+        //     as "1688.16" instead of "1688", while a knob that happened to
+        //     sit on an exact integer (e.g. 1404.0) looked fine by pure
+        //     coincidence. Every 0-decimal knob was affected the instant its
+        //     live value wasn't a round number — fixed by rounding to an
+        //     int explicitly ourselves instead of relying on the "0
+        //     decimals" case of juce::String's double constructor.
         juce::String suffix = k->slider.getTextValueSuffix();
         k->slider.textFromValueFunction = [decimals] (double v)
         {
-            return juce::String(v, decimals);
+            return decimals > 0 ? juce::String(v, decimals)
+                                 : juce::String(juce::roundToInt(v));
         };
         k->slider.valueFromTextFunction = [suffix] (const juce::String& text)
         {
