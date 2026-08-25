@@ -341,7 +341,12 @@ public:
                 peak = juce::jmax(peak, fftData[bBin]);
             float db = juce::Decibels::gainToDecibels(peak, -100.0f);
             float norm = juce::jlimit(0.0f, 1.0f, (db + 84.0f) / 84.0f);
-            bars[i] = juce::jmax(norm, bars[i] * 0.42f);   // fast attack, fast decay — real-time feel
+            // Instant attack (jumps straight to a new peak) but a much
+            // gentler decay than before — 0.42/frame was dropping a bar to
+            // ~1% of its height in five ~33ms ticks, reading as a nervous
+            // strobe rather than a spectrum display. 0.90 gives roughly a
+            // quarter-second fall, the usual feel for this kind of meter.
+            bars[i] = juce::jmax(norm, bars[i] * 0.90f);
         }
         repaint();
     }
@@ -1149,6 +1154,19 @@ private:
 
     // Delay's Time is a seg-group too — see addPage("DLY", ...) for why.
     std::unique_ptr<SegButtonGroup> dlyTimeSeg;
+
+    // Preamp's Pad/Phase/Phantom toggles and Impedance seg-group, and
+    // Opto's Mode seg-group — all real DSP (Phantom is the one exception,
+    // see PrePhantom's comment in Params.h).
+    juce::TextButton prePadBtn { "PAD -20dB" }, prePhaseBtn { "PHASE" }, prePhantomBtn { "+48V" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>
+        prePadAttachment, prePhaseAttachment, prePhantomAttachment;
+    std::unique_ptr<SegButtonGroup> preImpedanceSeg;
+    std::unique_ptr<SegButtonGroup> optoModeSeg;
+
+    // Saturator's Character seg-group (Tube/Tape/Transistor/Diode) — real
+    // distinct waveshapes, see runSat.
+    std::unique_ptr<SegButtonGroup> satCharSeg;
 
     // Factory preset picker (title bar) — drives the 12 macro knobs.
     juce::ComboBox presetBox;

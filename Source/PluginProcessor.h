@@ -239,11 +239,14 @@ private:
     // (or was automated), which can click/zipper. Each of these now ramps
     // over ~20ms instead of stepping.
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> masterInSmoothed, masterOutSmoothed,
-        preGainSmoothed, compMakeupSmoothed, optoGainSmoothed, limInGainSmoothed;
+        preGainSmoothed, compMakeupSmoothed, optoGainSmoothed, limInGainSmoothed, prePadGainSmoothed;
 
     // ---- 1) Preamp: HPF, clean gain, tanh "character" blended dry/wet ----
     juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
                                     juce::dsp::IIR::Coefficients<float>> preHpf;
+    // Real, subtle high-shelf tilt driven by the Impedance seg-group.
+    juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
+                                    juce::dsp::IIR::Coefficients<float>> preImpShelf;
 
     // ---- 2) Gate: envelope-follower expander/gate with hold ----
     float gateEnv = 0.0f;

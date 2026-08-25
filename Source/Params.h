@@ -47,6 +47,10 @@ namespace XID
     static const juce::String PreGain  = "PreGain";
     static const juce::String PreChar  = "PreChar";
     static const juce::String PreHPF   = "PreHPF";
+    static const juce::String PrePad       = "PrePad";
+    static const juce::String PrePhase     = "PrePhase";
+    static const juce::String PrePhantom   = "PrePhantom";
+    static const juce::String PreImpedance = "PreImpedance";
 
     static const juce::String GateMacro   = "GateMacro";
     static const juce::String GateThresh  = "GateThresh";
@@ -72,6 +76,7 @@ namespace XID
     static const juce::String OptoReduction = "OptoReduction";
     static const juce::String OptoGain      = "OptoGain";
     static const juce::String OptoMix       = "OptoMix";
+    static const juce::String OptoMode      = "OptoMode";
 
     static const juce::String EqMacro = "EqMacro";
     static const juce::String EqLow   = "EqLow";
@@ -94,6 +99,7 @@ namespace XID
     static const juce::String SatTone    = "SatTone";
     static const juce::String SatCeiling = "SatCeiling";
     static const juce::String SatMix     = "SatMix";
+    static const juce::String SatChar    = "SatChar";   // 0=Tube 1=Tape 2=Transistor 3=Diode — real distinct waveshapes, see runSat
 
     static const juce::String DblMacro  = "DblMacro";
     static const juce::String DblDetune = "DblDetune";
@@ -172,11 +178,20 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     addBypass(XID::GateListen, "Gate Listen");
     addBypass(XID::EssListen,  "De-esser Listen");
     addBypass(XID::GateScEnable, "Gate External Sidechain");
+    // Mockup toggles/mode switches that snap or gate real DSP:
+    addBypass(XID::PrePad, "Pre Pad -20dB");           // real -20dB input pad
+    addBypass(XID::PrePhase, "Pre Phase Invert");      // real polarity flip
+    addBypass(XID::PrePhantom, "Pre Phantom Power");   // cosmetic only - real phantom power has no audio effect on a plugin
+    addBypass(XID::OptoMode, "Opto Mode");             // false=Compress (4:1), true=Limit (20:1)
 
     add(XID::PreMacro, "Pre Intensity", 0.0f, 100.0f, 0.0f);
     add(XID::PreGain, "Pre Gain", 0.0f, 70.0f, 0.0f);
     add(XID::PreChar, "Pre Character", 0.0f, 100.0f, 0.0f);
     add(XID::PreHPF, "Pre HPF", 20.0f, 400.0f, 20.0f);
+    // Real seg-group (see PreImpShelf in the processor): tilts a subtle
+    // high-shelf, matching how a dynamic mic's top end actually shifts a
+    // little with different preamp input-impedance loading.
+    add(XID::PreImpedance, "Pre Impedance", 300.0f, 2400.0f, 1200.0f);
 
     add(XID::GateMacro, "Gate Intensity", 0.0f, 100.0f, 0.0f);
     add(XID::GateThresh, "Gate Threshold", -70.0f, -10.0f, -50.0f);
@@ -229,6 +244,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     add(XID::SatTone, "Sat Tone", -12.0f, 12.0f, 0.0f);
     add(XID::SatCeiling, "Sat Ceiling", -6.0f, 0.0f, -0.3f);
     add(XID::SatMix, "Sat Mix", 0.0f, 100.0f, 0.0f);
+    add(XID::SatChar, "Sat Character", 0.0f, 3.0f, 0.0f);
 
     add(XID::DblMacro, "Doubler Intensity", 0.0f, 100.0f, 0.0f);
     add(XID::DblDetune, "Doubler Detune", 0.0f, 40.0f, 12.0f);

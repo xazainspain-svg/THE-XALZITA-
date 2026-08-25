@@ -246,6 +246,24 @@ XaLZaEditor::KnobUI& XaLZaEditor::addKnob(const juce::String& paramID, const juc
         double span = range.getLength();
         int decimals = span >= 100.0 ? 0 : (span >= 10.0 ? 1 : 2);
         k->slider.setNumDecimalPlacesToDisplay(decimals);
+
+        // setNumDecimalPlacesToDisplay above is a no-op for this slider:
+        // the SliderAttachment we just built installs its own
+        // textFromValueFunction that calls straight through to the
+        // parameter's own getText(), which — for a plain continuous
+        // AudioParameterFloat with no explicit step — falls back to a
+        // generic ~6-decimal format ("0.000000") no matter what we ask
+        // the Slider to do. Overriding textFromValueFunction ourselves,
+        // AFTER the attachment sets its own, is what actually wins.
+        juce::String suffix = k->slider.getTextValueSuffix();
+        k->slider.textFromValueFunction = [decimals, suffix] (double v)
+        {
+            return juce::String(v, decimals) + suffix;
+        };
+        k->slider.valueFromTextFunction = [suffix] (const juce::String& text)
+        {
+            return text.upToFirstOccurrenceOf(suffix, false, false).trim().getDoubleValue();
+        };
     }
 
     knobs.push_back(std::move(k));
@@ -366,6 +384,25 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     };
 
     addPage("PRE",  { { XID::PreGain, "Gain" }, { XID::PreChar, "Char" }, { XID::PreHPF, "HPF" } });
+    // Pad/Phase/Phantom toggles + Impedance seg-group — matches the
+    // mockup's Preamp "INPUT" box and IMPEDANCE seg-group.
+    for (auto* b : { &prePadBtn, &prePhaseBtn, &prePhantomBtn })
+    {
+        b->setClickingTogglesState(true);
+        b->setColour(juce::TextButton::buttonOnColourId, XaLZaColour::accent);
+        b->setColour(juce::TextButton::textColourOnId, XaLZaColour::panelBg);
+        addChildComponent(*b);
+    }
+    prePhantomBtn.setTooltip("Cosmetic only - real 48V phantom power has no effect on a plugin's audio");
+    prePadAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        proc.apvts, XID::PrePad, prePadBtn);
+    prePhaseAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        proc.apvts, XID::PrePhase, prePhaseBtn);
+    prePhantomAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        proc.apvts, XID::PrePhantom, prePhantomBtn);
+    preImpedanceSeg = std::make_unique<SegButtonGroup>(proc.apvts, XID::PreImpedance,
+        std::vector<SegButtonGroup::Option>{ { "300ohm", 300.0f }, { "1.2k", 1200.0f }, { "2.4k", 2400.0f } });
+    addChildComponent(*preImpedanceSeg);
     addPage("COMP", { { XID::CompThresh, "Thresh" }, { XID::CompMakeup, "Makeup" }, { XID::CompAttack, "Attack" },
                        { XID::CompRelease, "Release" }, { XID::CompMix, "Mix" } });
     // Ratio is a seg-group of fixed presets (matches the mockup's
@@ -376,6 +413,12 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
                                                { "20:1", 20.0f }, { "Limit", 50.0f } });
     addChildComponent(*compRatioSeg);
     addPage("OPTO", { { XID::OptoReduction, "Reduction" }, { XID::OptoGain, "Gain" }, { XID::OptoMix, "Mix" } });
+    // Mode is a real seg-group (matches the mockup's optoModeSegs) — snaps
+    // the boolean OptoMode param, which processBlock reads to pick 4:1 vs
+    // 20:1 ratio (see runOpto).
+    optoModeSeg = std::make_unique<SegButtonGroup>(proc.apvts, XID::OptoMode,
+        std::vector<SegButtonGroup::Option>{ { "Compress", 0.0f }, { "Limit", 1.0f } });
+    addChildComponent(*optoModeSeg);
     // Low/Mid/High Freq are real seg-groups (matches the mockup's
     // eqLowFreqSegs/eqMidFreqSegs/eqHighFreqSegs), constructed just below —
     // only the three gain knobs stay in the fine-tune knob row.
@@ -389,6 +432,12 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     for (auto* s : { eqLowFreqSeg.get(), eqMidFreqSeg.get(), eqHighFreqSeg.get() })
         addChildComponent(*s);
     addPage("SAT",  { { XID::SatDrive, "Drive" }, { XID::SatTone, "Tone" }, { XID::SatCeiling, "Ceiling" }, { XID::SatMix, "Mix" } });
+    // Character is a real seg-group (matches the mockup's satCharSegs) —
+    // four genuinely different waveshapes, not a relabelled knob (see
+    // runSat's shape() lambda).
+    satCharSeg = std::make_unique<SegButtonGroup>(proc.apvts, XID::SatChar,
+        std::vector<SegButtonGroup::Option>{ { "Tube", 0.0f }, { "Tape", 1.0f }, { "Transistor", 2.0f }, { "Diode", 3.0f } });
+    addChildComponent(*satCharSeg);
     addPage("REV",  { { XID::RevSize, "Size" }, { XID::RevDecay, "Decay" }, { XID::RevPreDelay, "PreDelay" },
                        { XID::RevMix, "Mix" }, { XID::RevDuck, "Duck" }, { XID::RevDuckRelease, "DuckRel" },
                        { XID::RevWetHpf, "Wet HPF" }, { XID::RevWetLpf, "Wet LPF" } });
@@ -875,6 +924,11 @@ void XaLZaEditor::showPage(int index)
     for (auto* s : { eqLowFreqSeg.get(), eqMidFreqSeg.get(), eqHighFreqSeg.get() })
         s->setVisible(currentTab == eqTabIndex);
     dlyTimeSeg->setVisible(currentTab == dlyTabIndex);
+    preImpedanceSeg->setVisible(currentTab == preTabIndex);
+    for (auto* b : { &prePadBtn, &prePhaseBtn, &prePhantomBtn })
+        b->setVisible(currentTab == preTabIndex);
+    optoModeSeg->setVisible(currentTab == optoTabIndex);
+    satCharSeg->setVisible(currentTab == satTabIndex);
 
     resized();
     repaint();
@@ -954,6 +1008,12 @@ void XaLZaEditor::timerCallback()
             s->refresh();
     if (currentTab == dlyTabIndex)
         dlyTimeSeg->refresh();
+    if (currentTab == preTabIndex)
+        preImpedanceSeg->refresh();
+    if (currentTab == optoTabIndex)
+        optoModeSeg->refresh();
+    if (currentTab == satTabIndex)
+        satCharSeg->refresh();
 
     auto fmtDb = [] (float l, float r)
     {
@@ -1413,6 +1473,26 @@ void XaLZaEditor::resized()
             auto knobArea = content.removeFromTop(fineLabelH + fineKnobH + 14);
             layoutKnobRow(pageKnobs[(size_t) currentTab], knobArea, fineLabelH, fineKnobW, fineKnobH, fineCellW);
 
+            if (currentTab == preTabIndex)
+            {
+                // PAD/PHASE/+48V toggles + Impedance seg-group, centred in
+                // their own row under the 3 gain knobs — matches the
+                // mockup's Preamp "INPUT" box + IMPEDANCE seg-group.
+                content.removeFromTop(4);
+                auto ctrlRow = content.removeFromTop(22);
+                constexpr int padW = 74, phaseW = 60, phantomW = 60, impW = 170, gap = 8;
+                int totalW = padW + phaseW + phantomW + impW + gap * 3;
+                auto rowArea = ctrlRow.withSizeKeepingCentre(juce::jmin(ctrlRow.getWidth(), totalW), ctrlRow.getHeight())
+                                      .withY(ctrlRow.getY());
+                prePadBtn.setBounds(rowArea.removeFromLeft(padW));
+                rowArea.removeFromLeft(gap);
+                prePhaseBtn.setBounds(rowArea.removeFromLeft(phaseW));
+                rowArea.removeFromLeft(gap);
+                prePhantomBtn.setBounds(rowArea.removeFromLeft(phantomW));
+                rowArea.removeFromLeft(gap);
+                preImpedanceSeg->setBounds(rowArea.removeFromLeft(impW));
+            }
+
             if (currentTab == eqTabIndex)
             {
                 // One freq seg-group centred under each of the three gain
@@ -1443,6 +1523,10 @@ void XaLZaEditor::resized()
                 compRatioSeg->setBounds(titleRow.removeFromRight(220).reduced(0, 1));
             else if (currentTab == dlyTabIndex)
                 dlyTimeSeg->setBounds(titleRow.removeFromRight(240).reduced(0, 1));
+            else if (currentTab == optoTabIndex)
+                optoModeSeg->setBounds(titleRow.removeFromRight(160).reduced(0, 1));
+            else if (currentTab == satTabIndex)
+                satCharSeg->setBounds(titleRow.removeFromRight(260).reduced(0, 1));
             auto vizArea = content.removeFromTop(bigVizH);
 
             bv->title->setBounds(titleRow);

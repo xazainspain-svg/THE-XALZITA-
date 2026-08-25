@@ -126,6 +126,7 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     spec.numChannels = (juce::uint32) juce::jmax(1, getTotalNumOutputChannels());
 
     preHpf.prepare(spec);
+    preImpShelf.prepare(spec);
     essDynEq.prepare(spec);
     compressor.prepare(spec);
     optoComp.prepare(spec);
@@ -146,7 +147,7 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     resCutSmoothed = 0.0f;
 
     for (auto* s : { &masterInSmoothed, &masterOutSmoothed, &preGainSmoothed,
-                      &compMakeupSmoothed, &optoGainSmoothed, &limInGainSmoothed })
+                      &compMakeupSmoothed, &optoGainSmoothed, &limInGainSmoothed, &prePadGainSmoothed })
         s->reset(sampleRate, 0.02);   // ~20ms ramp — kills zipper noise, still feels instant
 
     osPreChar.initProcessing((size_t) samplesPerBlock);
@@ -335,6 +336,27 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         lastHpfHz.store(hpfHz, std::memory_order_relaxed);
         *preHpf.state = *juce::dsp::IIR::Coefficients<float>::makeHighPass(sr, hpfHz);
         preHpf.process(ctx);
+
+        // Impedance: a real, subtle high-shelf tilt (not just cosmetic) —
+        // mirrors how a dynamic mic's top end shifts a little with
+        // different preamp input-impedance loading. 300ohm reads a touch
+        // darker, 2.4kohm a touch brighter, 1.2kohm (the default) is flat.
+        float impedanceOhms = apvts.getRawParameterValue(XID::PreImpedance)->load();
+        float shelfDb = juce::jmap(impedanceOhms, 300.0f, 2400.0f, -1.5f, 1.5f);
+        *preImpShelf.state = *juce::dsp::IIR::Coefficients<float>::makeHighShelf(
+            sr, 8000.0f, 0.707f, juce::Decibels::decibelsToGain(shelfDb));
+        preImpShelf.process(ctx);
+
+        // Phase: real polarity flip, ahead of the pad/gain stages (linear,
+        // so where it sits relative to them doesn't matter).
+        if (apvts.getRawParameterValue(XID::PrePhase)->load() > 0.5f)
+            buffer.applyGain(-1.0f);
+
+        // Pad: real -20dB input pad, ahead of the Gain knob (like a
+        // physical preamp's pad switch), smoothed so toggling it live
+        // doesn't click.
+        bool padOn = apvts.getRawParameterValue(XID::PrePad)->load() > 0.5f;
+        applySmoothedGainDb(prePadGainSmoothed, buffer, padOn ? -20.0f : 0.0f, numSamples);
 
         applySmoothedGainDb(preGainSmoothed, buffer, mt.effectiveByID(XID::PreMacro, XID::PreGain), numSamples);
 
@@ -580,8 +602,12 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         for (int ch = 0; ch < numCh; ++ch)
             dryBuffer.copyFrom(ch, 0, buffer, ch, 0, numSamples);
 
+        // Mode: real ratio switch — Compress uses the original gentle 4:1,
+        // Limit bites much harder at 20:1 (matches the mockup's
+        // optoModeSegs: Compress/Limit).
+        bool limitMode = apvts.getRawParameterValue(XID::OptoMode)->load() > 0.5f;
         optoComp.setThreshold(threshDb);
-        optoComp.setRatio(4.0f);
+        optoComp.setRatio(limitMode ? 20.0f : 4.0f);
         optoComp.process(ctx);
 
         {
@@ -752,6 +778,37 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             float norm = std::tanh(driveAmt);
             float ceilLin = juce::Decibels::decibelsToGain(ceilDb);
 
+            // Character (mockup's satCharSegs): four genuinely different
+            // waveshapes, not just a label on the same curve —
+            //   0 Tube:       the original symmetric tanh (soft, even-order-light)
+            //   1 Tape:       tanh with a small DC bias -> asymmetric, adds 2nd harmonic
+            //   2 Transistor: cubic soft-clip -> harder knee, more odd harmonics
+            //   3 Diode:      asymmetric tanh (different +/- slope) -> classic diode-clipper feel
+            int charMode = (int) std::round(apvts.getRawParameterValue(XID::SatChar)->load());
+            auto shape = [&] (float x) -> float
+            {
+                switch (charMode)
+                {
+                    case 1:
+                    {
+                        constexpr float bias = 0.06f;
+                        return (std::tanh((x + bias) * driveAmt) - std::tanh(bias * driveAmt)) / norm;
+                    }
+                    case 2:
+                    {
+                        float y = juce::jlimit(-1.0f, 1.0f, x * driveAmt / 3.0f);
+                        return (y - (y * y * y) / 3.0f) / (2.0f / 3.0f);
+                    }
+                    case 3:
+                    {
+                        float xd = x * driveAmt;
+                        return (xd >= 0.0f ? std::tanh(xd * 1.4f) : std::tanh(xd * 0.7f)) / norm;
+                    }
+                    default:
+                        return std::tanh(x * driveAmt) / norm;
+                }
+            };
+
             // 2x-oversampled — this is the hardest-driven waveshaper in the
             // chain, so it's the one that benefits most from anti-aliasing.
             {
@@ -762,8 +819,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
                     auto* d = osBlock.getChannelPointer(ch);
                     for (size_t n = 0; n < osBlock.getNumSamples(); ++n)
                     {
-                        float dry = d[n];
-                        float wet = std::tanh(dry * driveAmt) / norm;
+                        float wet = shape(d[n]);
                         if (std::abs(wet) > ceilLin)
                             wet = ceilLin * std::tanh(wet / ceilLin); // soft-knee clamp toward ceiling (tanh is odd, sign preserved)
                         d[n] = wet;
