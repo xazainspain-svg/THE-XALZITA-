@@ -1071,6 +1071,12 @@ private:
     Goniometer goniometer;
     juce::Label goniometerCap;
 
+    // Momentary LUFS readout on the Master panel (matches the mockup's
+    // "LOUDNESS -70.0 LUFS (momentary)" line) — reuses the same real
+    // K-weighted LUFS measurement the Limiter page's LimiterView already
+    // computes from proc.getLufs(), just displayed here too.
+    juce::Label masterLoudnessLabel;
+
     // Global bypass — real dry passthrough (see XID::MasterBypass), lives in
     // the title bar like the mockup's header BYPASS control.
     juce::TextButton bypassButton { "BYPASS" };

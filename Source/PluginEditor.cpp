@@ -329,12 +329,17 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     moduleMeterByTab.resize(tabNames.size(), nullptr);
 
     // ---- Page 0: MACROS overview — one knob per module + Master panel ----
+    // Natural chain order + full module names (matches the mockup's Macros
+    // grid exactly: PREAMP GATE DE-ESSER GLUE COMP OPTO EQ 550 / RESONANCE
+    // SATURATOR DOUBLER REVERB DELAY LIMITER) instead of the old 4x3 grid
+    // of short tab-style codes in an unrelated order. Must stay in lockstep
+    // with Params.h's xalzaMacroIDs() (same order, see its comment).
     struct MacroDef { juce::String id; juce::String label; };
     static const std::vector<MacroDef> macroDefs = {
-        { XID::PreMacro,  "PRE" },  { XID::CompMacro, "COMP" }, { XID::OptoMacro, "OPTO" },
-        { XID::EqMacro,   "EQ" },   { XID::SatMacro,  "SAT" },  { XID::RevMacro,  "REV" },
-        { XID::DlyMacro,  "DLY" },  { XID::DblMacro,  "DBL" },  { XID::ResMacro,  "RES" },
-        { XID::GateMacro, "GATE" }, { XID::EssMacro,  "ESS" },  { XID::LimMacro,  "LIM" },
+        { XID::PreMacro,  "PREAMP" },    { XID::GateMacro, "GATE" },     { XID::EssMacro,  "DE-ESSER" },
+        { XID::CompMacro, "GLUE COMP" }, { XID::OptoMacro, "OPTO" },     { XID::EqMacro,   "EQ 550" },
+        { XID::ResMacro,  "RESONANCE" }, { XID::SatMacro,  "SATURATOR" },{ XID::DblMacro,  "DOUBLER" },
+        { XID::RevMacro,  "REVERB" },    { XID::DlyMacro,  "DELAY" },    { XID::LimMacro,  "LIMITER" },
     };
     for (auto& md : macroDefs)
         pageKnobs[0].push_back(&addKnob(md.id, md.label, true));
@@ -436,6 +441,11 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     addChildComponent(masterMeterIn);
     addChildComponent(masterMeterOut);
     addChildComponent(goniometer);
+
+    masterLoudnessLabel.setJustificationType(juce::Justification::centred);
+    masterLoudnessLabel.setFont(XaLZaLookAndFeel::monoFont(11.0f, true));
+    masterLoudnessLabel.setColour(juce::Label::textColourId, XaLZaColour::accent2);
+    addChildComponent(masterLoudnessLabel);
 
     bypassSummaryLabel.setJustificationType(juce::Justification::centredLeft);
     bypassSummaryLabel.setFont(juce::Font(juce::FontOptions(10.0f).withStyle("Bold")));
@@ -840,6 +850,7 @@ void XaLZaEditor::showPage(int index)
     masterCapOut.setVisible(onMacros);
     goniometer.setVisible(onMacros);
     goniometerCap.setVisible(onMacros);
+    masterLoudnessLabel.setVisible(onMacros);
     bypassSummaryLabel.setVisible(onMacros);
 
     for (auto* mm : moduleMeterByTab)
@@ -924,6 +935,14 @@ void XaLZaEditor::timerCallback()
 {
     masterMeterIn.setDb(proc.getMeterDbL((int) XaLZaProcessor::TapIn), proc.getMeterDbR((int) XaLZaProcessor::TapIn));
     masterMeterOut.setDb(proc.getMeterDbL((int) XaLZaProcessor::TapOut), proc.getMeterDbR((int) XaLZaProcessor::TapOut));
+
+    if (currentTab == 0)
+    {
+        float lufs = proc.getLufs();
+        masterLoudnessLabel.setText(lufs <= -69.5f ? juce::String("LUFS  -inf")
+                                                     : ("LUFS  " + juce::String(lufs, 1)),
+                                     juce::dontSendNotification);
+    }
 
     // Keeps the highlighted Ratio button in sync with the underlying
     // CompRatio parameter even when it changes from automation, a preset
@@ -1346,6 +1365,9 @@ void XaLZaEditor::resized()
             masterMeterOut.setBounds(outCol);
         }
 
+        masterPanel.removeFromTop(8);
+        masterLoudnessLabel.setBounds(masterPanel.removeFromTop(16));
+
         masterPanel.removeFromTop(10);
         goniometerCap.setBounds(masterPanel.removeFromTop(11));
         {
@@ -1357,14 +1379,16 @@ void XaLZaEditor::resized()
         bypassSummaryLabel.setBounds(content.removeFromBottom(16));
         content.removeFromBottom(4);
 
-        // 4 columns x 3 rows of macro knobs
-        const int cols = 4;
+        // 6 columns x 2 rows, matching the mockup's Macros grid (was 4x3 of
+        // short tab-style codes in an unrelated order — see macroDefs).
+        const int cols = 6;
+        int cellW = content.getWidth() / cols;
         int rowH = macroLabelH + macroKnobH + 10;
         for (int i = 0; i < (int) pageKnobs[0].size(); ++i)
         {
             int col = i % cols, row = i / cols;
             auto cell = content.withTrimmedTop(row * rowH).withHeight(rowH)
-                                .withTrimmedLeft(col * macroCellW).withWidth(macroCellW);
+                                .withTrimmedLeft(col * cellW).withWidth(cellW);
             auto lbl = cell.removeFromTop(macroLabelH);
             pageKnobs[0][(size_t) i]->label.setBounds(lbl);
             pageKnobs[0][(size_t) i]->slider.setBounds(cell.withSizeKeepingCentre(macroKnobW, macroKnobH));

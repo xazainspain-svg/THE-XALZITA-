@@ -272,9 +272,14 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
 // while staying in lockstep with what the UI actually shows at each index.
 inline const std::vector<juce::String>& xalzaMacroIDs()
 {
+    // Natural signal-chain order (matches the mockup's Macros-page grid:
+    // PREAMP GATE DE-ESSER GLUE-COMP OPTO EQ550 / RESONANCE SATURATOR
+    // DOUBLER REVERB DELAY LIMITER) instead of the old arbitrary order —
+    // reordering this only remaps which grid position a saved MIDI CC
+    // binding lands on, nothing DSP-relevant depends on it.
     static const std::vector<juce::String> ids = {
-        XID::PreMacro, XID::CompMacro, XID::OptoMacro, XID::EqMacro, XID::SatMacro, XID::RevMacro,
-        XID::DlyMacro, XID::DblMacro, XID::ResMacro, XID::GateMacro, XID::EssMacro, XID::LimMacro,
+        XID::PreMacro, XID::GateMacro, XID::EssMacro, XID::CompMacro, XID::OptoMacro, XID::EqMacro,
+        XID::ResMacro, XID::SatMacro, XID::DblMacro, XID::RevMacro, XID::DlyMacro, XID::LimMacro,
     };
     return ids;
 }
