@@ -42,6 +42,7 @@ namespace XID
     // route audio into the plugin's second input bus — off by default so a
     // fresh instance behaves exactly as before).
     static const juce::String GateScEnable = "GateScEnable";
+    static const juce::String GateLookahead = "GateLookahead"; // real fixed-5ms lookahead delay + latency compensation, see runGate
 
     static const juce::String PreMacro = "PreMacro";
     static const juce::String PreGain  = "PreGain";
@@ -63,6 +64,7 @@ namespace XID
     static const juce::String EssThresh = "EssThresh";
     static const juce::String EssRange  = "EssRange";
     static const juce::String EssFreq   = "EssFreq";
+    static const juce::String EssBand   = "EssBand"; // 0=S 1=T 2=CH — real detect-Q + freq-bias character, see runEss
 
     static const juce::String CompMacro   = "CompMacro";
     static const juce::String CompThresh  = "CompThresh";
@@ -93,6 +95,8 @@ namespace XID
     static const juce::String ResNotchLimit = "ResNotchLimit";
     static const juce::String ResLow        = "ResLow";
     static const juce::String ResHigh       = "ResHigh";
+    static const juce::String ResStyle      = "ResStyle";  // 0=Delicate 1=Vocal 2=Wide — real Q/detect-width scaling, see runRes
+    static const juce::String ResBands      = "ResBands";  // 1-5 — real number of parallel adaptive notches, see runRes
 
     static const juce::String SatMacro   = "SatMacro";
     static const juce::String SatDrive   = "SatDrive";
@@ -106,6 +110,7 @@ namespace XID
     static const juce::String DblWidth  = "DblWidth";
     static const juce::String DblDelay  = "DblDelay";
     static const juce::String DblMix    = "DblMix";
+    static const juce::String DblVoices = "DblVoices"; // 2/4/6/8 — real voice count, see runDbl
 
     static const juce::String RevMacro         = "RevMacro";
     static const juce::String RevSize          = "RevSize";
@@ -133,12 +138,47 @@ namespace XID
     // classic analog/tape-echo "repeats get darker and thinner" character.
     static const juce::String DlyFbHpf       = "DlyFbHpf";
     static const juce::String DlyFbLpf       = "DlyFbLpf";
+    static const juce::String DlySync        = "DlySync";     // real host-tempo sync toggle, see runDly
+    static const juce::String DlyNoteDiv     = "DlyNoteDiv";  // 0..6 index into DlyNoteTable (Params.h) — used when DlySync is on
+    static const juce::String DlyPreDelay    = "DlyPreDelay"; // 0=Off 1=1/32 2=1/16 — real tempo-synced pre-delay tap, see runDly
 
     static const juce::String LimMacro     = "LimMacro";
     static const juce::String LimInputGain = "LimInputGain";
     static const juce::String LimCeiling   = "LimCeiling";
     static const juce::String LimRelease   = "LimRelease";
     static const juce::String LimClip      = "LimClip";
+}
+
+// ---------------------------------------------------------------------------
+// Doubler per-voice layout — shared between PluginProcessor (real DSP: each
+// voice is its own modulated delay tap) and PluginEditor (the Per-Voice
+// table reads these exact same constants so the numbers it shows are the
+// numbers actually driving the sound, not invented display data).
+// ---------------------------------------------------------------------------
+namespace DblVoiceConfig
+{
+    constexpr int kMaxVoices = 8;
+    // Chorus-rate per voice (Hz) — deliberately non-harmonic spread so voices
+    // don't beat together audibly.
+    constexpr float rateHz[kMaxVoices]        = { 0.53f, 0.61f, 0.67f, 0.71f, 0.79f, 0.83f, 0.89f, 0.97f };
+    // Extra delay stagger per voice on top of the user's Delay knob (ms).
+    constexpr float delayOffsetMs[kMaxVoices] = { 0.0f, 4.0f, 8.0f, 12.0f, 16.0f, 20.0f, 24.0f, 28.0f };
+    // Pan position per voice at full Width (-1 = hard L, +1 = hard R); index 0
+    // is always centre-most so low voice counts stay narrow-but-present.
+    constexpr float panPos[kMaxVoices]        = { -1.0f, 1.0f, -0.6f, 0.6f, -0.3f, 0.3f, -0.85f, 0.85f };
+}
+
+// ---------------------------------------------------------------------------
+// Delay's real tempo-sync note table — fraction of a whole note for each
+// DlyNoteDiv index, shared between the DSP (runDly, computes real ms from
+// host BPM) and the editor (dlyNoteDivSeg's button order matches exactly).
+// ---------------------------------------------------------------------------
+namespace DlyNoteTable
+{
+    constexpr int kNumDivs = 7;
+    // 1/16, 1/8T, 1/8, 1/4T, 1/4, 1/2, 1/1 — as a fraction of a whole note.
+    constexpr float wholeNoteFraction[kNumDivs] = { 1.0f / 16.0f, 1.0f / 12.0f, 1.0f / 8.0f,
+                                                      1.0f / 6.0f,  1.0f / 4.0f, 1.0f / 2.0f, 1.0f };
 }
 
 inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterLayout()
@@ -178,6 +218,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     addBypass(XID::GateListen, "Gate Listen");
     addBypass(XID::EssListen,  "De-esser Listen");
     addBypass(XID::GateScEnable, "Gate External Sidechain");
+    addBypass(XID::GateLookahead, "Gate Lookahead");
+    addBypass(XID::DlySync, "Delay Tempo Sync");
     // Mockup toggles/mode switches that snap or gate real DSP:
     addBypass(XID::PrePad, "Pre Pad -20dB");           // real -20dB input pad
     addBypass(XID::PrePhase, "Pre Phase Invert");      // real polarity flip
@@ -204,6 +246,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     add(XID::EssThresh, "De-esser Threshold", -40.0f, 0.0f, -20.0f);
     add(XID::EssRange, "De-esser Range", -24.0f, 0.0f, -8.0f);
     add(XID::EssFreq, "De-esser Freq", 2000.0f, 12000.0f, 6300.0f);
+    add(XID::EssBand, "De-esser Band", 0.0f, 2.0f, 1.0f);
 
     add(XID::CompMacro, "Comp Intensity", 0.0f, 100.0f, 0.0f);
     add(XID::CompThresh, "Comp Threshold", -40.0f, 0.0f, -20.0f);
@@ -238,6 +281,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     add(XID::ResNotchLimit, "Res Notch Limit", -24.0f, 0.0f, -12.0f);
     add(XID::ResLow, "Res Low", 20.0f, 400.0f, 120.0f);
     add(XID::ResHigh, "Res High", 2000.0f, 16000.0f, 9400.0f);
+    add(XID::ResStyle, "Res Style", 0.0f, 2.0f, 1.0f);
+    add(XID::ResBands, "Res Bands", 1.0f, 5.0f, 1.0f);
 
     add(XID::SatMacro, "Sat Intensity", 0.0f, 100.0f, 0.0f);
     add(XID::SatDrive, "Sat Drive", 0.0f, 100.0f, 0.0f);
@@ -251,6 +296,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     add(XID::DblWidth, "Doubler Width", 0.0f, 100.0f, 88.0f);
     add(XID::DblDelay, "Doubler Delay", 0.0f, 40.0f, 14.0f);
     add(XID::DblMix, "Doubler Mix", 0.0f, 100.0f, 0.0f);
+    add(XID::DblVoices, "Doubler Voices", 2.0f, 8.0f, 4.0f);
 
     add(XID::RevMacro, "Rev Intensity", 0.0f, 100.0f, 0.0f);
     add(XID::RevSize, "Rev Size", 0.0f, 100.0f, 55.0f);
@@ -272,6 +318,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     add(XID::DlyPanRate, "Dly Pan Rate", 0.05f, 4.0f, 0.5f);
     add(XID::DlyFbHpf, "Dly Feedback HPF", 20.0f, 2000.0f, 120.0f);
     add(XID::DlyFbLpf, "Dly Feedback LPF", 1000.0f, 18000.0f, 8000.0f);
+    add(XID::DlyNoteDiv, "Dly Note Division", 0.0f, 6.0f, 4.0f);
+    add(XID::DlyPreDelay, "Dly Pre-Delay", 0.0f, 2.0f, 0.0f);
 
     add(XID::LimMacro, "Lim Intensity", 0.0f, 100.0f, 0.0f);
     add(XID::LimInputGain, "Lim Input Gain", -12.0f, 12.0f, 0.0f);

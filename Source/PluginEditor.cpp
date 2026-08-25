@@ -438,14 +438,16 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     satCharSeg = std::make_unique<SegButtonGroup>(proc.apvts, XID::SatChar,
         std::vector<SegButtonGroup::Option>{ { "Tube", 0.0f }, { "Tape", 1.0f }, { "Transistor", 2.0f }, { "Diode", 3.0f } });
     addChildComponent(*satCharSeg);
-    addPage("REV",  { { XID::RevSize, "Size" }, { XID::RevDecay, "Decay" }, { XID::RevPreDelay, "PreDelay" },
-                       { XID::RevMix, "Mix" }, { XID::RevDuck, "Duck" }, { XID::RevDuckRelease, "DuckRel" },
-                       { XID::RevWetHpf, "Wet HPF" }, { XID::RevWetLpf, "Wet LPF" } });
+    // 4 main knobs up top; Duck/DuckRelease and Wet HPF/LPF appended right
+    // after (same pageKnobs[revTabIndex] vector, indices 4-5 and 6-7 —
+    // addPage() appends) so resized() can lay the latter two pairs out
+    // inside their own cards below instead of one flat 8-knob row.
+    addPage("REV",  { { XID::RevSize, "Size" }, { XID::RevDecay, "Decay" }, { XID::RevPreDelay, "PreDelay" }, { XID::RevMix, "Mix" } });
+    addPage("REV",  { { XID::RevDuck, "Duck" }, { XID::RevDuckRelease, "DuckRel" } });
+    addPage("REV",  { { XID::RevWetHpf, "Wet HPF" }, { XID::RevWetLpf, "Wet LPF" } });
     // Time is a real seg-group (was the 9th knob crowding this page badly
-    // enough to clip its own neighbours' labels) — fixed ms presets for
-    // now rather than the mockup's tempo-synced note values, since real
-    // sync needs host playhead/tempo access that's a separate, bigger
-    // piece of work. Still snaps the existing continuous DlyTime param.
+    // enough to clip its own neighbours' labels) — fixed ms presets when
+    // not synced to host tempo.
     addPage("DLY",  { { XID::DlyFeedback, "Fdbk" }, { XID::DlySpread, "Spread" },
                        { XID::DlyMix, "Mix" }, { XID::DlyDuck, "Duck" }, { XID::DlyDuckRelease, "DuckRel" },
                        { XID::DlyPanRate, "PanRate" }, { XID::DlyFbHpf, "Fbk HPF" }, { XID::DlyFbLpf, "Fbk LPF" } });
@@ -453,12 +455,51 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
         std::vector<SegButtonGroup::Option>{ { "100ms", 100.0f }, { "200ms", 200.0f }, { "300ms", 300.0f },
                                                { "500ms", 500.0f }, { "750ms", 750.0f } });
     addChildComponent(*dlyTimeSeg);
+    // Real host-tempo sync (see runDly: queries getPlayHead() live, no
+    // fabricated animation) — SYNC toggle swaps the fixed-ms Time seg-group
+    // for a note-division one computed from the actual host BPM. Pre-Delay
+    // is always tempo-synced, matching the mockup's Off/1/32/1/16 options.
+    dlySyncBtn.setClickingTogglesState(true);
+    dlySyncBtn.setColour(juce::TextButton::buttonOnColourId, XaLZaColour::accent);
+    dlySyncBtn.setColour(juce::TextButton::textColourOnId, XaLZaColour::panelBg);
+    dlySyncBtn.setTooltip("Sync Time to the host's tempo instead of a fixed millisecond value");
+    addChildComponent(dlySyncBtn);
+    dlySyncAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        proc.apvts, XID::DlySync, dlySyncBtn);
+    dlyNoteDivSeg = std::make_unique<SegButtonGroup>(proc.apvts, XID::DlyNoteDiv,
+        std::vector<SegButtonGroup::Option>{ { "1/16", 0.0f }, { "1/8T", 1.0f }, { "1/8", 2.0f },
+                                               { "1/4T", 3.0f }, { "1/4", 4.0f }, { "1/2", 5.0f }, { "1/1", 6.0f } });
+    addChildComponent(*dlyNoteDivSeg);
+    dlyPreDelaySeg = std::make_unique<SegButtonGroup>(proc.apvts, XID::DlyPreDelay,
+        std::vector<SegButtonGroup::Option>{ { "Off", 0.0f }, { "1/32", 1.0f }, { "1/16", 2.0f } });
+    addChildComponent(*dlyPreDelaySeg);
     addPage("DBL",  { { XID::DblDetune, "Detune" }, { XID::DblWidth, "Width" }, { XID::DblDelay, "Delay" }, { XID::DblMix, "Mix" } });
+    // Voices is a real seg-group — each option genuinely changes how many
+    // independent modulated delay taps runDbl sums (see DblVoiceConfig in
+    // Params.h), not a relabel of an existing knob.
+    dblVoicesSeg = std::make_unique<SegButtonGroup>(proc.apvts, XID::DblVoices,
+        std::vector<SegButtonGroup::Option>{ { "2", 2.0f }, { "4", 4.0f }, { "6", 6.0f }, { "8", 8.0f } });
+    addChildComponent(*dblVoicesSeg);
     addPage("RES",  { { XID::ResAmount, "Amount" }, { XID::ResSharpness, "Sharp" }, { XID::ResReactivity, "React" },
                        { XID::ResNotchLimit, "NotchLim" }, { XID::ResLow, "Low" }, { XID::ResHigh, "High" } });
+    // Style and Bands are real seg-groups — Style scales each notch's
+    // Q/detect-width (Delicate=surgical, Wide=broad), Bands genuinely
+    // changes how many parallel adaptive notches run (see runRes).
+    resStyleSeg = std::make_unique<SegButtonGroup>(proc.apvts, XID::ResStyle,
+        std::vector<SegButtonGroup::Option>{ { "Delicate", 0.0f }, { "Vocal", 1.0f }, { "Wide", 2.0f } });
+    addChildComponent(*resStyleSeg);
+    resBandsSeg = std::make_unique<SegButtonGroup>(proc.apvts, XID::ResBands,
+        std::vector<SegButtonGroup::Option>{ { "1", 1.0f }, { "2", 2.0f }, { "3", 3.0f }, { "4", 4.0f }, { "5", 5.0f } });
+    addChildComponent(*resBandsSeg);
     addPage("GATE", { { XID::GateThresh, "Thresh" }, { XID::GateRange, "Range" }, { XID::GateAttack, "Attack" },
                        { XID::GateHold, "Hold" }, { XID::GateRelease, "Release" } });
     addPage("ESS",  { { XID::EssThresh, "Thresh" }, { XID::EssRange, "Range" }, { XID::EssFreq, "Freq" } });
+    // Band is a real seg-group (matches the mockup's essBandSegs) — each
+    // option genuinely changes the detector/dynEq Q and frequency bias
+    // (see runEss), not a relabel of the existing Freq knob.
+    essBandSeg = std::make_unique<SegButtonGroup>(proc.apvts, XID::EssBand,
+        std::vector<SegButtonGroup::Option>{ { "S", 0.0f }, { "T", 1.0f }, { "CH", 2.0f } });
+    addChildComponent(*essBandSeg);
     addPage("LIM",  { { XID::LimInputGain, "InGain" }, { XID::LimCeiling, "Ceiling" }, { XID::LimRelease, "Release" }, { XID::LimClip, "Clip" } });
 
     // ---- Per-module IN/OUT meters + GR readouts, tapping the real serial chain ----
@@ -548,11 +589,11 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     setupVizLabel(compGrTitle,        "GAIN REDUCTION + OUTPUT + TRANSFER CURVE");
     setupVizLabel(optoScopeTitle,     "POST-OPTO OSCILLOSCOPE + TRANSFER CURVE");
     setupVizLabel(eqSpectrumTitle,    "RESPONSE SPECTRUM (POST-EQ)");
-    setupVizLabel(resSuppressTitle,   "DYNAMIC SUPPRESSION");
+    setupVizLabel(resSuppressTitle,   "DYNAMIC SUPPRESSION + PER-BAND DEPTH");
     setupVizLabel(satScopeTitle,      "WAVEFORM: IN VS OUT + HARMONIC CONTENT");
-    setupVizLabel(dblGoniometerTitle, "STEREO FIELD (POST-DOUBLER)");
-    setupVizLabel(revDecayTitle,      "DECAY TAIL (POST-REVERB LEVEL)");
-    setupVizLabel(dlyScopeTitle,      "ECHO WAVEFORM (POST-DELAY)");
+    setupVizLabel(dblGoniometerTitle, "STEREO FIELD + PER-VOICE (POST-DOUBLER)");
+    setupVizLabel(revDecayTitle,      "DECAY TAIL (LIVE) + IMPULSE RESPONSE");
+    setupVizLabel(dlyScopeTitle,      "ECHO WAVEFORM + TAP TIMELINE (POST-DELAY)");
     setupVizLabel(limViewTitle,       "BRICKWALL OUTPUT + LOUDNESS");
     addChildComponent(preView);
     addChildComponent(gateView);
@@ -560,11 +601,15 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     addChildComponent(compView);
     addChildComponent(optoView);
     addChildComponent(eqSpectrum);
-    addChildComponent(resSuppressGraph);
+    addChildComponent(resView);
     addChildComponent(satView);
-    addChildComponent(dblGoniometer);
-    addChildComponent(revDecayGraph);
-    addChildComponent(dlyScope);
+    addChildComponent(dblView);
+    addChildComponent(revView);
+    setupVizLabel(revDuckCardTitle, "SIDECHAIN DUCKING");
+    addChildComponent(revDuckCurve);
+    addChildComponent(revDuckFrame);
+    revDuckFrame.toBack();
+    addChildComponent(dlyView);
     addChildComponent(limView);
     eqSpectrum.setSampleRate(proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0);
 
@@ -592,6 +637,18 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     gateScAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         proc.apvts, XID::GateScEnable, gateScBtn);
 
+    // Real lookahead — a fixed 5ms delay line + latency compensation (see
+    // runGate), not a cosmetic toggle: with it on, the gate genuinely opens
+    // ahead of a transient reaching the (now delayed) output.
+    gateLookaheadBtn.setClickingTogglesState(true);
+    gateLookaheadBtn.setColour(juce::TextButton::buttonOnColourId, XaLZaColour::accent);
+    gateLookaheadBtn.setColour(juce::TextButton::textColourOnId, XaLZaColour::panelBg);
+    gateLookaheadBtn.setTooltip("Adds ~5ms of latency so the gate can react to a transient "
+                                 "before it reaches the output, instead of exactly when it arrives");
+    addChildComponent(gateLookaheadBtn);
+    gateLookaheadAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        proc.apvts, XID::GateLookahead, gateLookaheadBtn);
+
     auto resolveTab = [this] (const juce::String& tab, int fallback) -> int
     {
         auto it = std::find(tabNames.begin(), tabNames.end(), tab);
@@ -617,11 +674,11 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
         { compTabIndex, &compView,         &compGrTitle },
         { optoTabIndex, &optoView,         &optoScopeTitle },
         { eqTabIndex,   &eqSpectrum,       &eqSpectrumTitle },
-        { resTabIndex,  &resSuppressGraph, &resSuppressTitle },
+        { resTabIndex,  &resView,          &resSuppressTitle },
         { satTabIndex,  &satView,          &satScopeTitle },
-        { dblTabIndex,  &dblGoniometer,    &dblGoniometerTitle },
-        { revTabIndex,  &revDecayGraph,    &revDecayTitle },
-        { dlyTabIndex,  &dlyScope,         &dlyScopeTitle },
+        { dblTabIndex,  &dblView,          &dblGoniometerTitle },
+        { revTabIndex,  &revView,          &revDecayTitle },
+        { dlyTabIndex,  &dlyView,          &dlyScopeTitle },
         { limTabIndex,  &limView,          &limViewTitle },
     };
 
@@ -919,16 +976,30 @@ void XaLZaEditor::showPage(int index)
     }
     gateListenBtn.setVisible(currentTab == gateTabIndex);
     gateScBtn.setVisible(currentTab == gateTabIndex);
+    gateLookaheadBtn.setVisible(currentTab == gateTabIndex);
     essListenBtn.setVisible(currentTab == essTabIndex);
     compRatioSeg->setVisible(currentTab == compTabIndex);
     for (auto* s : { eqLowFreqSeg.get(), eqMidFreqSeg.get(), eqHighFreqSeg.get() })
         s->setVisible(currentTab == eqTabIndex);
-    dlyTimeSeg->setVisible(currentTab == dlyTabIndex);
+    {
+        bool onDly = currentTab == dlyTabIndex;
+        bool dlySyncOn = proc.apvts.getRawParameterValue(XID::DlySync)->load() > 0.5f;
+        dlyTimeSeg->setVisible(onDly && !dlySyncOn);
+        dlyNoteDivSeg->setVisible(onDly && dlySyncOn);
+        dlySyncBtn.setVisible(onDly);
+        dlyPreDelaySeg->setVisible(onDly);
+    }
     preImpedanceSeg->setVisible(currentTab == preTabIndex);
     for (auto* b : { &prePadBtn, &prePhaseBtn, &prePhantomBtn })
         b->setVisible(currentTab == preTabIndex);
     optoModeSeg->setVisible(currentTab == optoTabIndex);
     satCharSeg->setVisible(currentTab == satTabIndex);
+    dblVoicesSeg->setVisible(currentTab == dblTabIndex);
+    for (auto* c : { (juce::Component*) &revDuckCardTitle, (juce::Component*) &revDuckCurve, (juce::Component*) &revDuckFrame })
+        c->setVisible(currentTab == revTabIndex);
+    resStyleSeg->setVisible(currentTab == resTabIndex);
+    resBandsSeg->setVisible(currentTab == resTabIndex);
+    essBandSeg->setVisible(currentTab == essTabIndex);
 
     resized();
     repaint();
@@ -1007,13 +1078,29 @@ void XaLZaEditor::timerCallback()
         for (auto* s : { eqLowFreqSeg.get(), eqMidFreqSeg.get(), eqHighFreqSeg.get() })
             s->refresh();
     if (currentTab == dlyTabIndex)
+    {
+        bool dlySyncOn = proc.apvts.getRawParameterValue(XID::DlySync)->load() > 0.5f;
+        dlyTimeSeg->setVisible(!dlySyncOn);
+        dlyNoteDivSeg->setVisible(dlySyncOn);
         dlyTimeSeg->refresh();
+        dlyNoteDivSeg->refresh();
+        dlyPreDelaySeg->refresh();
+    }
     if (currentTab == preTabIndex)
         preImpedanceSeg->refresh();
     if (currentTab == optoTabIndex)
         optoModeSeg->refresh();
     if (currentTab == satTabIndex)
         satCharSeg->refresh();
+    if (currentTab == dblTabIndex)
+        dblVoicesSeg->refresh();
+    if (currentTab == resTabIndex)
+    {
+        resStyleSeg->refresh();
+        resBandsSeg->refresh();
+    }
+    if (currentTab == essTabIndex)
+        essBandSeg->refresh();
 
     auto fmtDb = [] (float l, float r)
     {
@@ -1180,7 +1267,13 @@ void XaLZaEditor::timerCallback()
     }
     else if (currentTab == resTabIndex)
     {
-        resSuppressGraph.push(juce::jlimit(0.0f, 1.0f, -proc.getResCutDb() / 24.0f));
+        resView.push(juce::jlimit(0.0f, 1.0f, -proc.getResCutDb() / 24.0f));
+
+        int numBands = juce::jlimit(1, 5, (int) std::round(proc.apvts.getRawParameterValue(XID::ResBands)->load()));
+        float perBand[5];
+        for (int b = 0; b < numBands; ++b)
+            perBand[b] = proc.getResBandCutDb(b);
+        resView.setBandData(numBands, perBand);
     }
     else if (currentTab == satTabIndex)
     {
@@ -1213,13 +1306,72 @@ void XaLZaEditor::timerCallback()
             int idx = pos - 1 - i;
             pts.emplace_back(proc.dblScopeSampleL(idx), proc.dblScopeSampleR(idx));
         }
-        dblGoniometer.setPoints(pts);
+        dblView.setPoints(pts);
+
+        int dblVoices = 2 * (int) std::round(proc.apvts.getRawParameterValue(XID::DblVoices)->load() / 2.0f);
+        float dblDelayMs = proc.apvts.getRawParameterValue(XID::DblDelay)->load();
+        float dblWidthPct = proc.apvts.getRawParameterValue(XID::DblWidth)->load() / 100.0f;
+        dblView.setVoiceData(juce::jlimit(2, 8, dblVoices), dblDelayMs, dblWidthPct);
     }
     else if (currentTab == revTabIndex)
     {
         float outDbR = juce::jmax(proc.getMeterDbL((int) XaLZaProcessor::TapRev),
                                    proc.getMeterDbR((int) XaLZaProcessor::TapRev));
-        revDecayGraph.push(juce::jlimit(0.0f, 1.0f, (outDbR + 60.0f) / 60.0f));
+        revView.push(juce::jlimit(0.0f, 1.0f, (outDbR + 60.0f) / 60.0f));
+
+        float duckPct = proc.apvts.getRawParameterValue(XID::RevDuck)->load() / 100.0f;
+        float duckRelMs = proc.apvts.getRawParameterValue(XID::RevDuckRelease)->load();
+        revDuckCurve.setCurve(duckPct, duckRelMs);
+
+        // Recompute the Impulse Response a few times a second (not every
+        // frame — it's message-thread work, not audio-thread, but no need
+        // to redo it 30x/sec for a control that changes slowly).
+        if (++irProbeCounter >= 10)
+        {
+            irProbeCounter = 0;
+            double srIr = proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0;
+            int lenSamples = (int) (srIr * 1.6);
+            if (irProbeBuffer.getNumSamples() != lenSamples)
+                irProbeBuffer.setSize(1, lenSamples, false, false, true);
+            irProbeBuffer.clear();
+            irProbeBuffer.setSample(0, 0, 1.0f);
+
+            juce::dsp::ProcessSpec probeSpec { srIr, (juce::uint32) lenSamples, 1u };
+            irProbeReverb.prepare(probeSpec);
+            irProbeReverb.reset();
+
+            float sizePct = proc.apvts.getRawParameterValue(XID::RevSize)->load() / 100.0f;
+            float decaySec = proc.apvts.getRawParameterValue(XID::RevDecay)->load();
+            juce::dsp::Reverb::Parameters rp;
+            rp.roomSize   = juce::jlimit(0.0f, 1.0f, sizePct);
+            rp.damping    = juce::jlimit(0.05f, 0.95f, juce::jmap(decaySec, 0.3f, 8.0f, 0.9f, 0.1f));
+            rp.wetLevel   = 1.0f;
+            rp.dryLevel   = 0.0f;
+            rp.width      = 1.0f;
+            rp.freezeMode = 0.0f;
+            irProbeReverb.setParameters(rp);
+
+            juce::dsp::AudioBlock<float> irBlock(irProbeBuffer);
+            juce::dsp::ProcessContextReplacing<float> irCtx(irBlock);
+            irProbeReverb.process(irCtx);
+
+            float irDisp[WaveformScope::numPoints];
+            auto* raw = irProbeBuffer.getReadPointer(0);
+            int stride = juce::jmax(1, lenSamples / WaveformScope::numPoints);
+            for (int i = 0; i < WaveformScope::numPoints; ++i)
+            {
+                // Peak-hold within each bucket (preserving sign) so the
+                // trace still shows the algorithm's early reflections
+                // rather than aliasing them away with plain decimation.
+                int start = i * stride;
+                int end = juce::jmin(lenSamples, start + stride);
+                float best = 0.0f;
+                for (int n = start; n < end; ++n)
+                    if (std::abs(raw[n]) > std::abs(best)) best = raw[n];
+                irDisp[i] = juce::jlimit(-1.0f, 1.0f, best);
+            }
+            revView.setImpulseResponse(irDisp);
+        }
     }
     else if (currentTab == dlyTabIndex)
     {
@@ -1227,7 +1379,36 @@ void XaLZaEditor::timerCallback()
         int pos = proc.getRawWritePos((int) XaLZaProcessor::RawDly);
         for (int i = 0; i < WaveformScope::numPoints; ++i)
             buf[i] = proc.rawSample((int) XaLZaProcessor::RawDly, pos - WaveformScope::numPoints + i);
-        dlyScope.setSamples(buf);
+        dlyView.setSamples(buf);
+
+        // Same real computation runDly does — live host BPM (or the 120
+        // fallback), current Time/Sync/Pre-Delay settings — so the timeline
+        // always matches what's actually playing.
+        double bpm = 120.0;
+        if (auto* ph = proc.getPlayHead())
+            if (auto posInfo = ph->getPosition())
+                if (auto b = posInfo->getBpm())
+                    bpm = *b;
+        bpm = juce::jlimit(20.0, 300.0, bpm);
+        float wholeNoteMs = (float) (240000.0 / bpm);
+
+        bool dlySyncOn = proc.apvts.getRawParameterValue(XID::DlySync)->load() > 0.5f;
+        float timeMs;
+        if (dlySyncOn)
+        {
+            int divIdx = juce::jlimit(0, DlyNoteTable::kNumDivs - 1,
+                             (int) std::round(proc.apvts.getRawParameterValue(XID::DlyNoteDiv)->load()));
+            timeMs = wholeNoteMs * DlyNoteTable::wholeNoteFraction[divIdx];
+        }
+        else
+        {
+            timeMs = proc.apvts.getRawParameterValue(XID::DlyTime)->load();
+        }
+
+        int preDivIdx = juce::jlimit(0, 2, (int) std::round(proc.apvts.getRawParameterValue(XID::DlyPreDelay)->load()));
+        float preDelayMs = preDivIdx == 1 ? wholeNoteMs / 32.0f : (preDivIdx == 2 ? wholeNoteMs / 16.0f : 0.0f);
+        float fbPct = proc.apvts.getRawParameterValue(XID::DlyFeedback)->load() / 100.0f;
+        dlyView.setTapData(preDelayMs, timeMs, fbPct);
     }
     else if (currentTab == limTabIndex)
     {
@@ -1471,7 +1652,19 @@ void XaLZaEditor::resized()
         if (bv != nullptr)
         {
             auto knobArea = content.removeFromTop(fineLabelH + fineKnobH + 14);
-            layoutKnobRow(pageKnobs[(size_t) currentTab], knobArea, fineLabelH, fineKnobW, fineKnobH, fineCellW);
+            if (currentTab == revTabIndex)
+            {
+                // Only the 4 main knobs (Size/Decay/PreDelay/Mix) go in the
+                // top row — Duck/DuckRel and Wet HPF/LPF get their own
+                // section below (see the ctrlRow block further down).
+                std::vector<KnobUI*> mainKnobs(pageKnobs[(size_t) currentTab].begin(),
+                                                pageKnobs[(size_t) currentTab].begin() + 4);
+                layoutKnobRow(mainKnobs, knobArea, fineLabelH, fineKnobW, fineKnobH, fineCellW);
+            }
+            else
+            {
+                layoutKnobRow(pageKnobs[(size_t) currentTab], knobArea, fineLabelH, fineKnobW, fineKnobH, fineCellW);
+            }
 
             if (currentTab == preTabIndex)
             {
@@ -1510,24 +1703,81 @@ void XaLZaEditor::resized()
                 eqHighFreqSeg->setBounds(rowArea.removeFromLeft(segCellW).reduced(10, 1));
             }
 
+            if (currentTab == revTabIndex)
+            {
+                // Duck/DuckRelease live inside a bordered "Sidechain
+                // Ducking" card with their own real curve; Wet HPF/LPF sit
+                // beside it as a normal small knob pair — see addPage("REV",
+                // ...) above for why pageKnobs[revTabIndex] has these at
+                // indices 4/5 and 6/7 after the 4 main knobs.
+                content.removeFromTop(6);
+                constexpr int ctrlRowH = 126, cardW = 380, wetGap = 18;
+                auto ctrlRow = content.removeFromTop(ctrlRowH);
+
+                auto cardArea = ctrlRow.removeFromLeft(cardW);
+                revDuckFrame.setBounds(cardArea);
+                auto cardInner = cardArea.reduced(10, 6);
+                revDuckCardTitle.setBounds(cardInner.removeFromTop(14));
+                cardInner.removeFromTop(2);
+
+                revDuckCurve.setBounds(cardInner.removeFromRight(150).reduced(0, 4));
+                cardInner.removeFromRight(6);
+
+                auto& knobs = pageKnobs[(size_t) revTabIndex];
+                layoutKnobRow({ knobs[4], knobs[5] }, cardInner, fineLabelH, fineKnobW, fineKnobH, fineCellW);
+
+                ctrlRow.removeFromLeft(wetGap);
+                layoutKnobRow({ knobs[6], knobs[7] }, ctrlRow, fineLabelH, fineKnobW, fineKnobH, fineCellW);
+            }
+
             content.removeFromTop(10);
             auto titleRow = content.removeFromTop(bigVizTitleH);
             if (currentTab == gateTabIndex)
             {
                 gateListenBtn.setBounds(titleRow.removeFromRight(64).reduced(0, 1));
                 gateScBtn.setBounds(titleRow.removeFromRight(64).reduced(0, 1));
+                titleRow.removeFromRight(6);
+                gateLookaheadBtn.setBounds(titleRow.removeFromRight(84).reduced(0, 1));
             }
             else if (currentTab == essTabIndex)
+            {
                 essListenBtn.setBounds(titleRow.removeFromRight(64).reduced(0, 1));
+                titleRow.removeFromRight(6);
+                essBandSeg->setBounds(titleRow.removeFromRight(150).reduced(0, 1));
+            }
             else if (currentTab == compTabIndex)
                 compRatioSeg->setBounds(titleRow.removeFromRight(220).reduced(0, 1));
             else if (currentTab == dlyTabIndex)
-                dlyTimeSeg->setBounds(titleRow.removeFromRight(240).reduced(0, 1));
+            {
+                // Pre-Delay first (always visible), then SYNC, then whichever
+                // of Time (fixed ms) / Note Division (tempo-synced) is
+                // currently showing — both get bounds set since only one is
+                // visible at a time, harmless for the hidden one.
+                dlyPreDelaySeg->setBounds(titleRow.removeFromRight(140).reduced(0, 1));
+                titleRow.removeFromRight(6);
+                dlySyncBtn.setBounds(titleRow.removeFromRight(50).reduced(0, 1));
+                titleRow.removeFromRight(6);
+                auto timeArea = titleRow.removeFromRight(260).reduced(0, 1);
+                dlyTimeSeg->setBounds(timeArea);
+                dlyNoteDivSeg->setBounds(timeArea);
+            }
             else if (currentTab == optoTabIndex)
                 optoModeSeg->setBounds(titleRow.removeFromRight(160).reduced(0, 1));
             else if (currentTab == satTabIndex)
                 satCharSeg->setBounds(titleRow.removeFromRight(260).reduced(0, 1));
-            auto vizArea = content.removeFromTop(bigVizH);
+            else if (currentTab == dblTabIndex)
+                dblVoicesSeg->setBounds(titleRow.removeFromRight(180).reduced(0, 1));
+            else if (currentTab == resTabIndex)
+            {
+                resBandsSeg->setBounds(titleRow.removeFromRight(220).reduced(0, 1));
+                titleRow.removeFromRight(6);
+                resStyleSeg->setBounds(titleRow.removeFromRight(200).reduced(0, 1));
+            }
+            // REV's ducking card + wet-tone knob pair eat into the vertical
+            // budget other bigViz pages spend entirely on the viz area, so
+            // its decay/IR card is shorter than the usual 210px — still
+            // plenty to read a scrolling level graph and a short IR trace.
+            auto vizArea = content.removeFromTop(currentTab == revTabIndex ? 110 : bigVizH);
 
             bv->title->setBounds(titleRow);
             bv->comp->setBounds(vizArea);

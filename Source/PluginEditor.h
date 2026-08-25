@@ -200,6 +200,21 @@ private:
     juce::OwnedArray<juce::TextButton> buttons;
 };
 
+/** Purely decorative bordered-card outline (transparent fill, so it can be
+    added on top of already-placed knobs without hiding them) — used to
+    visually group a knob cluster the way the mockup groups related
+    controls into their own boxes (e.g. Reverb's "Sidechain Ducking"). */
+class CardFrame : public juce::Component
+{
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat().reduced(0.5f);
+        g.setColour(XaLZaColour::borderSoft);
+        g.drawRoundedRectangle(b, 5.0f, 1.0f);
+    }
+};
+
 /** Stereo-field scope (X/Y goniometer), matching the mockup's
     "Goniometer" viz card. Reads points handed to it each frame by the
     editor's Timer — no audio-thread access here. */
@@ -886,6 +901,338 @@ private:
     SpectrumAnalyzer harmonics;
 };
 
+/** Doubler "Per-Voice" table: one row per active voice, showing the actual
+    delay-stagger (ms) and pan position each voice is running with right
+    now. Reads the exact same DblVoiceConfig constants the DSP itself uses
+    (see runDbl in PluginProcessor.cpp), so every number here is real —
+    nothing here is a fake per-voice animation. */
+class PerVoiceTable : public juce::Component
+{
+public:
+    void setData(int newNumVoices, float newDelayMs, float newWidthPct)
+    {
+        if (numVoices == newNumVoices && juce::approximatelyEqual(delayMs, newDelayMs)
+            && juce::approximatelyEqual(widthPct, newWidthPct))
+            return;
+        numVoices = newNumVoices; delayMs = newDelayMs; widthPct = newWidthPct;
+        repaint();
+    }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto bnds = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(bnds);
+        g.setColour(XaLZaColour::border);
+        g.drawRect(bnds, 1.0f);
+
+        auto area = getLocalBounds().reduced(6, 4);
+        int rowH = juce::jmax(12, area.getHeight() / juce::jmax(1, numVoices));
+        g.setFont(XaLZaLookAndFeel::monoFont(10.5f));
+
+        for (int v = 0; v < numVoices; ++v)
+        {
+            auto row = area.removeFromTop(rowH);
+            float ms = delayMs + DblVoiceConfig::delayOffsetMs[v];
+            float pan = juce::jlimit(-1.0f, 1.0f, DblVoiceConfig::panPos[v] * widthPct);
+            juce::String panTxt = juce::approximatelyEqual(pan, 0.0f) ? "C"
+                : (pan < 0.0f ? (juce::String((int) std::round(-pan * 100)) + "L")
+                              : (juce::String((int) std::round(pan * 100)) + "R"));
+
+            g.setColour(v % 2 == 0 ? XaLZaColour::textMuted.withAlpha(0.9f) : XaLZaColour::textMuted.withAlpha(0.65f));
+            g.drawText("V" + juce::String(v + 1), row.removeFromLeft(row.getWidth() / 3),
+                       juce::Justification::centredLeft);
+            g.setColour(XaLZaColour::accent2.withAlpha(0.85f));
+            g.drawText(juce::String(ms, 1) + " ms", row.removeFromLeft(row.getWidth() / 2),
+                       juce::Justification::centredLeft);
+            g.setColour(XaLZaColour::accent.withAlpha(0.85f));
+            g.drawText(panTxt, row, juce::Justification::centredLeft);
+        }
+    }
+
+    int numVoices = 4;
+    float delayMs = 14.0f, widthPct = 0.88f;
+};
+
+/** Sidechain-ducking curve — an analytic depiction of the exact envelope
+    math runRev/runDly actually apply: gain(t) = 1 - duckPct * exp(-t /
+    releaseMs) after a transient, using the real Duck/DuckRelease values
+    (same shape as TransferCurveView/FreqResponseView above: real
+    parameters, not audio-reactive, not invented). */
+class DuckingCurveView : public juce::Component
+{
+public:
+    static constexpr int numPts = 96;
+
+    void setCurve(float duckPct, float releaseMs)
+    {
+        float windowMs = juce::jmax(120.0f, releaseMs * 4.0f);
+        for (int i = 0; i <= numPts; ++i)
+        {
+            float t = windowMs * (float) i / (float) numPts;
+            curve[i] = 1.0f - duckPct * std::exp(-t / juce::jmax(1.0f, releaseMs));
+        }
+        depth = duckPct;
+        repaint();
+    }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(b);
+        g.setColour(XaLZaColour::borderSoft);
+        for (int i = 1; i < 4; ++i)
+        {
+            float y = b.getY() + b.getHeight() * (float) i / 4.0f;
+            g.drawLine(b.getX(), y, b.getRight(), y, 0.5f);
+        }
+        g.setColour(XaLZaColour::border);
+        g.drawRect(b, 1.0f);
+
+        auto mapY = [&] (float g01) { return b.getBottom() - juce::jlimit(0.0f, 1.0f, g01) * b.getHeight(); };
+
+        juce::Path p;
+        for (int i = 0; i <= numPts; ++i)
+        {
+            float x = b.getX() + b.getWidth() * (float) i / (float) numPts;
+            float y = mapY(curve[i]);
+            if (i == 0) p.startNewSubPath(x, y); else p.lineTo(x, y);
+        }
+        g.setColour(XaLZaColour::accent2);
+        g.strokePath(p, juce::PathStrokeType(2.0f));
+
+        g.setColour(XaLZaColour::textMuted);
+        g.setFont(juce::Font(juce::FontOptions(8.5f)));
+        g.drawText("WET GAIN AFTER TRANSIENT (-" + juce::String((int) std::round(depth * 100)) + "% DIP)",
+                   b.reduced(3.0f), juce::Justification::topLeft);
+    }
+
+    float curve[numPts + 1] = {};
+    float depth = 0.0f;
+};
+
+/** Composite Reverb page view: the existing real post-reverb decay-tail
+    graph (fed from live output level) alongside a genuine Impulse
+    Response trace. The IR is computed by running a message-thread-only
+    juce::dsp::Reverb instance (mirroring the exact same roomSize/damping
+    the real audio-thread reverb is using right now) against a single
+    unit impulse — a real IR of the actual algorithm and settings, never
+    touching the audio thread and never fabricated. */
+class ReverbView : public juce::Component
+{
+public:
+    ReverbView() { addAndMakeVisible(decay); addAndMakeVisible(ir); }
+
+    void push(float normLevel) { decay.push(normLevel); }
+    void setImpulseResponse(const float* samples) { ir.setSamples(samples); }
+
+private:
+    void resized() override
+    {
+        auto b = getLocalBounds();
+        auto left = b.removeFromLeft(b.getWidth() / 2);
+        left.removeFromRight(4);
+        decay.setBounds(left);
+        ir.setBounds(b);
+    }
+
+    EnvelopeGraph decay;
+    WaveformScope ir;
+};
+
+/** Composite Doubler page view: the existing post-Doubler stereo
+    goniometer alongside the real Per-Voice table (see PerVoiceTable
+    above). */
+class DoublerView : public juce::Component
+{
+public:
+    DoublerView() { addAndMakeVisible(gonio); addAndMakeVisible(table); }
+
+    void setPoints(const std::vector<std::pair<float, float>>& pts) { gonio.setPoints(pts); }
+    void setVoiceData(int numVoices, float delayMs, float widthPct) { table.setData(numVoices, delayMs, widthPct); }
+
+private:
+    void resized() override
+    {
+        auto b = getLocalBounds();
+        auto left = b.removeFromLeft(b.getWidth() / 2);
+        left.removeFromRight(4);
+        gonio.setBounds(left);
+        table.setBounds(b);
+    }
+
+    Goniometer gonio;
+    PerVoiceTable table;
+};
+
+/** Resonance's per-band suppression bars — one bar per currently-active
+    band (real count from ResBands), height/label driven by that band's
+    actual live cut depth (see PluginProcessor::getResBandCutDb). Enriches
+    the single aggregate suppression line with what each individual
+    adaptive notch is actually doing right now. */
+class ResBandBars : public juce::Component
+{
+public:
+    void setData(int newNumBands, const float* cutDbPerBand)
+    {
+        numBands = juce::jlimit(1, kMaxBands, newNumBands);
+        for (int i = 0; i < kMaxBands; ++i)
+            cutDb[i] = i < numBands ? cutDbPerBand[i] : 0.0f;
+        repaint();
+    }
+
+private:
+    static constexpr int kMaxBands = 5;
+
+    void paint(juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(b);
+        g.setColour(XaLZaColour::border);
+        g.drawRect(b, 1.0f);
+
+        constexpr float rangeDb = 24.0f;
+        auto area = getLocalBounds().reduced(6, 4).toFloat();
+        float cellW = area.getWidth() / (float) numBands;
+        g.setFont(juce::Font(juce::FontOptions(8.5f)));
+
+        for (int i = 0; i < numBands; ++i)
+        {
+            auto cell = juce::Rectangle<float>(area.getX() + cellW * (float) i, area.getY(), cellW, area.getHeight());
+            auto barCell = cell.reduced(cellW * 0.18f, 0.0f);
+            float depthNorm = juce::jlimit(0.0f, 1.0f, -cutDb[i] / rangeDb);
+            float labelH = 12.0f;
+            auto barArea = barCell.withTrimmedBottom(labelH);
+            float barH = barArea.getHeight() * depthNorm;
+            auto bar = juce::Rectangle<float>(barArea.getX(), barArea.getBottom() - barH, barArea.getWidth(), barH);
+
+            g.setColour(XaLZaColour::accent.withAlpha(0.25f));
+            g.fillRect(barArea);
+            g.setColour(XaLZaColour::accent);
+            g.fillRect(bar);
+
+            g.setColour(XaLZaColour::textMuted);
+            g.drawText(juce::String(cutDb[i], 1), cell.removeFromBottom(labelH), juce::Justification::centred);
+        }
+    }
+
+    int numBands = 1;
+    float cutDb[kMaxBands] = {};
+};
+
+/** Composite Resonance page view: the existing aggregate suppression-depth
+    line alongside the real per-band bars above. */
+class ResonanceView : public juce::Component
+{
+public:
+    ResonanceView() { addAndMakeVisible(graph); addAndMakeVisible(bars); }
+
+    void push(float normDepth) { graph.push(normDepth); }
+    void setBandData(int numBands, const float* cutDbPerBand) { bars.setData(numBands, cutDbPerBand); }
+
+private:
+    void resized() override
+    {
+        auto b = getLocalBounds();
+        auto left = b.removeFromLeft(b.getWidth() / 2);
+        left.removeFromRight(4);
+        graph.setBounds(left);
+        bars.setBounds(b);
+    }
+
+    EnvelopeGraph graph;
+    ResBandBars bars;
+};
+
+/** Delay's "Tap Timeline" — a real depiction of the actual Pre-Delay/Time/
+    Feedback values currently in effect: where the pre-delay tap sits, then
+    each echo repeat's time position and relative level (feedback^n decay).
+    Only buildable honestly now that Pre-Delay and (optionally) Time are
+    real tempo-synced values rather than placeholders — see runDly. */
+class TapTimelineView : public juce::Component
+{
+public:
+    void setData(float preDelayMs, float timeMs, float feedbackPct)
+    {
+        preMs = preDelayMs;
+        mainMs = juce::jmax(1.0f, timeMs);
+        fbPct = juce::jlimit(0.0f, 0.95f, feedbackPct);
+        repaint();
+    }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(b);
+        g.setColour(XaLZaColour::border);
+        g.drawRect(b, 1.0f);
+
+        float windowMs = juce::jlimit(400.0f, 4000.0f, preMs + mainMs * 8.0f);
+        auto baseY = b.getBottom() - 14.0f;
+        auto mapX = [&] (float ms) { return b.getX() + b.getWidth() * juce::jlimit(0.0f, 1.0f, ms / windowMs); };
+
+        g.setColour(XaLZaColour::borderSoft);
+        g.drawLine(b.getX(), baseY, b.getRight(), baseY, 1.0f);
+
+        g.setFont(juce::Font(juce::FontOptions(8.0f)));
+
+        if (preMs > 0.5f)
+        {
+            float x = mapX(preMs);
+            g.setColour(XaLZaColour::accent2);
+            g.fillRect(juce::Rectangle<float>(x - 1.5f, b.getY() + 4.0f, 3.0f, baseY - (b.getY() + 4.0f)));
+            g.drawText("PRE", juce::Rectangle<float>(x - 16.0f, baseY + 1.0f, 32.0f, 12.0f), juce::Justification::centred);
+        }
+
+        float amp = 1.0f;
+        for (int i = 1; i <= 8; ++i)
+        {
+            float tMs = preMs + mainMs * (float) i;
+            if (tMs > windowMs) break;
+            amp *= (i == 1 ? 1.0f : fbPct);
+            float h = juce::jmax(4.0f, (baseY - (b.getY() + 4.0f)) * amp);
+            float x = mapX(tMs);
+            g.setColour(XaLZaColour::accent.withAlpha(juce::jlimit(0.15f, 1.0f, amp)));
+            g.fillRect(juce::Rectangle<float>(x - 1.5f, baseY - h, 3.0f, h));
+        }
+
+        g.setColour(XaLZaColour::textMuted);
+        g.drawText("TAP TIMELINE (0-" + juce::String((int) windowMs) + "ms)", b.reduced(3.0f), juce::Justification::topLeft);
+    }
+
+    float preMs = 0.0f, mainMs = 250.0f, fbPct = 0.3f;
+};
+
+/** Composite Delay page view: the existing post-delay echo waveform scope
+    alongside the real Tap Timeline above. */
+class DelayView : public juce::Component
+{
+public:
+    DelayView() { addAndMakeVisible(scope); addAndMakeVisible(timeline); }
+
+    void setSamples(const float* s) { scope.setSamples(s); }
+    void setTapData(float preDelayMs, float timeMs, float feedbackPct) { timeline.setData(preDelayMs, timeMs, feedbackPct); }
+
+private:
+    void resized() override
+    {
+        auto b = getLocalBounds();
+        auto left = b.removeFromLeft(b.getWidth() / 2);
+        left.removeFromRight(4);
+        scope.setBounds(left);
+        timeline.setBounds(b);
+    }
+
+    WaveformScope scope;
+    TapTimelineView timeline;
+};
+
 /** Chain-order popup content: 12 rows (current processing order, top =
     first), each with Up/Down buttons that call XaLZaProcessor::moveModule
     directly — genuinely reorders the DSP chain, not just a display. Meant
@@ -1110,15 +1457,20 @@ private:
     juce::Label optoScopeTitle;
     SpectrumAnalyzer eqSpectrum;
     juce::Label eqSpectrumTitle;
-    EnvelopeGraph resSuppressGraph;
+    ResonanceView resView;
     juce::Label resSuppressTitle;
     SaturatorView satView;
     juce::Label satScopeTitle;
-    Goniometer dblGoniometer;
+    DoublerView dblView;
     juce::Label dblGoniometerTitle;
-    EnvelopeGraph revDecayGraph;
+    ReverbView revView;
     juce::Label revDecayTitle;
-    WaveformScope dlyScope;
+    // Message-thread-only reverb instance for the Impulse Response trace —
+    // never touches the audio thread. See ReverbView's comment.
+    juce::dsp::Reverb irProbeReverb;
+    juce::AudioBuffer<float> irProbeBuffer;
+    int irProbeCounter = 0;
+    DelayView dlyView;
     juce::Label dlyScopeTitle;
     LimiterView limView;
     juce::Label limViewTitle;
@@ -1140,6 +1492,10 @@ private:
     juce::TextButton gateScBtn { "EXT SC" };
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> gateScAttachment;
 
+    // Gate's real Lookahead toggle — see runGate.
+    juce::TextButton gateLookaheadBtn { "LOOKAHEAD" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> gateLookaheadAttachment;
+
     // Comp's Ratio is a real seg-group of preset ratios (matches the
     // mockup's compRatioSegs) instead of a bare knob — see SegButtonGroup
     // above. Snaps the same existing CompRatio float parameter, so old
@@ -1155,6 +1511,14 @@ private:
     // Delay's Time is a seg-group too — see addPage("DLY", ...) for why.
     std::unique_ptr<SegButtonGroup> dlyTimeSeg;
 
+    // Real host-tempo sync — see runDly. SYNC toggle swaps dlyTimeSeg (fixed
+    // ms) for dlyNoteDivSeg (note divisions computed from live host BPM);
+    // dlyPreDelaySeg is a separate, always-synced pre-delay tap.
+    juce::TextButton dlySyncBtn { "SYNC" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> dlySyncAttachment;
+    std::unique_ptr<SegButtonGroup> dlyNoteDivSeg;
+    std::unique_ptr<SegButtonGroup> dlyPreDelaySeg;
+
     // Preamp's Pad/Phase/Phantom toggles and Impedance seg-group, and
     // Opto's Mode seg-group — all real DSP (Phantom is the one exception,
     // see PrePhantom's comment in Params.h).
@@ -1167,6 +1531,29 @@ private:
     // Saturator's Character seg-group (Tube/Tape/Transistor/Diode) — real
     // distinct waveshapes, see runSat.
     std::unique_ptr<SegButtonGroup> satCharSeg;
+
+    // Doubler's Voices seg-group (2/4/6/8) — real voice count, see runDbl —
+    // fed into dblView's Per-Voice table (both read the same real data).
+    std::unique_ptr<SegButtonGroup> dblVoicesSeg;
+
+    // Reverb's Duck/DuckRelease knobs live in their own bordered "Sidechain
+    // Ducking" card together with the real analytic curve above — matches
+    // the mockup's dedicated ducking box instead of two knobs lost in the
+    // flat 8-knob row (which is also what the Delay page's crowding taught
+    // us to avoid).
+    juce::Label revDuckCardTitle;
+    DuckingCurveView revDuckCurve;
+    CardFrame revDuckFrame;
+
+    // Resonance's Style and Bands seg-groups — real filter-topology
+    // changes (Q/detect-width scaling and parallel-notch count), see
+    // runRes.
+    std::unique_ptr<SegButtonGroup> resStyleSeg;
+    std::unique_ptr<SegButtonGroup> resBandsSeg;
+
+    // De-esser's Band seg-group (S/T/CH) — real detector Q/freq-bias
+    // change, see runEss.
+    std::unique_ptr<SegButtonGroup> essBandSeg;
 
     // Factory preset picker (title bar) — drives the 12 macro knobs.
     juce::ComboBox presetBox;

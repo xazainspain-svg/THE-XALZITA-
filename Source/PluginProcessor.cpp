@@ -133,7 +133,7 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     eqLowShelf.prepare(spec);
     eqMidPeak.prepare(spec);
     eqHighShelf.prepare(spec);
-    resNotch.prepare(spec);
+    for (auto& n : resNotch) n.prepare(spec);
     satTone.prepare(spec);
     reverb.prepare(spec);
     revWetHpf.prepare(spec);
@@ -141,10 +141,14 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
     essDetectL.prepare(spec);
     essDetectR.prepare(spec);
-    resDetectL.prepare(spec);
-    resDetectR.prepare(spec);
-    resEnv = 0.0f;
-    resCutSmoothed = 0.0f;
+    for (int b = 0; b < kMaxResBands; ++b)
+    {
+        resDetectL[b].prepare(spec);
+        resDetectR[b].prepare(spec);
+        resEnv[b] = 0.0f;
+        resCutSmoothed[b] = 0.0f;
+        resCutDbPerBandUI[b].store(0.0f, std::memory_order_relaxed);
+    }
 
     for (auto* s : { &masterInSmoothed, &masterOutSmoothed, &preGainSmoothed,
                       &compMakeupSmoothed, &optoGainSmoothed, &limInGainSmoothed, &prePadGainSmoothed })
@@ -169,6 +173,13 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     limLookaheadRing.setSize(2, limRingSize, false, true, true);
     limRingWritePos = 0;
     limGainSmoothed = 1.0f;
+
+    gateLaSamples = juce::jmax(1, (int) std::round(0.005 * sampleRate));
+    gateLaRingSize = (int) juce::nextPowerOfTwo(gateLaSamples + samplesPerBlock + 64);
+    gateLaRingMask = gateLaRingSize - 1;
+    gateLaRing.setSize(2, gateLaRingSize, false, true, true);
+    gateLaWritePos = 0;
+    gateLaWasEnabled = false;
 
     setLatencySamples((int) std::round(osPreChar.getLatencyInSamples()
                                         + osSat.getLatencyInSamples()
@@ -203,12 +214,12 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
     juce::dsp::ProcessSpec monoSpec = spec;
     monoSpec.numChannels = 1;
-    dblDelayL.prepare(monoSpec);
-    dblDelayR.prepare(monoSpec);
-    dblDelayL.setMaximumDelayInSamples((int) (sampleRate * 0.5));
-    dblDelayR.setMaximumDelayInSamples((int) (sampleRate * 0.5));
-    dblDelayL.reset();
-    dblDelayR.reset();
+    for (auto& v : dblVoiceDelay)
+    {
+        v.prepare(monoSpec);
+        v.setMaximumDelayInSamples((int) (sampleRate * 0.5));
+        v.reset();
+    }
 
     revPreDelayL.prepare(monoSpec);
     revPreDelayR.prepare(monoSpec);
@@ -223,6 +234,13 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     delayR.setMaximumDelayInSamples((int) (sampleRate * 2.0));
     delayL.reset();
     delayR.reset();
+
+    dlyPreDelayL.prepare(monoSpec);
+    dlyPreDelayR.prepare(monoSpec);
+    dlyPreDelayL.setMaximumDelayInSamples((int) (sampleRate * 1.0));
+    dlyPreDelayR.setMaximumDelayInSamples((int) (sampleRate * 1.0));
+    dlyPreDelayL.reset();
+    dlyPreDelayR.reset();
 
     dlyFbHpfL.prepare(monoSpec); dlyFbHpfR.prepare(monoSpec);
     dlyFbLpfL.prepare(monoSpec); dlyFbLpfR.prepare(monoSpec);
@@ -240,7 +258,7 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     essGainDb = 0.0f;
     revDuckEnv = 0.0f;
     dlyDuckEnv = 0.0f;
-    dblPhase1 = dblPhase2 = 0.0f;
+    dblVoicePhase.fill(0.0f);
     dlyPanPhase = 0.0f;
 
     meterAttCoef = onePoleCoef(1.0f, sampleRate);
@@ -418,6 +436,20 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         auto scBuffer = getBusBuffer(buffer, true, 1);
         bool gateScActive = gateScEnabled && scBuffer.getNumChannels() > 0;
 
+        bool gateLookahead = apvts.getRawParameterValue(XID::GateLookahead)->load() > 0.5f;
+        setLatencySamples((int) std::round(osPreChar.getLatencyInSamples()
+                                            + osSat.getLatencyInSamples()
+                                            + osLimClip.getLatencyInSamples())
+                           + limLookaheadSamples + (gateLookahead ? gateLaSamples : 0));
+        if (gateLookahead != gateLaWasEnabled)
+        {
+            // Toggling mid-stream would otherwise briefly play back stale
+            // ring content — clear it so lookahead always starts clean.
+            gateLaRing.clear();
+            gateLaWritePos = 0;
+            gateLaWasEnabled = gateLookahead;
+        }
+
         auto* l = buffer.getWritePointer(0);
         auto* r = numCh > 1 ? buffer.getWritePointer(1) : l;
         auto* detL = gateScActive ? scBuffer.getReadPointer(0) : l;
@@ -445,8 +477,26 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             // exactly what would be removed, the standard way to dial in a
             // gate's threshold/range without guessing.
             float applied = gateListen ? (1.0f - gateGain) : gateGain;
-            l[n] *= applied;
-            if (numCh > 1) r[n] *= applied;
+
+            if (gateLookahead)
+            {
+                float rawL = l[n], rawR = numCh > 1 ? r[n] : rawL;
+                int wp = gateLaWritePos & gateLaRingMask;
+                gateLaRing.setSample(0, wp, rawL);
+                gateLaRing.setSample(1, wp, rawR);
+                int rp = (gateLaWritePos - gateLaSamples) & gateLaRingMask;
+                float dl = gateLaRing.getSample(0, rp);
+                float dr = gateLaRing.getSample(1, rp);
+                ++gateLaWritePos;
+
+                l[n] = dl * applied;
+                if (numCh > 1) r[n] = dr * applied;
+            }
+            else
+            {
+                l[n] *= applied;
+                if (numCh > 1) r[n] *= applied;
+            }
         }
         gateGrDbUI.store(juce::jlimit(0.0f, 60.0f, -juce::Decibels::gainToDecibels(gateGain, -60.0f)),
                           std::memory_order_relaxed);
@@ -472,7 +522,17 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         float rangeDb   = mt.effectiveByID(XID::EssMacro, XID::EssRange);   // negative, e.g. -8dB
         float freqHz    = mt.effectiveByID(XID::EssMacro, XID::EssFreq);
 
-        auto detCoeffs = juce::dsp::IIR::Coefficients<float>::makeBandPass(sr, juce::jlimit(1000.0f, 16000.0f, freqHz), 3.0f);
+        // Band (mockup's essBandSegs S/T/CH): a real detection-character
+        // change, not a relabel — S keeps a narrow, high-Q band right on
+        // the set frequency (sharp sibilance); T biases lower and widens
+        // slightly (dental transients); CH biases lower still and widens
+        // the most (broad "ch/sh" energy).
+        int bandMode = (int) std::round(apvts.getRawParameterValue(XID::EssBand)->load());
+        float bandQMult = bandMode == 0 ? 1.5f : (bandMode == 2 ? 0.55f : 1.0f);
+        float bandFreqMult = bandMode == 0 ? 1.0f : (bandMode == 2 ? 0.7f : 0.85f);
+        float bandFreq = juce::jlimit(1000.0f, 16000.0f, freqHz * bandFreqMult);
+
+        auto detCoeffs = juce::dsp::IIR::Coefficients<float>::makeBandPass(sr, bandFreq, 3.0f * bandQMult);
         *essDetectL.coefficients = *detCoeffs;
         *essDetectR.coefficients = *detCoeffs;
 
@@ -512,7 +572,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         if (!essListen)
         {
             *essDynEq.state = *juce::dsp::IIR::Coefficients<float>::makePeakFilter(
-                sr, juce::jlimit(1000.0f, 16000.0f, freqHz), 2.5f,
+                sr, bandFreq, 2.5f * bandQMult,
                 juce::Decibels::decibelsToGain(essGainDb));
             essDynEq.process(ctx);
         }
@@ -704,13 +764,15 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         float lowHz      = mt.effectiveByID(XID::ResMacro, XID::ResLow);
         float highHz     = mt.effectiveByID(XID::ResMacro, XID::ResHigh);
 
-        float freq = juce::jlimit(40.0f, 18000.0f, std::sqrt(juce::jmax(1.0f, lowHz) * juce::jmax(1.0f, highHz)));
-        float q = juce::jmap(sharpness, 0.0f, 1.0f, 0.5f, 8.0f);
-        float bandQ = juce::jlimit(0.3f, 6.0f, freq / juce::jmax(20.0f, highHz - lowHz));
+        // Style: real Q / detection-bandwidth scaling per band, not a
+        // relabel — Delicate narrows both (surgical, less collateral
+        // damage to neighbouring harmonics), Wide broadens both (catches
+        // more spread-out resonance clusters at the cost of precision).
+        int styleMode = (int) std::round(apvts.getRawParameterValue(XID::ResStyle)->load());
+        float styleQMult = styleMode == 0 ? 1.6f : (styleMode == 2 ? 0.55f : 1.0f);
 
-        auto detCoeffs = juce::dsp::IIR::Coefficients<float>::makeBandPass(sr, freq, bandQ);
-        *resDetectL.coefficients = *detCoeffs;
-        *resDetectR.coefficients = *detCoeffs;
+        int numBands = juce::jlimit(1, kMaxResBands,
+                            (int) std::round(apvts.getRawParameterValue(XID::ResBands)->load()));
 
         float attMs = juce::jmap(reactivity, 0.0f, 1.0f, 25.0f, 1.5f);
         float relMs = juce::jmap(reactivity, 0.0f, 1.0f, 300.0f, 25.0f);
@@ -718,32 +780,66 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         float detRel = onePoleCoef(relMs, sr);
         float cutSmoothCoef = onePoleCoef(juce::jmax(3.0f, relMs * 0.5f), sr);
 
-        auto* l = buffer.getReadPointer(0);
-        auto* r = numCh > 1 ? buffer.getReadPointer(1) : l;
-        float cutDb = resCutSmoothed;
-        for (int n = 0; n < numSamples; ++n)
+        // More bands split the same overall Amount/NotchLimit budget so
+        // stacking bands doesn't multiply the total cut applied.
+        float perBandBudget = 1.0f / std::sqrt((float) numBands);
+
+        float logLow = std::log(juce::jmax(20.0f, lowHz)), logHigh = std::log(juce::jmax(logLow + 1.0f, highHz));
+        float worstCutDb = 0.0f;
+
+        for (int b = 0; b < numBands; ++b)
         {
-            float fl = resDetectL.processSample(l[n]);
-            float fr = numCh > 1 ? resDetectR.processSample(r[n]) : fl;
-            float rect = std::abs(0.5f * (fl + fr));
-            float dCoef = rect > resEnv ? detAtt : detRel;
-            resEnv = dCoef * resEnv + (1.0f - dCoef) * rect;
+            float t0 = (float) b / (float) numBands, t1 = (float) (b + 1) / (float) numBands;
+            float bandLow = std::exp(logLow + (logHigh - logLow) * t0);
+            float bandHigh = std::exp(logLow + (logHigh - logLow) * t1);
+            float freq = juce::jlimit(40.0f, 18000.0f, std::sqrt(bandLow * bandHigh));
+            float q = juce::jmap(sharpness, 0.0f, 1.0f, 0.5f, 8.0f) * styleQMult;
+            float bandQ = juce::jlimit(0.3f, 6.0f, (freq / juce::jmax(20.0f, bandHigh - bandLow)) * styleQMult);
 
-            float envDb = juce::Decibels::gainToDecibels(resEnv, -100.0f);
-            float depthNorm = juce::jlimit(0.0f, 1.0f, (envDb + 40.0f) / 34.0f);   // -40..-6dB band-energy window
-            float targetCut = notchLimit * amount * depthNorm;
-            resCutSmoothed = cutSmoothCoef * resCutSmoothed + (1.0f - cutSmoothCoef) * targetCut;
-            cutDb = resCutSmoothed;
+            auto detCoeffs = juce::dsp::IIR::Coefficients<float>::makeBandPass(sr, freq, bandQ);
+            *resDetectL[b].coefficients = *detCoeffs;
+            *resDetectR[b].coefficients = *detCoeffs;
+
+            auto* l = buffer.getReadPointer(0);
+            auto* r = numCh > 1 ? buffer.getReadPointer(1) : l;
+            float cutDb = resCutSmoothed[b];
+            for (int n = 0; n < numSamples; ++n)
+            {
+                float fl = resDetectL[b].processSample(l[n]);
+                float fr = numCh > 1 ? resDetectR[b].processSample(r[n]) : fl;
+                float rect = std::abs(0.5f * (fl + fr));
+                float dCoef = rect > resEnv[b] ? detAtt : detRel;
+                resEnv[b] = dCoef * resEnv[b] + (1.0f - dCoef) * rect;
+
+                float envDb = juce::Decibels::gainToDecibels(resEnv[b], -100.0f);
+                float depthNorm = juce::jlimit(0.0f, 1.0f, (envDb + 40.0f) / 34.0f);   // -40..-6dB band-energy window
+                float targetCut = notchLimit * amount * depthNorm * perBandBudget;
+                resCutSmoothed[b] = cutSmoothCoef * resCutSmoothed[b] + (1.0f - cutSmoothCoef) * targetCut;
+                cutDb = resCutSmoothed[b];
+            }
+            worstCutDb = juce::jmin(worstCutDb, cutDb);
+            resCutDbPerBandUI[b].store(cutDb, std::memory_order_relaxed);
+
+            *resNotch[b].state = *juce::dsp::IIR::Coefficients<float>::makePeakFilter(sr, freq, q, juce::Decibels::decibelsToGain(cutDb));
+            resNotch[b].process(ctx);
         }
-        resCutDbUI.store(cutDb, std::memory_order_relaxed);
+        resCutDbUI.store(worstCutDb, std::memory_order_relaxed);
 
-        *resNotch.state = *juce::dsp::IIR::Coefficients<float>::makePeakFilter(sr, freq, q, juce::Decibels::decibelsToGain(cutDb));
-        resNotch.process(ctx);
+        for (int b = numBands; b < kMaxResBands; ++b)
+        {
+            resEnv[b] = 0.0f;
+            resCutSmoothed[b] = 0.0f;
+            resCutDbPerBandUI[b].store(0.0f, std::memory_order_relaxed);
+        }
     }
     else
     {
-        resEnv = 0.0f;
-        resCutSmoothed = 0.0f;
+        for (int b = 0; b < kMaxResBands; ++b)
+        {
+            resEnv[b] = 0.0f;
+            resCutSmoothed[b] = 0.0f;
+            resCutDbPerBandUI[b].store(0.0f, std::memory_order_relaxed);
+        }
         resCutDbUI.store(0.0f, std::memory_order_relaxed);
     }
     updateMeter((int) TapRes, buffer, numSamples, numCh);
@@ -855,14 +951,28 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         float widthPct  = mt.effectiveByID(XID::DblMacro, XID::DblWidth) / 100.0f;
         float delayMs   = mt.effectiveByID(XID::DblMacro, XID::DblDelay);
         float mixAmt    = mt.effectiveByID(XID::DblMacro, XID::DblMix) / 100.0f;
+        int   numVoices = juce::jlimit(2, DblVoiceConfig::kMaxVoices,
+                              2 * (int) std::round(apvts.getRawParameterValue(XID::DblVoices)->load() / 2.0f));
 
         if (mixAmt > 0.0005f)
         {
-            float baseSamples1 = juce::jmax(1.0f, delayMs * 0.001f * (float) sr);
-            float baseSamples2 = juce::jmax(1.0f, (delayMs + 7.0f) * 0.001f * (float) sr);
             float modDepth = juce::jmap(detuneAmt, 0.0f, 40.0f, 0.0f, 6.0f);
-            float w1 = 2.0f * juce::MathConstants<float>::pi * 0.63f / (float) sr;
-            float w2 = 2.0f * juce::MathConstants<float>::pi * 0.71f / (float) sr;
+            // Loudness stays roughly flat as voices are added — normalise by
+            // the same reference the original 2-voice version implicitly used.
+            float voiceGain = 1.0f / std::sqrt((float) numVoices * 0.5f);
+
+            float baseSamples[DblVoiceConfig::kMaxVoices];
+            float w[DblVoiceConfig::kMaxVoices];
+            float gainL[DblVoiceConfig::kMaxVoices], gainR[DblVoiceConfig::kMaxVoices];
+            for (int v = 0; v < numVoices; ++v)
+            {
+                baseSamples[v] = juce::jmax(1.0f, (delayMs + DblVoiceConfig::delayOffsetMs[v]) * 0.001f * (float) sr);
+                w[v] = 2.0f * juce::MathConstants<float>::pi * DblVoiceConfig::rateHz[v] / (float) sr;
+                float effPan = juce::jlimit(-1.0f, 1.0f, DblVoiceConfig::panPos[v] * widthPct);
+                float angle = (effPan + 1.0f) * juce::MathConstants<float>::pi * 0.25f; // 0..pi/2
+                gainL[v] = std::cos(angle);
+                gainR[v] = std::sin(angle);
+            }
 
             auto* inL = buffer.getReadPointer(0);
             auto* inR = numCh > 1 ? buffer.getReadPointer(1) : inL;
@@ -872,20 +982,24 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             for (int n = 0; n < numSamples; ++n)
             {
                 float monoIn = 0.5f * (inL[n] + inR[n]);
-                dblPhase1 += w1; if (dblPhase1 > juce::MathConstants<float>::twoPi) dblPhase1 -= juce::MathConstants<float>::twoPi;
-                dblPhase2 += w2; if (dblPhase2 > juce::MathConstants<float>::twoPi) dblPhase2 -= juce::MathConstants<float>::twoPi;
+                float accL = 0.0f, accR = 0.0f;
 
-                dblDelayL.setDelay(juce::jmax(1.0f, baseSamples1 + modDepth * std::sin(dblPhase1)));
-                dblDelayR.setDelay(juce::jmax(1.0f, baseSamples2 + modDepth * std::sin(dblPhase2)));
+                for (int v = 0; v < numVoices; ++v)
+                {
+                    dblVoicePhase[(size_t) v] += w[v];
+                    if (dblVoicePhase[(size_t) v] > juce::MathConstants<float>::twoPi)
+                        dblVoicePhase[(size_t) v] -= juce::MathConstants<float>::twoPi;
 
-                float v1 = dblDelayL.popSample(0);
-                float v2 = dblDelayR.popSample(0);
-                dblDelayL.pushSample(0, monoIn);
-                dblDelayR.pushSample(0, monoIn);
+                    dblVoiceDelay[(size_t) v].setDelay(juce::jmax(1.0f, baseSamples[v] + modDepth * std::sin(dblVoicePhase[(size_t) v])));
+                    float vs = dblVoiceDelay[(size_t) v].popSample(0);
+                    dblVoiceDelay[(size_t) v].pushSample(0, monoIn);
 
-                float centre = 0.5f * (v1 + v2);
-                outL[n] = juce::jmap(widthPct, 0.0f, 1.0f, centre, v1);
-                outR[n] = juce::jmap(widthPct, 0.0f, 1.0f, centre, v2);
+                    accL += vs * gainL[v];
+                    accR += vs * gainR[v];
+                }
+
+                outL[n] = accL * voiceGain;
+                outR[n] = accR * voiceGain;
             }
 
             for (int ch = 0; ch < numCh; ++ch)
@@ -1010,7 +1124,39 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     bool dlyBypassed = apvts.getRawParameterValue(XID::DlyBypass)->load() > 0.5f;
     if (!dlyBypassed)
     {
-        float timeMs    = apvts.getRawParameterValue(XID::DlyTime)->load();
+        // Real host tempo/playhead sync: queried live each block, not
+        // cached — a genuine tempo change (or a host that only starts
+        // reporting BPM once transport is rolling) is reflected immediately.
+        // Falls back to 120 BPM whenever the host doesn't report tempo
+        // (never crashes, never leaves the delay silently stuck).
+        double bpm = 120.0;
+        if (auto* ph = getPlayHead())
+            if (auto pos = ph->getPosition())
+                if (auto b = pos->getBpm())
+                    bpm = *b;
+        bpm = juce::jlimit(20.0, 300.0, bpm);
+        float wholeNoteMs = (float) (240000.0 / bpm);
+
+        bool dlySync = apvts.getRawParameterValue(XID::DlySync)->load() > 0.5f;
+        float timeMs;
+        if (dlySync)
+        {
+            int divIdx = juce::jlimit(0, DlyNoteTable::kNumDivs - 1,
+                             (int) std::round(apvts.getRawParameterValue(XID::DlyNoteDiv)->load()));
+            timeMs = wholeNoteMs * DlyNoteTable::wholeNoteFraction[divIdx];
+        }
+        else
+        {
+            timeMs = apvts.getRawParameterValue(XID::DlyTime)->load();
+        }
+
+        int preDivIdx = juce::jlimit(0, 2, (int) std::round(apvts.getRawParameterValue(XID::DlyPreDelay)->load()));
+        float preDelayMs = preDivIdx == 1 ? wholeNoteMs / 32.0f : (preDivIdx == 2 ? wholeNoteMs / 16.0f : 0.0f);
+        float preDelaySamples = juce::jlimit(0.0f, (float) dlyPreDelayL.getMaximumDelayInSamples() - 1.0f,
+                                              preDelayMs * 0.001f * (float) sr);
+        dlyPreDelayL.setDelay(preDelaySamples);
+        dlyPreDelayR.setDelay(preDelaySamples);
+
         float fbPct     = mt.effectiveByID(XID::DlyMacro, XID::DlyFeedback) / 100.0f;
         float spreadPct = mt.effectiveByID(XID::DlyMacro, XID::DlySpread) / 100.0f;
         float mixPct    = mt.effectiveByID(XID::DlyMacro, XID::DlyMix) / 100.0f;
@@ -1049,12 +1195,17 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
 
         for (int n = 0; n < numSamples; ++n)
         {
+            float predL = dlyPreDelayL.popSample(0);
+            float predR = dlyPreDelayR.popSample(0);
+            dlyPreDelayL.pushSample(0, inL[n]);
+            dlyPreDelayR.pushSample(0, inR[n]);
+
             float dL = delayL.popSample(0);
             float dR = delayR.popSample(0);
             float fbL = dlyFbLpfL.processSample(dlyFbHpfL.processSample(dL));
             float fbR = dlyFbLpfR.processSample(dlyFbHpfR.processSample(dR));
-            delayL.pushSample(0, inL[n] + fbR * fbPct);
-            delayR.pushSample(0, inR[n] + fbL * fbPct);
+            delayL.pushSample(0, predL + fbR * fbPct);
+            delayR.pushSample(0, predR + fbL * fbPct);
 
             dlyPanPhase += panW;
             if (dlyPanPhase > juce::MathConstants<float>::twoPi) dlyPanPhase -= juce::MathConstants<float>::twoPi;

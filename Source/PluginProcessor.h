@@ -162,6 +162,12 @@ public:
     float getEssBandDb() const noexcept { return essBandDbUI.load(std::memory_order_relaxed); }
     float getEssReductionDb() const noexcept { return essReductionDbUI.load(std::memory_order_relaxed); }
     float getResCutDb() const noexcept { return resCutDbUI.load(std::memory_order_relaxed); }
+    // Per-band cut depth (real, one entry per currently-active Resonance
+    // band) for the Dynamic Suppression bars — see runRes.
+    float getResBandCutDb(int band) const noexcept
+    {
+        return resCutDbPerBandUI[(size_t) juce::jlimit(0, kMaxResBands - 1, band)].load(std::memory_order_relaxed);
+    }
 
     // Post-Doubler stereo scope: a decimated ring of the wet doubler
     // signal's L/R, genuinely post that module, for the Doubler page's
@@ -253,6 +259,15 @@ private:
     float gateGain = 1.0f;   // smoothed linear gain currently applied
     int   gateHoldCounter = 0;
 
+    // Optional real lookahead: when on, a fixed 5ms delay line (same
+    // convention as the limiter's own lookahead ring) sits between the
+    // envelope detector and the output, so the gate genuinely reacts to a
+    // transient before it reaches the delayed output rather than exactly
+    // when it arrives. See runGate.
+    juce::AudioBuffer<float> gateLaRing;
+    int gateLaRingSize = 0, gateLaRingMask = 0, gateLaWritePos = 0, gateLaSamples = 0;
+    bool gateLaWasEnabled = false;
+
     // ---- 3) De-esser: dynamic peak filter driven by a sibilance-band ----
     juce::dsp::IIR::Filter<float> essDetectL, essDetectR;   // band detector (not applied to main signal)
     float essEnv = 0.0f;
@@ -270,13 +285,18 @@ private:
     juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
                                     juce::dsp::IIR::Coefficients<float>> eqLowShelf, eqMidPeak, eqHighShelf;
 
-    // ---- 7) Resonance — dynamically-tracking de-resonator notch: a
-    //      bandpass-detector envelope (speed set by ResReactivity) drives
-    //      how hard the notch bites in real time, rather than a fixed cut ----
+    // ---- 7) Resonance — up to kMaxResBands parallel dynamically-tracking
+    //      de-resonator notches, real count from ResBands: each covers its
+    //      own log-spaced slice of the Low-High range, with its own
+    //      bandpass-detector envelope (speed set by ResReactivity) driving
+    //      how hard that notch bites in real time. ResStyle scales Q/detect
+    //      width per band (Delicate=narrow+surgical, Wide=broad) ----
+    static constexpr int kMaxResBands = 5;
     juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
-                                    juce::dsp::IIR::Coefficients<float>> resNotch;
-    juce::dsp::IIR::Filter<float> resDetectL, resDetectR;
-    float resEnv = 0.0f, resCutSmoothed = 0.0f;
+                                    juce::dsp::IIR::Coefficients<float>> resNotch[kMaxResBands];
+    juce::dsp::IIR::Filter<float> resDetectL[kMaxResBands], resDetectR[kMaxResBands];
+    float resEnv[kMaxResBands] = {}, resCutSmoothed[kMaxResBands] = {};
+    std::atomic<float> resCutDbPerBandUI[kMaxResBands];
 
     // ---- 8) Saturator — tanh drive + tone tilt + soft ceiling, dry/wet mix ----
     juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
@@ -289,9 +309,10 @@ private:
     // polyphase-IIR halfband filters, so the added group delay is tiny.
     juce::dsp::Oversampling<float> osPreChar, osSat, osLimClip;
 
-    // ---- 9) Doubler — two modulated delay voices (chorus-style detune) ----
-    juce::dsp::DelayLine<float> dblDelayL, dblDelayR;
-    float dblPhase1 = 0.0f, dblPhase2 = 0.0f;
+    // ---- 9) Doubler — up to 8 independent modulated delay voices, real
+    // count driven by DblVoices (see DblVoiceConfig in Params.h) ----
+    std::array<juce::dsp::DelayLine<float>, DblVoiceConfig::kMaxVoices> dblVoiceDelay;
+    std::array<float, DblVoiceConfig::kMaxVoices> dblVoicePhase {};
 
     // ---- 10) Reverb, with its own pre-delay line + duck envelope ----
     juce::dsp::Reverb reverb;
@@ -305,6 +326,10 @@ private:
 
     // ---- 11) Delay — ping-pong with spread, duck, and an auto-pan LFO ----
     juce::dsp::DelayLine<float> delayL, delayR;
+    // Real tempo-synced pre-delay tap — a separate, smaller delay line ahead
+    // of the feedback network (same idea as the Reverb's own pre-delay: it
+    // only affects the wet path's timing, not host latency). See runDly.
+    juce::dsp::DelayLine<float> dlyPreDelayL, dlyPreDelayR;
     float dlyDuckEnv = 0.0f;
     float dlyPanPhase = 0.0f;
     // Feedback-path-only filtering (mono per channel — this loop is already
