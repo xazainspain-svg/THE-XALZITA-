@@ -452,6 +452,147 @@ private:
     float smoothed = 0.0f;
 };
 
+/** Classic analog-style Gain-Reduction gauge — the needle meter every real
+    hardware compressor (1176, dbx, you name it) puts right on the front
+    panel, and a shape that was conspicuously missing here: Comp's own
+    reduction used to be just a scrolling line graph, the exact same shape
+    RES/REV already use for their own depth histories. Rests at 0 dB on
+    the right and swings LEFT as real reduction increases (grDb straight
+    from getGrDb(0)) — hardware convention, not a mirrored VUMeter. */
+class GrNeedleMeter : public juce::Component
+{
+public:
+    void pushGrDb(float grDb)
+    {
+        float target = juce::jlimit(0.0f, 1.0f, grDb / maxDb);
+        constexpr float tau = 0.09f;   // snappier than the input VU — GR needles read fast
+        constexpr float dt  = 1.0f / 30.0f;
+        float coef = std::exp(-dt / tau);
+        smoothed = coef * smoothed + (1.0f - coef) * target;
+        repaint();
+    }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto full = getLocalBounds().toFloat();
+        auto b = full;
+        auto readout = b.removeFromBottom(14.0f);
+
+        float radius = juce::jmin(b.getWidth() * 0.48f, b.getHeight() * 0.82f);
+        juce::Point<float> pivot(b.getCentreX(), b.getBottom() - 10.0f);
+
+        constexpr float startAngle = -2.05f, endAngle = 2.05f;
+
+        juce::Path arc;
+        arc.addCentredArc(pivot.x, pivot.y, radius, radius, 0.0f, startAngle, endAngle, true);
+        g.setColour(XaLZaColour::border);
+        g.strokePath(arc, juce::PathStrokeType(2.0f));
+
+        // Red zone at the HEAVY-reduction end — the needle swings toward
+        // it as GR increases, the opposite end from VUMeter's overload
+        // zone, since this gauge reads "how much is being pulled down"
+        // rather than "how hot is the input".
+        juce::Path redArc;
+        float redEnd = startAngle + 0.14f * (endAngle - startAngle);
+        redArc.addCentredArc(pivot.x, pivot.y, radius, radius, 0.0f, startAngle, redEnd, true);
+        g.setColour(XaLZaColour::danger.withAlpha(0.75f));
+        g.strokePath(redArc, juce::PathStrokeType(2.6f));
+
+        for (int i = 0; i <= 8; ++i)
+        {
+            float t = (float) i / 8.0f;
+            float a = startAngle + t * (endAngle - startAngle);
+            juce::Point<float> p1(pivot.x + std::sin(a) * radius * 0.92f, pivot.y - std::cos(a) * radius * 0.92f);
+            juce::Point<float> p2(pivot.x + std::sin(a) * radius * 1.02f, pivot.y - std::cos(a) * radius * 1.02f);
+            g.setColour(t <= 0.14f ? XaLZaColour::danger : XaLZaColour::textMuted);
+            g.drawLine({ p1, p2 }, 1.2f);
+        }
+
+        // Needle rests at endAngle (0dB, right) and swings toward
+        // startAngle (max reduction, left) as smoothed increases.
+        float angle = endAngle - smoothed * (endAngle - startAngle);
+        juce::Path needle;
+        needle.addRectangle(-1.1f, -radius * 0.9f, 2.2f, radius * 0.9f);
+        needle.applyTransform(juce::AffineTransform::rotation(angle).translated(pivot));
+        g.setColour(XaLZaColour::accent);
+        g.fillPath(needle);
+        g.setColour(XaLZaColour::panelControl);
+        g.fillEllipse(pivot.x - 5.0f, pivot.y - 5.0f, 10.0f, 10.0f);
+        g.setColour(XaLZaColour::accent);
+        g.drawEllipse(pivot.x - 5.0f, pivot.y - 5.0f, 10.0f, 10.0f, 1.4f);
+
+        g.setColour(XaLZaColour::textMuted);
+        g.setFont(XaLZaLookAndFeel::monoFont(9.5f, true));
+        g.drawText("GR -" + juce::String(smoothed * maxDb, 1) + " dB", readout, juce::Justification::centred);
+    }
+
+    static constexpr float maxDb = 24.0f;
+    float smoothed = 0.0f;
+};
+
+/** Opto's page-defining visual: a glowing "photocell" orb — the way every
+    real optical compressor (LA-2A and kin) is actually built, an
+    electric-eye/photocell whose light brightens and dims with the live
+    gain reduction it's driving — instead of a rectangular graph like
+    almost everything else in this plugin. Brightness AND size both track
+    the exact same live GR reading (getGrDb(1)) the meters elsewhere
+    already show as a plain number: a different SHAPE for the same real
+    data, not a different data source. */
+class OptoGlowView : public juce::Component
+{
+public:
+    void pushGrDb(float grDb)
+    {
+        float target = juce::jlimit(0.0f, 1.0f, grDb / maxDb);
+        constexpr float tau = 0.15f;
+        constexpr float dt  = 1.0f / 30.0f;
+        float coef = std::exp(-dt / tau);
+        smoothed = coef * smoothed + (1.0f - coef) * target;
+        repaint();
+    }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto full = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(full);
+        g.setColour(XaLZaColour::border);
+        g.drawRect(full, 1.0f);
+
+        auto b = full;
+        auto readout = b.removeFromBottom(14.0f);
+        auto cx = b.getCentreX(), cy = b.getCentreY();
+        float maxR = juce::jmin(b.getWidth(), b.getHeight()) * 0.42f;
+
+        // Brighter AND slightly larger as reduction increases — a real
+        // photocell glows harder under more light (the sidechain signal
+        // driving it), which is exactly what's pulling the gain down.
+        float glowT = smoothed;
+        float r = maxR * (0.55f + 0.45f * glowT);
+        juce::Colour core = XaLZaColour::accent2.interpolatedWith(XaLZaColour::accent, glowT);
+
+        for (int i = 4; i >= 1; --i)
+        {
+            float ringR = r * (1.0f + 0.22f * (float) i);
+            g.setColour(core.withAlpha(0.05f * glowT + 0.02f));
+            g.fillEllipse(cx - ringR, cy - ringR, ringR * 2.0f, ringR * 2.0f);
+        }
+        g.setColour(core.withAlpha(0.85f));
+        g.fillEllipse(cx - r, cy - r, r * 2.0f, r * 2.0f);
+        g.setColour(XaLZaColour::panelBg.withAlpha(0.4f));
+        g.fillEllipse(cx - r * 0.35f, cy - r * 0.35f, r * 0.7f, r * 0.7f);
+
+        g.setColour(XaLZaColour::textMuted);
+        g.setFont(XaLZaLookAndFeel::monoFont(9.5f, true));
+        g.drawText("GR -" + juce::String(smoothed * maxDb, 1) + " dB", readout, juce::Justification::centred);
+    }
+
+    static constexpr float maxDb = 24.0f;
+    float smoothed = 0.0f;
+};
+
 /** Real-time spectrum analyser (log-frequency bar display), matching the
     mockup's EQ "Response Curve + Spectrum" card. Runs an actual FFT on
     a window of raw samples handed to it each frame by the editor's
@@ -684,6 +825,113 @@ private:
     float fftData[2 * fftSize];
     float sampleRateHint = 44100.0f;
     juce::Image image;
+};
+
+/** De-esser page's primary visualizer: a real FFT of the exact signal
+    the detector itself analyzes (the same post-Gate/pre-Ess tap runEss
+    reads — Ess is genuinely the very next stage in the chain, see
+    PluginProcessor::RawGate), zoomed to the sibilant range (800Hz-16kHz)
+    instead of the full spectrum, with the live target band glowing
+    hotter the harder the dynamic EQ is actually pulling it down right
+    now. A de-esser is fundamentally a frequency-domain, single-band
+    process — this is the first module visualizer in the plugin that
+    actually looks like one, instead of reusing the same time-domain
+    envelope line several other dynamics pages already show. */
+class DeEsserSpectrumView : public juce::Component
+{
+public:
+    static constexpr int fftOrder = 11;
+    static constexpr int fftSize  = 1 << fftOrder;   // 2048 — matches SpectrumAnalyzer/Spectrogram
+
+    DeEsserSpectrumView() : fft(fftOrder), window((size_t) fftSize, juce::dsp::WindowingFunction<float>::hann)
+    {
+        std::fill(std::begin(fftData), std::end(fftData), 0.0f);
+        std::fill(std::begin(bars), std::end(bars), 0.0f);
+    }
+
+    void setSampleRate(double sr) { sampleRateHint = (float) juce::jmax(1000.0, sr); }
+
+    // centreHz: the real live target frequency runEss is detecting/
+    // cutting at this instant (EssFreq scaled by the Band multiplier).
+    // reductionDb: the real live dynamic-EQ gain applied there (negative,
+    // see essReductionDbUI) — how hot the target marker glows.
+    void setTarget(float centreHz, float reductionDb)
+    {
+        targetHz = centreHz;
+        reductionNorm = juce::jlimit(0.0f, 1.0f, -reductionDb / 18.0f);
+    }
+
+    // samples: fftSize raw values, oldest to newest.
+    void update(const float* samples)
+    {
+        std::copy(samples, samples + fftSize, fftData);
+        window.multiplyWithWindowingTable(fftData, (size_t) fftSize);
+        fft.performFrequencyOnlyForwardTransform(fftData);
+
+        for (int i = 0; i < numBars; ++i)
+        {
+            float f0 = minHz * std::pow(maxHz / minHz, (float) i / (float) numBars);
+            float f1 = minHz * std::pow(maxHz / minHz, (float) (i + 1) / (float) numBars);
+            int bin0 = juce::jlimit(1, fftSize / 2 - 1, (int) (f0 * (float) fftSize / sampleRateHint));
+            int bin1 = juce::jlimit(bin0 + 1, fftSize / 2, (int) (f1 * (float) fftSize / sampleRateHint));
+            float peak = 0.0f;
+            for (int b = bin0; b < bin1; ++b)
+                peak = juce::jmax(peak, fftData[b]);
+            float db = juce::Decibels::gainToDecibels(peak, -100.0f);
+            float norm = juce::jlimit(0.0f, 1.0f, (db + 84.0f) / 84.0f);
+            bars[i] = juce::jmax(norm, bars[i] * 0.90f);
+        }
+        repaint();
+    }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(b);
+        g.setColour(XaLZaColour::borderSoft);
+        for (int i = 1; i < 4; ++i)
+        {
+            float y = b.getY() + b.getHeight() * (float) i / 4.0f;
+            g.drawLine(b.getX(), y, b.getRight(), y, 0.5f);
+        }
+        g.setColour(XaLZaColour::border);
+        g.drawRect(b, 1.0f);
+
+        float barW = b.getWidth() / (float) numBars;
+        float targetT = juce::jlimit(0.0f, 1.0f,
+            std::log(juce::jmax(minHz, targetHz) / minHz) / std::log(maxHz / minHz));
+        int targetBar = juce::jlimit(0, numBars - 1, (int) (targetT * (float) numBars));
+
+        for (int i = 0; i < numBars; ++i)
+        {
+            float h = bars[i] * b.getHeight();
+            juce::Rectangle<float> barRect(b.getX() + (float) i * barW, b.getBottom() - h,
+                                            barW * 0.78f, h);
+            juce::Colour c = XaLZaColour::accent2;
+            if (std::abs(i - targetBar) <= 1)
+                c = XaLZaColour::accent2.interpolatedWith(XaLZaColour::danger, reductionNorm);
+            g.setColour(c);
+            g.fillRect(barRect);
+        }
+
+        // A marker at the exact live target Hz (not just "which bucket")
+        // so moving Freq or switching Band visibly slides this line.
+        float mx = b.getX() + targetT * b.getWidth();
+        g.setColour(XaLZaColour::danger.withAlpha(0.5f + 0.5f * reductionNorm));
+        g.drawLine(mx, b.getY(), mx, b.getBottom(), 1.6f);
+    }
+
+    static constexpr int numBars = 32;
+    static constexpr float minHz = 800.0f, maxHz = 16000.0f;
+    juce::dsp::FFT fft;
+    juce::dsp::WindowingFunction<float> window;
+    float fftData[2 * fftSize];
+    float bars[numBars] = {};
+    float sampleRateHint = 44100.0f;
+    float targetHz = 6000.0f;
+    float reductionNorm = 0.0f;
 };
 
 /** Oscilloscope-style raw waveform trace. Fed a fixed window of raw,
@@ -1038,15 +1286,19 @@ private:
     float cutoffHz = 20.0f;
 };
 
-/** Composite Glue-Comp page view: the existing gain-reduction/output
-    history graph plus the analytic transfer curve, side by side — the
-    moment-to-moment reduction AND the shape of the curve producing it. */
+/** Composite Glue-Comp page view: a real analog-style GR needle gauge
+    (the meter every hardware compressor actually has) plus the analytic
+    transfer curve, side by side — the moment-to-moment reduction AND the
+    shape of the curve producing it. Used to be a scrolling gain-
+    reduction/output line graph, the same shape RES/REV already use for
+    their own history — the needle gauge is a genuinely different, and
+    far more "this is a compressor" instrument. */
 class CompressorView : public juce::Component
 {
 public:
-    CompressorView() { addAndMakeVisible(grGraph); addAndMakeVisible(curve); }
+    CompressorView() { addAndMakeVisible(grMeter); addAndMakeVisible(curve); }
 
-    void push(float grNorm, float outNorm) { grGraph.push(grNorm, outNorm); }
+    void push(float grDb) { grMeter.pushGrDb(grDb); }
     void setCurve(float threshDb, float ratio, float makeupDb, float mixAmt)
     {
         curve.setCurve(threshDb, ratio, makeupDb, mixAmt);
@@ -1058,23 +1310,27 @@ private:
         auto b = getLocalBounds();
         auto left = b.removeFromLeft(b.getWidth() / 2);
         left.removeFromRight(4);
-        grGraph.setBounds(left);
+        grMeter.setBounds(left);
         curve.setBounds(b);
     }
 
-    EnvelopeGraph grGraph;
+    GrNeedleMeter grMeter;
     TransferCurveView curve;
 };
 
-/** Composite Opto page view: the existing post-Opto oscilloscope plus the
-    analytic transfer curve (Opto's "Reduction" knob maps to an internal
-    threshold at a fixed 4:1 ratio — see processBlock's OPTO block). */
+/** Composite Opto page view: the glowing photocell orb (see OptoGlowView
+    above) plus the analytic transfer curve (Opto's "Reduction" knob maps
+    to an internal threshold at a fixed 4:1 ratio — see processBlock's
+    OPTO block). Used to be a plain oscilloscope trace, the same shape
+    six other module pages already show — the glow orb is what actually
+    makes this page read as "an optical compressor" rather than yet
+    another scope. */
 class OptoView : public juce::Component
 {
 public:
-    OptoView() { addAndMakeVisible(scope); addAndMakeVisible(curve); }
+    OptoView() { addAndMakeVisible(glow); addAndMakeVisible(curve); }
 
-    void setSamples(const float* trace) { scope.setSamples(trace); }
+    void pushGrDb(float grDb) { glow.pushGrDb(grDb); }
     void setCurve(float threshDb, float ratio, float makeupDb, float mixAmt)
     {
         curve.setCurve(threshDb, ratio, makeupDb, mixAmt);
@@ -1086,11 +1342,11 @@ private:
         auto b = getLocalBounds();
         auto left = b.removeFromLeft(b.getWidth() / 2);
         left.removeFromRight(4);
-        scope.setBounds(left);
+        glow.setBounds(left);
         curve.setBounds(b);
     }
 
-    WaveformScope scope;
+    OptoGlowView glow;
     TransferCurveView curve;
 };
 
@@ -1131,42 +1387,191 @@ private:
     FreqResponseView freqResp;
 };
 
-/** Composite Gate page view: a raw post-gate output waveform trace plus
-    the existing gate-reduction depth history, side by side — matches the
-    original web mockup's two-card Gate row ("Post-Gate Output — Waveform"
-    + "Gate Envelope") instead of the reduction history on its own. */
-class GateView : public juce::Component
+/** Gate page's primary visualizer: a real open/closed ACTIVITY STRIP —
+    the natural way to look at what a noise gate actually does (a mostly
+    binary decision over time: is it open or is it clamped down), instead
+    of reusing the same continuous envelope-line shape several other
+    dynamics pages already have. Each column is a genuinely sampled
+    historical reading of the gate's own real-time gain reduction
+    (getGateGrDb() — the exact value driving the audio right now),
+    bucketed into "open" vs "closed"; nothing here is an animated pattern.
+    The waveform underneath is the real post-gate signal, kept for the
+    usual "see the actual audio" cross-check every other scope provides. */
+class GateActivityView : public juce::Component
 {
 public:
-    GateView() { addAndMakeVisible(scope); addAndMakeVisible(env); }
+    static constexpr int numCols = 120;
+
+    GateActivityView() { addAndMakeVisible(scope); }
 
     void setWaveform(const float* samples) { scope.setSamples(samples); }
-    void push(float normReduction) { env.push(normReduction); }
+
+    void pushState(float grDb)
+    {
+        // ~0 dB of reduction reads as fully open; any real attenuation
+        // (the hold/release tail included) reads as closed — matches the
+        // exact threshold+hold+release state machine runGate implements.
+        history[(size_t) writePos] = grDb < 1.0f;
+        writePos = (writePos + 1) % numCols;
+        repaint();
+    }
 
 private:
     void resized() override
     {
         auto b = getLocalBounds();
-        auto left = b.removeFromLeft(b.getWidth() / 2);
-        left.removeFromRight(4);
-        scope.setBounds(left);
-        env.setBounds(b);
+        auto top = b.removeFromTop(b.getHeight() * 2 / 3);
+        scope.setBounds(top.reduced(0, 2));
+        b.removeFromTop(4);
+        stripArea = b;
+        repaint();
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        auto b = stripArea.toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(b);
+        g.setColour(XaLZaColour::border);
+        g.drawRect(b, 1.0f);
+
+        auto inner = b.reduced(1.0f);
+        if (inner.getWidth() < 2.0f || inner.getHeight() < 2.0f)
+            return;
+        float colW = inner.getWidth() / (float) numCols;
+        for (int i = 0; i < numCols; ++i)
+        {
+            // Oldest reading on the left, newest on the right, scrolling
+            // like every other time-based view in the plugin.
+            size_t idx = (size_t) ((writePos + i) % numCols);
+            bool open = history[idx];
+            juce::Rectangle<float> cell(inner.getX() + (float) i * colW, inner.getY(),
+                                         juce::jmax(1.0f, colW * 0.86f), inner.getHeight());
+            g.setColour(open ? XaLZaColour::accent2 : XaLZaColour::panelControl);
+            g.fillRect(cell);
+        }
     }
 
     WaveformScope scope;
-    EnvelopeGraph env;
+    juce::Rectangle<int> stripArea;
+    bool history[numCols] = {};
+    int writePos = 0;
 };
 
-/** Composite Saturator page view: the existing in-vs-out waveform scope
-    plus a real FFT "harmonic content" bar view fed genuinely POST the
-    saturator (RawSatOut) — shows the actual harmonics the drive/tone/
-    ceiling stage is adding, not a fake animation. */
+/** The Saturator's actual waveshaping transfer curve — linear amplitude
+    in vs out, -1..+1 — computed with the EXACT SAME shape() formulas
+    runSat applies per Character (see PluginProcessor.cpp's runSat lambda:
+    Tube/Tape/Transistor/Diode are genuinely different waveshaper math,
+    not a relabelled knob) plus the same ceiling soft-clamp and Mix blend.
+    An honest analytic replica, the same "real parameters, not
+    audio-reactive" approach TransferCurveView/FreqResponseView/
+    DuckingCurveView already use elsewhere — except this curve's whole
+    SHAPE is different from all of those (a soft-clip S-curve in linear
+    amplitude, not a dB-domain knee line), which is what actually makes
+    Tube/Tape/Transistor/Diode look as different from each other as they
+    sound, and is the first visualizer in the plugin that shows amplitude-
+    in-vs-amplitude-out at all. */
+class SaturationCurveView : public juce::Component
+{
+public:
+    static constexpr int numPts = 128;
+
+    void setCurve(int charMode, float drivePct, float ceilDb, float mixAmt)
+    {
+        float driveAmt = juce::jmap(juce::jlimit(0.0f, 1.0f, drivePct), 0.0f, 1.0f, 1.0f, 10.0f);
+        float norm = std::tanh(driveAmt);
+        float ceilLin = juce::Decibels::decibelsToGain(ceilDb);
+
+        auto shape = [&] (float x) -> float
+        {
+            switch (charMode)
+            {
+                case 1:
+                {
+                    constexpr float bias = 0.06f;
+                    return (std::tanh((x + bias) * driveAmt) - std::tanh(bias * driveAmt)) / norm;
+                }
+                case 2:
+                {
+                    float y = juce::jlimit(-1.0f, 1.0f, x * driveAmt / 3.0f);
+                    return (y - (y * y * y) / 3.0f) / (2.0f / 3.0f);
+                }
+                case 3:
+                {
+                    float xd = x * driveAmt;
+                    return (xd >= 0.0f ? std::tanh(xd * 1.4f) : std::tanh(xd * 0.7f)) / norm;
+                }
+                default:
+                    return std::tanh(x * driveAmt) / norm;
+            }
+        };
+
+        float clampedMix = juce::jlimit(0.0f, 1.0f, mixAmt);
+        for (int i = 0; i <= numPts; ++i)
+        {
+            float x = -1.0f + 2.0f * (float) i / (float) numPts;
+            float wet = shape(x);
+            if (std::abs(wet) > ceilLin)
+                wet = ceilLin * std::tanh(wet / ceilLin);
+            curve[i] = x + (wet - x) * clampedMix;
+        }
+        repaint();
+    }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(b);
+        g.setColour(XaLZaColour::borderSoft);
+        for (int i = 1; i < 4; ++i)
+        {
+            float x = b.getX() + b.getWidth() * (float) i / 4.0f;
+            float y = b.getY() + b.getHeight() * (float) i / 4.0f;
+            g.drawLine(x, b.getY(), x, b.getBottom(), 0.5f);
+            g.drawLine(b.getX(), y, b.getRight(), y, 0.5f);
+        }
+        g.setColour(XaLZaColour::border);
+        g.drawRect(b, 1.0f);
+
+        // Unity diagonal (what "no saturation at all" looks like) so the
+        // real curve's departure from it actually reads as something.
+        g.setColour(XaLZaColour::borderSoft);
+        g.drawLine(b.getX(), b.getBottom(), b.getRight(), b.getY(), 1.0f);
+
+        juce::Path path;
+        for (int i = 0; i <= numPts; ++i)
+        {
+            float tx = (float) i / (float) numPts;
+            float x = b.getX() + tx * b.getWidth();
+            float ty = juce::jlimit(-1.0f, 1.0f, curve[i]);
+            float y = b.getCentreY() - ty * b.getHeight() * 0.48f;
+            if (i == 0) path.startNewSubPath(x, y); else path.lineTo(x, y);
+        }
+        g.setColour(XaLZaColour::accent);
+        g.strokePath(path, juce::PathStrokeType(2.0f));
+    }
+
+    float curve[numPts + 1] = {};
+};
+
+/** Composite Saturator page view: the real analytic waveshaping curve
+    above (what used to be a plain in/out oscilloscope trace — a shape
+    already reused on six other module pages, so it added nothing
+    Saturator-specific) plus the existing real FFT "harmonic content" bar
+    view fed genuinely POST the saturator (RawSatOut) — shows the actual
+    harmonics the drive/tone/ceiling stage is adding, not a fake
+    animation. */
 class SaturatorView : public juce::Component
 {
 public:
-    SaturatorView() { addAndMakeVisible(scope); addAndMakeVisible(harmonics); }
+    SaturatorView() { addAndMakeVisible(curveView); addAndMakeVisible(harmonics); }
 
-    void setSamples(const float* out, const float* in) { scope.setSamples(out, in); }
+    void setCurve(int charMode, float drivePct, float ceilDb, float mixAmt)
+    {
+        curveView.setCurve(charMode, drivePct, ceilDb, mixAmt);
+    }
     void updateHarmonics(const float* samples) { harmonics.update(samples); }
     void setHarmonicSampleRate(double sr) { harmonics.setSampleRate(sr); }
 
@@ -1176,11 +1581,11 @@ private:
         auto b = getLocalBounds();
         auto left = b.removeFromLeft(b.getWidth() / 2);
         left.removeFromRight(4);
-        scope.setBounds(left);
+        curveView.setBounds(left);
         harmonics.setBounds(b);
     }
 
-    WaveformScope scope;
+    SaturationCurveView curveView;
     SpectrumAnalyzer harmonics;
 };
 
@@ -1299,20 +1704,135 @@ private:
     float depth = 0.0f;
 };
 
-/** Composite Reverb page view: the existing real post-reverb decay-tail
-    graph (fed from live output level) alongside a genuine Impulse
-    Response trace. The IR is computed by running a message-thread-only
-    juce::dsp::Reverb instance (mirroring the exact same roomSize/damping
-    the real audio-thread reverb is using right now) against a single
-    unit impulse — a real IR of the actual algorithm and settings, never
-    touching the audio thread and never fabricated. */
+/** A genuine per-frequency decay HEATMAP of the reverb's own impulse
+    response — not the plain "loudness over time" decay-tail line most
+    reverb plugins (and this one, until now) show, but a real short-time
+    FFT run across the exact IR buffer computed a few lines below (see
+    irProbeReverb), revealing what Decay/Damping actually do: highs die
+    out faster than lows. This is the one place in the whole plugin you
+    can actually SEE that happening frequency-by-frequency, instead of
+    reading a single blended loudness curve. Every column is a real FFT
+    of the real IR at that point in time — recomputed on the same
+    message-thread-only cadence as the plain IR waveform trace beside it,
+    a few times a second, never touching the audio thread. */
+class ReverbDecayHeatmapView : public juce::Component
+{
+public:
+    static constexpr int fftOrder = 10;
+    static constexpr int fftSize  = 1 << fftOrder;   // 1024 — the IR is quasi-stationary noise, doesn't need more
+
+    ReverbDecayHeatmapView() : fft(fftOrder), window((size_t) fftSize, juce::dsp::WindowingFunction<float>::hann)
+    {
+        std::fill(std::begin(fftData), std::end(fftData), 0.0f);
+    }
+
+    // samples: the raw, full-resolution impulse-response buffer (NOT the
+    // decimated display trace WaveformScope reads) — numSamples long.
+    void setImpulseResponse(const float* samples, int numSamples, double sampleRate)
+    {
+        if (numSamples < fftSize || sampleRate <= 0.0)
+            return;
+        sampleRateHint = (float) sampleRate;
+
+        int w = juce::jmax(1, getWidth()), h = juce::jmax(1, getHeight());
+        if (image.isNull() || image.getWidth() != w || image.getHeight() != h)
+            image = juce::Image(juce::Image::ARGB, w, h, true);
+        if (w < 2 || h < 2)
+            return;
+
+        int hop = juce::jmax(1, (numSamples - fftSize) / juce::jmax(1, w - 1));
+
+        juce::Image::BitmapData dst(image, juce::Image::BitmapData::writeOnly);
+
+        for (int col = 0; col < w; ++col)
+        {
+            int start = juce::jlimit(0, numSamples - fftSize, col * hop);
+            std::copy(samples + start, samples + start + fftSize, fftData);
+            window.multiplyWithWindowingTable(fftData, (size_t) fftSize);
+            fft.performFrequencyOnlyForwardTransform(fftData);
+
+            for (int y = 0; y < h; ++y)
+            {
+                // Log-frequency, high frequencies at the top — same
+                // convention as the LIM page's live Spectrogram.
+                float t = 1.0f - (float) y / (float) (h - 1);
+                float freqHz = 60.0f * std::pow(16000.0f / 60.0f, t);
+                int bin = juce::jlimit(1, fftSize / 2 - 1, (int) (freqHz * (float) fftSize / sampleRateHint));
+                float db = juce::Decibels::gainToDecibels(fftData[bin], -90.0f);
+                float norm = juce::jlimit(0.0f, 1.0f, (db + 90.0f) / 90.0f);
+                dst.setPixelColour(col, y, heatColour(norm));
+            }
+        }
+
+        repaint();
+    }
+
+private:
+    // A cool-toned heat ramp (panel background through indigo and teal
+    // into the plugin's own accent colours at full level) — deliberately
+    // a different palette from the LIM Spectrogram's warm inferno ramp,
+    // so the two heatmaps read as clearly different views at a glance.
+    static juce::Colour heatColour(float t)
+    {
+        struct Stop { float pos; juce::Colour c; };
+        static const Stop stops[] = {
+            { 0.00f, XaLZaColour::panelBg },
+            { 0.30f, juce::Colour(0xff203050) },
+            { 0.60f, XaLZaColour::accent2 },
+            { 0.85f, XaLZaColour::accent },
+            { 1.00f, juce::Colour(0xfffff2c8) },
+        };
+        constexpr int numStops = (int) (sizeof(stops) / sizeof(stops[0]));
+        for (int i = 1; i < numStops; ++i)
+        {
+            if (t <= stops[i].pos)
+            {
+                float span = juce::jmax(0.0001f, stops[i].pos - stops[i - 1].pos);
+                float localT = juce::jlimit(0.0f, 1.0f, (t - stops[i - 1].pos) / span);
+                return stops[i - 1].c.interpolatedWith(stops[i].c, localT);
+            }
+        }
+        return stops[numStops - 1].c;
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        if (!image.isNull())
+            g.drawImageAt(image, 0, 0);
+        else
+            g.fillAll(XaLZaColour::panelBg);
+        g.setColour(XaLZaColour::border);
+        g.drawRect(getLocalBounds(), 1);
+    }
+
+    void resized() override { image = {}; }
+
+    juce::dsp::FFT fft;
+    juce::dsp::WindowingFunction<float> window;
+    float fftData[2 * fftSize];
+    float sampleRateHint = 44100.0f;
+    juce::Image image;
+};
+
+/** Composite Reverb page view: the new spectral decay heatmap above
+    alongside a genuine Impulse Response waveform trace. The IR is
+    computed by running a message-thread-only juce::dsp::Reverb instance
+    (mirroring the exact same roomSize/damping the real audio-thread
+    reverb is using right now) against a single unit impulse — a real IR
+    of the actual algorithm and settings, never touching the audio thread
+    and never fabricated. Used to pair a live decay-tail loudness line
+    (the same generic envelope shape RES/GATE/COMP already had) with the
+    IR trace; the heatmap is what's actually specific to a reverb. */
 class ReverbView : public juce::Component
 {
 public:
-    ReverbView() { addAndMakeVisible(decay); addAndMakeVisible(ir); }
+    ReverbView() { addAndMakeVisible(heatmap); addAndMakeVisible(ir); }
 
-    void push(float normLevel) { decay.push(normLevel); }
-    void setImpulseResponse(const float* samples) { ir.setSamples(samples); }
+    void setImpulseResponse(const float* samples, int numSamples, double sampleRate)
+    {
+        heatmap.setImpulseResponse(samples, numSamples, sampleRate);
+    }
+    void setIrWaveform(const float* samples) { ir.setSamples(samples); }
 
 private:
     void resized() override
@@ -1320,11 +1840,11 @@ private:
         auto b = getLocalBounds();
         auto left = b.removeFromLeft(b.getWidth() / 2);
         left.removeFromRight(4);
-        decay.setBounds(left);
+        heatmap.setBounds(left);
         ir.setBounds(b);
     }
 
-    EnvelopeGraph decay;
+    ReverbDecayHeatmapView heatmap;
     WaveformScope ir;
 };
 
@@ -1731,20 +2251,28 @@ private:
 
     // Module-specific "big" visualisers, shown only on their own page. Each
     // one reads genuinely POST that module's own processing (never the
-    // module's input), wired in natural signal-chain order:
+    // module's input), wired in natural signal-chain order. Deliberately a
+    // DIFFERENT SHAPE per module wherever the module's own behaviour calls
+    // for one — a gate is a binary open/closed decision, a de-esser is a
+    // single targeted frequency band, a saturator is a waveshaping curve —
+    // instead of the same oscilloscope/envelope-line pair reused with
+    // different data plugged in:
     //   PRE: analog-style VU gauge (input level)
-    //   GATE: gate-reduction depth history
-    //   ESS: sibilance-band level + reduction depth, dual history
+    //   GATE: real open/closed activity strip (see GateActivityView)
+    //   ESS: zoomed sibilance-band FFT spectrum with a live target marker
+    //        (see DeEsserSpectrumView) — frequency-domain, not a time line
     //   COMP: gain-reduction + output level, dual history
     //   OPTO: post-Opto oscilloscope (real raw waveform)
     //   EQ: real FFT spectrum analyser (post-EQ signal)
     //   RES: dynamic-suppression depth history
-    //   SAT: waveform in-vs-out oscilloscope (dual trace)
+    //   SAT: real analytic waveshaping transfer curve (see
+    //        SaturationCurveView) — linear amplitude in-vs-out, not a time
+    //        trace at all
     PreampView preView;
     juce::Label preVuTitle;
-    GateView gateView;
+    GateActivityView gateView;
     juce::Label gateEnvTitle;
-    EnvelopeGraph essEnvGraph;
+    DeEsserSpectrumView essView;
     juce::Label essEnvTitle;
     CompressorView compView;
     juce::Label compGrTitle;

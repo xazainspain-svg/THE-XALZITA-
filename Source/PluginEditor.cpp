@@ -629,20 +629,20 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
         addChildComponent(l);
     };
     setupVizLabel(preVuTitle,         "INPUT LEVEL + OUTPUT WAVEFORM + HARMONIC COLOR + HPF RESPONSE");
-    setupVizLabel(gateEnvTitle,       "POST-GATE WAVEFORM + REDUCTION");
-    setupVizLabel(essEnvTitle,        "SIBILANCE BAND + REDUCTION");
-    setupVizLabel(compGrTitle,        "GAIN REDUCTION + OUTPUT + TRANSFER CURVE");
-    setupVizLabel(optoScopeTitle,     "POST-OPTO OSCILLOSCOPE + TRANSFER CURVE");
+    setupVizLabel(gateEnvTitle,       "POST-GATE WAVEFORM + OPEN/CLOSED ACTIVITY");
+    setupVizLabel(essEnvTitle,        "SIBILANCE SPECTRUM + LIVE TARGET BAND");
+    setupVizLabel(compGrTitle,        "GAIN REDUCTION METER + TRANSFER CURVE");
+    setupVizLabel(optoScopeTitle,     "PHOTOCELL RESPONSE + TRANSFER CURVE");
     setupVizLabel(eqSpectrumTitle,    "RESPONSE SPECTRUM (POST-EQ)");
     setupVizLabel(resSuppressTitle,   "DYNAMIC SUPPRESSION + PER-BAND DEPTH");
-    setupVizLabel(satScopeTitle,      "WAVEFORM: IN VS OUT + HARMONIC CONTENT");
+    setupVizLabel(satScopeTitle,      "SATURATION CURVE + HARMONIC CONTENT");
     setupVizLabel(dblGoniometerTitle, "STEREO FIELD + PER-VOICE (POST-DOUBLER)");
-    setupVizLabel(revDecayTitle,      "DECAY TAIL (LIVE) + IMPULSE RESPONSE");
+    setupVizLabel(revDecayTitle,      "SPECTRAL DECAY HEATMAP + IMPULSE RESPONSE");
     setupVizLabel(dlyScopeTitle,      "ECHO WAVEFORM + TAP TIMELINE (POST-DELAY)");
     setupVizLabel(limViewTitle,       "BRICKWALL OUTPUT + SPECTROGRAM");
     addChildComponent(preView);
     addChildComponent(gateView);
-    addChildComponent(essEnvGraph);
+    addChildComponent(essView);
     addChildComponent(compView);
     addChildComponent(optoView);
     addChildComponent(eqSpectrum);
@@ -657,6 +657,7 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     addChildComponent(dlyView);
     addChildComponent(limView);
     eqSpectrum.setSampleRate(proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0);
+    essView.setSampleRate(proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0);
 
     gateListenBtn.setClickingTogglesState(true);
     essListenBtn.setClickingTogglesState(true);
@@ -715,7 +716,7 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     bigViz = {
         { preTabIndex,  &preView,          &preVuTitle },
         { gateTabIndex, &gateView,         &gateEnvTitle },
-        { essTabIndex,  &essEnvGraph,      &essEnvTitle },
+        { essTabIndex,  &essView,          &essEnvTitle },
         { compTabIndex, &compView,         &compGrTitle },
         { optoTabIndex, &optoView,         &optoScopeTitle },
         { eqTabIndex,   &eqSpectrum,       &eqSpectrumTitle },
@@ -1272,7 +1273,9 @@ void XaLZaEditor::timerCallback()
     }
     else if (currentTab == gateTabIndex)
     {
-        gateView.push(juce::jlimit(0.0f, 1.0f, proc.getGateGrDb() / 60.0f));
+        // Real sampled open/closed state (see GateActivityView) — not a
+        // normalized envelope line like the other dynamics pages.
+        gateView.pushState(proc.getGateGrDb());
 
         float gateWaveBuf[WaveformScope::numPoints];
         int gatePos = proc.getRawWritePos((int) XaLZaProcessor::RawGate);
@@ -1282,17 +1285,33 @@ void XaLZaEditor::timerCallback()
     }
     else if (currentTab == essTabIndex)
     {
-        float bandNorm = juce::jlimit(0.0f, 1.0f, (proc.getEssBandDb() + 60.0f) / 60.0f);
-        float redNorm  = juce::jlimit(0.0f, 1.0f, -proc.getEssReductionDb() / 24.0f);
-        essEnvGraph.push(bandNorm, redNorm);
+        double sampleRateEss = proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0;
+        essView.setSampleRate(sampleRateEss);
+
+        // RawGate is genuinely Ess's own input (Ess is the very next stage
+        // after Gate in the chain) — the exact signal runEss's detector
+        // analyzes, not an approximation.
+        float specBufEss[DeEsserSpectrumView::fftSize];
+        int essPos = proc.getRawWritePos((int) XaLZaProcessor::RawGate);
+        for (int i = 0; i < DeEsserSpectrumView::fftSize; ++i)
+            specBufEss[i] = proc.rawSample((int) XaLZaProcessor::RawGate, essPos - DeEsserSpectrumView::fftSize + i);
+        essView.update(specBufEss);
+
+        // Mirrors runEss's own bandFreq computation exactly (see
+        // PluginProcessor.cpp) so the live marker sits at the real
+        // detection frequency, not a re-derived approximation.
+        float essFreqHz = proc.macroTracker.effectiveByID(XID::EssMacro, XID::EssFreq);
+        int essBandMode = (int) std::round(proc.apvts.getRawParameterValue(XID::EssBand)->load());
+        float essBandFreqMult = essBandMode == 0 ? 1.0f : (essBandMode == 2 ? 0.7f : 0.85f);
+        float essTargetHz = juce::jlimit(1000.0f, 16000.0f, essFreqHz * essBandFreqMult);
+        essView.setTarget(essTargetHz, proc.getEssReductionDb());
     }
     else if (currentTab == compTabIndex)
     {
-        float grNorm = juce::jlimit(0.0f, 1.0f, proc.getGrDb(0) / 24.0f);
-        float outDbC = juce::jmax(proc.getMeterDbL((int) XaLZaProcessor::TapComp),
-                                   proc.getMeterDbR((int) XaLZaProcessor::TapComp));
-        float outNorm = juce::jlimit(0.0f, 1.0f, (outDbC + 50.0f) / 50.0f);
-        compView.push(grNorm, outNorm);
+        // Real analog-style needle gauge — pushed the raw GR dB straight
+        // from getGrDb(0), the exact number driving the audio, not a
+        // separately-derived normalized pair like the old dual-line graph.
+        compView.push(proc.getGrDb(0));
 
         compView.setCurve(proc.macroTracker.effectiveByID(XID::CompMacro, XID::CompThresh),
                            proc.apvts.getRawParameterValue(XID::CompRatio)->load(),
@@ -1301,11 +1320,9 @@ void XaLZaEditor::timerCallback()
     }
     else if (currentTab == optoTabIndex)
     {
-        float buf[WaveformScope::numPoints];
-        int pos = proc.getRawWritePos((int) XaLZaProcessor::RawOpto);
-        for (int i = 0; i < WaveformScope::numPoints; ++i)
-            buf[i] = proc.rawSample((int) XaLZaProcessor::RawOpto, pos - WaveformScope::numPoints + i);
-        optoView.setSamples(buf);
+        // Real photocell glow — pushed the raw GR dB straight from
+        // getGrDb(1), the exact value driving the Opto stage's own gain.
+        optoView.pushGrDb(proc.getGrDb(1));
 
         // Opto's "Reduction" knob maps to an internal threshold at a fixed
         // 4:1 ratio — mirrors the exact mapping processBlock's OPTO block uses.
@@ -1345,15 +1362,15 @@ void XaLZaEditor::timerCallback()
     }
     else if (currentTab == satTabIndex)
     {
-        float bufIn[WaveformScope::numPoints], bufOut[WaveformScope::numPoints];
-        int posIn  = proc.getRawWritePos((int) XaLZaProcessor::RawSatIn);
-        int posOut = proc.getRawWritePos((int) XaLZaProcessor::RawSatOut);
-        for (int i = 0; i < WaveformScope::numPoints; ++i)
-        {
-            bufIn[i]  = proc.rawSample((int) XaLZaProcessor::RawSatIn,  posIn  - WaveformScope::numPoints + i);
-            bufOut[i] = proc.rawSample((int) XaLZaProcessor::RawSatOut, posOut - WaveformScope::numPoints + i);
-        }
-        satView.setSamples(bufOut, bufIn);   // out = primary/accent, in = muted reference
+        // Real analytic waveshaping curve — the exact same shape()/ceiling/
+        // mix math runSat applies (see PluginProcessor.cpp), not a fake
+        // curve; this is what actually differs between Tube/Tape/
+        // Transistor/Diode.
+        int satCharMode = (int) std::round(proc.apvts.getRawParameterValue(XID::SatChar)->load());
+        satView.setCurve(satCharMode,
+                          proc.macroTracker.effectiveByID(XID::SatMacro, XID::SatDrive) / 100.0f,
+                          proc.macroTracker.effectiveByID(XID::SatMacro, XID::SatCeiling),
+                          proc.macroTracker.effectiveByID(XID::SatMacro, XID::SatMix) / 100.0f);
 
         double sampleRateSat = proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0;
         satView.setHarmonicSampleRate(sampleRateSat);
@@ -1383,10 +1400,6 @@ void XaLZaEditor::timerCallback()
     }
     else if (currentTab == revTabIndex)
     {
-        float outDbR = juce::jmax(proc.getMeterDbL((int) XaLZaProcessor::TapRev),
-                                   proc.getMeterDbR((int) XaLZaProcessor::TapRev));
-        revView.push(juce::jlimit(0.0f, 1.0f, (outDbR + 60.0f) / 60.0f));
-
         float duckPct = proc.apvts.getRawParameterValue(XID::RevDuck)->load() / 100.0f;
         float duckRelMs = proc.apvts.getRawParameterValue(XID::RevDuckRelease)->load();
         revDuckCurve.setCurve(duckPct, duckRelMs);
@@ -1423,8 +1436,13 @@ void XaLZaEditor::timerCallback()
             juce::dsp::ProcessContextReplacing<float> irCtx(irBlock);
             irProbeReverb.process(irCtx);
 
-            float irDisp[WaveformScope::numPoints];
             auto* raw = irProbeBuffer.getReadPointer(0);
+            // The full-resolution buffer goes straight to the spectral
+            // heatmap (it needs real sample-rate content to FFT, not the
+            // decimated display trace below).
+            revView.setImpulseResponse(raw, lenSamples, srIr);
+
+            float irDisp[WaveformScope::numPoints];
             int stride = juce::jmax(1, lenSamples / WaveformScope::numPoints);
             for (int i = 0; i < WaveformScope::numPoints; ++i)
             {
@@ -1438,7 +1456,7 @@ void XaLZaEditor::timerCallback()
                     if (std::abs(raw[n]) > std::abs(best)) best = raw[n];
                 irDisp[i] = juce::jlimit(-1.0f, 1.0f, best);
             }
-            revView.setImpulseResponse(irDisp);
+            revView.setIrWaveform(irDisp);
         }
     }
     else if (currentTab == dlyTabIndex)
