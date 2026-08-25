@@ -48,7 +48,12 @@ juce::Font XaLZaLookAndFeel::monoFont(float size, bool bold)
 juce::Label* XaLZaLookAndFeel::createSliderTextBox(juce::Slider& slider)
 {
     auto* l = juce::LookAndFeel_V4::createSliderTextBox(slider);
-    l->setFont(monoFont(l->getFont().getHeight()));
+    // Fixed compact size instead of inheriting JUCE's default text-box
+    // font height — that default ran noticeably larger than intended here,
+    // which (together with the too-narrow box widths) was clipping every
+    // knob readout to "...". Small enough that even "18000 Hz" now clears
+    // the widened box above with room to spare.
+    l->setFont(monoFont(10.0f));
     return l;
 }
 
@@ -205,7 +210,11 @@ XaLZaEditor::KnobUI& XaLZaEditor::addKnob(const juce::String& paramID, const juc
     k->paramID = paramID;
     k->macroID = accent ? juce::String() : macroForParam(paramID);   // macro knobs themselves have no "override" state
     k->slider.getProperties().set("accent", accent);
-    k->slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, accent ? 54 : 46, 15);
+    // Wide enough for the longest real readout ("18000 Hz", "-18.2 dB")
+    // at the compact mono font createSliderTextBox below sets — the old
+    // 46/54px boxes were clipping every single value to "..." before the
+    // unit suffix (or even all of the digits) could show.
+    k->slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, accent ? 78 : 70, 15);
     k->slider.setTextValueSuffix(inferUnitSuffix(paramID));
     // Double-click any knob to snap it back to its default value — real
     // control, not just decoration.
@@ -378,9 +387,18 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     addPage("REV",  { { XID::RevSize, "Size" }, { XID::RevDecay, "Decay" }, { XID::RevPreDelay, "PreDelay" },
                        { XID::RevMix, "Mix" }, { XID::RevDuck, "Duck" }, { XID::RevDuckRelease, "DuckRel" },
                        { XID::RevWetHpf, "Wet HPF" }, { XID::RevWetLpf, "Wet LPF" } });
-    addPage("DLY",  { { XID::DlyTime, "Time" }, { XID::DlyFeedback, "Fdbk" }, { XID::DlySpread, "Spread" },
+    // Time is a real seg-group (was the 9th knob crowding this page badly
+    // enough to clip its own neighbours' labels) — fixed ms presets for
+    // now rather than the mockup's tempo-synced note values, since real
+    // sync needs host playhead/tempo access that's a separate, bigger
+    // piece of work. Still snaps the existing continuous DlyTime param.
+    addPage("DLY",  { { XID::DlyFeedback, "Fdbk" }, { XID::DlySpread, "Spread" },
                        { XID::DlyMix, "Mix" }, { XID::DlyDuck, "Duck" }, { XID::DlyDuckRelease, "DuckRel" },
                        { XID::DlyPanRate, "PanRate" }, { XID::DlyFbHpf, "Fbk HPF" }, { XID::DlyFbLpf, "Fbk LPF" } });
+    dlyTimeSeg = std::make_unique<SegButtonGroup>(proc.apvts, XID::DlyTime,
+        std::vector<SegButtonGroup::Option>{ { "100ms", 100.0f }, { "200ms", 200.0f }, { "300ms", 300.0f },
+                                               { "500ms", 500.0f }, { "750ms", 750.0f } });
+    addChildComponent(*dlyTimeSeg);
     addPage("DBL",  { { XID::DblDetune, "Detune" }, { XID::DblWidth, "Width" }, { XID::DblDelay, "Delay" }, { XID::DblMix, "Mix" } });
     addPage("RES",  { { XID::ResAmount, "Amount" }, { XID::ResSharpness, "Sharp" }, { XID::ResReactivity, "React" },
                        { XID::ResNotchLimit, "NotchLim" }, { XID::ResLow, "Low" }, { XID::ResHigh, "High" } });
@@ -845,6 +863,7 @@ void XaLZaEditor::showPage(int index)
     compRatioSeg->setVisible(currentTab == compTabIndex);
     for (auto* s : { eqLowFreqSeg.get(), eqMidFreqSeg.get(), eqHighFreqSeg.get() })
         s->setVisible(currentTab == eqTabIndex);
+    dlyTimeSeg->setVisible(currentTab == dlyTabIndex);
 
     resized();
     repaint();
@@ -875,7 +894,12 @@ void XaLZaEditor::layoutModuleMeter(ModuleMeterUI& mm, juce::Rectangle<int> area
     mm.bypassBtn.setBounds(area.getX(), area.getY(), 52, 20);
     mm.soloBtn.setBounds(area.getX(), area.getY() + 24, 52, 20);
 
-    auto row = area.removeFromTop(capH + meterH + dbH).withWidth(totalW).withRight(area.getRight());
+    // NB: withRightX (not withRight!) is the one that keeps totalW and just
+    // moves the rect so its right edge lands on area.getRight() — withRight
+    // instead RECOMPUTES the width from the unchanged left edge, which was
+    // silently stretching this whole block back out to the full row width
+    // (and colliding with the bypass/solo buttons at area.getX() above).
+    auto row = area.removeFromTop(capH + meterH + dbH).withWidth(totalW).withRightX(area.getRight());
     auto inBlock  = row.removeFromLeft(blockW);
     row.removeFromLeft(blockGap);
     auto outBlock = row;
@@ -909,6 +933,8 @@ void XaLZaEditor::timerCallback()
     if (currentTab == eqTabIndex)
         for (auto* s : { eqLowFreqSeg.get(), eqMidFreqSeg.get(), eqHighFreqSeg.get() })
             s->refresh();
+    if (currentTab == dlyTabIndex)
+        dlyTimeSeg->refresh();
 
     auto fmtDb = [] (float l, float r)
     {
@@ -1366,15 +1392,18 @@ void XaLZaEditor::resized()
             if (currentTab == eqTabIndex)
             {
                 // One freq seg-group centred under each of the three gain
-                // knobs above (Low/Mid/High), same cell width/centring
-                // layoutKnobRow used for those knobs.
+                // knobs above (Low/Mid/High) — wider than the knob cells
+                // themselves (fineCellW=96 was cramming each group's 4
+                // buttons into ~22px each, too narrow to read "1.5k"/
+                // "10k"-style labels).
                 content.removeFromTop(4);
                 auto segRow = content.removeFromTop(22);
-                int totalW = juce::jmin(segRow.getWidth(), fineCellW * 3);
+                constexpr int segCellW = 170;
+                int totalW = juce::jmin(segRow.getWidth(), segCellW * 3);
                 auto rowArea = segRow.withSizeKeepingCentre(totalW, segRow.getHeight()).withY(segRow.getY());
-                eqLowFreqSeg->setBounds(rowArea.removeFromLeft(fineCellW).reduced(4, 1));
-                eqMidFreqSeg->setBounds(rowArea.removeFromLeft(fineCellW).reduced(4, 1));
-                eqHighFreqSeg->setBounds(rowArea.removeFromLeft(fineCellW).reduced(4, 1));
+                eqLowFreqSeg->setBounds(rowArea.removeFromLeft(segCellW).reduced(10, 1));
+                eqMidFreqSeg->setBounds(rowArea.removeFromLeft(segCellW).reduced(10, 1));
+                eqHighFreqSeg->setBounds(rowArea.removeFromLeft(segCellW).reduced(10, 1));
             }
 
             content.removeFromTop(10);
@@ -1388,6 +1417,8 @@ void XaLZaEditor::resized()
                 essListenBtn.setBounds(titleRow.removeFromRight(64).reduced(0, 1));
             else if (currentTab == compTabIndex)
                 compRatioSeg->setBounds(titleRow.removeFromRight(220).reduced(0, 1));
+            else if (currentTab == dlyTabIndex)
+                dlyTimeSeg->setBounds(titleRow.removeFromRight(240).reduced(0, 1));
             auto vizArea = content.removeFromTop(bigVizH);
 
             bv->title->setBounds(titleRow);

@@ -1141,6 +1141,9 @@ private:
     // same zero-new-parameter approach as compRatioSeg above.
     std::unique_ptr<SegButtonGroup> eqLowFreqSeg, eqMidFreqSeg, eqHighFreqSeg;
 
+    // Delay's Time is a seg-group too — see addPage("DLY", ...) for why.
+    std::unique_ptr<SegButtonGroup> dlyTimeSeg;
+
     // Factory preset picker (title bar) — drives the 12 macro knobs.
     juce::ComboBox presetBox;
 
