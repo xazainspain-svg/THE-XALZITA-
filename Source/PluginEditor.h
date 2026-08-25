@@ -1,4 +1,5 @@
 #pragma once
+#include <cstring>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_extra/juce_gui_extra.h>
 #include <juce_dsp/juce_dsp.h>
@@ -339,30 +340,52 @@ public:
 private:
     void paint(juce::Graphics& g) override
     {
-        auto b = getLocalBounds().toFloat();
-        g.setColour(XaLZaColour::panelBg);
-        g.fillRect(b);
-
-        auto cx = b.getCentreX(), cy = b.getCentreY();
-        g.setColour(XaLZaColour::borderSoft);
-        g.drawLine(b.getX(), cy, b.getRight(), cy, 1.0f);
-        g.drawLine(cx, b.getY(), cx, b.getBottom(), 1.0f);
-        g.setColour(XaLZaColour::border);
-        g.drawRect(b, 1.0f);
-
-        auto scale = juce::jmin(b.getWidth(), b.getHeight()) * 0.48f;
-        g.setColour(XaLZaColour::accent2.withAlpha(0.8f));
-        for (auto& p : points)
+        auto b = getLocalBounds();
+        int w = juce::jmax(1, b.getWidth()), h = juce::jmax(1, b.getHeight());
+        if (trail.isNull() || trail.getWidth() != w || trail.getHeight() != h)
         {
-            float side = (p.first - p.second) * 0.7071f;   // L-R
-            float mid  = (p.first + p.second) * 0.7071f;   // L+R
-            float x = cx + side * scale;
-            float y = cy - mid * scale;
-            g.fillEllipse(x - 1.0f, y - 1.0f, 2.0f, 2.0f);
+            trail = juce::Image(juce::Image::ARGB, w, h, true);
+            trail.clear(trail.getBounds(), XaLZaColour::panelBg);
         }
+
+        auto bf = b.toFloat();
+        auto cx = bf.getCentreX(), cy = bf.getCentreY();
+        auto scale = juce::jmin(bf.getWidth(), bf.getHeight()) * 0.48f;
+
+        {
+            juce::Graphics tg(trail);
+            // Fade the persistent trail slightly each frame instead of
+            // wiping it clean — new points land bright on top of a
+            // slowly-decaying history, so this reads as a dense, living
+            // scatter cloud (matching Insight's Polar Sample view) instead
+            // of a bare, flickering instant frame.
+            tg.setColour(XaLZaColour::panelBg.withAlpha(0.12f));
+            tg.fillRect(trail.getBounds());
+
+            tg.setColour(XaLZaColour::accent2.withAlpha(0.55f));
+            for (auto& p : points)
+            {
+                float side = (p.first - p.second) * 0.7071f;   // L-R
+                float mid  = (p.first + p.second) * 0.7071f;   // L+R
+                float x = cx + side * scale;
+                float y = cy - mid * scale;
+                tg.fillEllipse(x - 1.1f, y - 1.1f, 2.2f, 2.2f);
+            }
+        }
+
+        g.drawImageAt(trail, 0, 0);
+
+        // Axes/border stay crisp every frame — they're drawn fresh on top
+        // instead of living inside the fading trail image.
+        g.setColour(XaLZaColour::borderSoft);
+        g.drawLine(bf.getX(), cy, bf.getRight(), cy, 1.0f);
+        g.drawLine(cx, bf.getY(), cx, bf.getBottom(), 1.0f);
+        g.setColour(XaLZaColour::border);
+        g.drawRect(b, 1);
     }
 
     std::vector<std::pair<float, float>> points;
+    juce::Image trail;
 };
 
 /** Analog-style VU gauge (semicircular arc, ticks, needle) — matches the
@@ -546,6 +569,123 @@ private:
     float sampleRateHint = 44100.0f;
 };
 
+/** Real-time scrolling spectrogram (frequency x time, colour = level) of
+    the plugin's actual final output — the classic "waterfall" every
+    serious analyzer ships (this is what iZotope Insight's own Spectrogram
+    tab is). Every column is a genuine FFT of live post-limiter audio
+    (the same RawLim tap LimiterView's waveform trace already reads, see
+    PluginProcessor::RawLim) computed fresh each frame and scrolled into a
+    cached Image — nothing here is a fake animation or a canned texture;
+    every pixel is a real bin's real magnitude at the instant it arrived. */
+class Spectrogram : public juce::Component
+{
+public:
+    static constexpr int fftOrder = 11;
+    static constexpr int fftSize  = 1 << fftOrder;   // 2048 — matches SpectrumAnalyzer
+
+    Spectrogram() : fft(fftOrder), window((size_t) fftSize, juce::dsp::WindowingFunction<float>::hann)
+    {
+        std::fill(std::begin(fftData), std::end(fftData), 0.0f);
+    }
+
+    void setSampleRate(double sr) { sampleRateHint = (float) juce::jmax(1000.0, sr); }
+
+    // samples: fftSize raw values, oldest to newest. Computes one new
+    // time-column and scrolls it into the waterfall image.
+    void pushBlock(const float* samples)
+    {
+        std::copy(samples, samples + fftSize, fftData);
+        window.multiplyWithWindowingTable(fftData, (size_t) fftSize);
+        fft.performFrequencyOnlyForwardTransform(fftData);
+
+        int w = juce::jmax(1, getWidth()), h = juce::jmax(1, getHeight());
+        if (image.isNull() || image.getWidth() != w || image.getHeight() != h)
+        {
+            image = juce::Image(juce::Image::ARGB, w, h, true);
+            image.clear(image.getBounds(), XaLZaColour::panelBg);
+        }
+        if (w < 2 || h < 2)
+            return;
+
+        juce::Image::BitmapData dst(image, juce::Image::BitmapData::readWrite);
+
+        // Scroll everything one column to the left (memmove, not memcpy —
+        // the source and destination ranges overlap by design), then
+        // paint the new column of frequency bins into the freed right
+        // edge, one pixel per row.
+        for (int y = 0; y < h; ++y)
+            std::memmove(dst.getLinePointer(y), dst.getLinePointer(y) + dst.pixelStride,
+                         (size_t) (w - 1) * (size_t) dst.pixelStride);
+
+        for (int y = 0; y < h; ++y)
+        {
+            // Log-frequency mapping with high frequencies at the top —
+            // matches how every real spectrogram reads (and the same
+            // 40Hz-18kHz log span SpectrumAnalyzer's bars already use).
+            float t = 1.0f - (float) y / (float) (h - 1);
+            float freqHz = 40.0f * std::pow(18000.0f / 40.0f, t);
+            int bin = juce::jlimit(1, fftSize / 2 - 1, (int) (freqHz * (float) fftSize / sampleRateHint));
+            float db = juce::Decibels::gainToDecibels(fftData[bin], -100.0f);
+            float norm = juce::jlimit(0.0f, 1.0f, (db + 90.0f) / 90.0f);
+            dst.setPixelColour(w - 1, y, magnitudeToColour(norm));
+        }
+
+        repaint();
+    }
+
+private:
+    // A compact 5-stop heat ramp (dark panel background through violet and
+    // ember into a bright near-white at full level) so louder genuinely
+    // reads as visually hotter, the same colour language real spectrogram
+    // tools (Insight included) all use instead of one flat hue.
+    static juce::Colour magnitudeToColour(float t)
+    {
+        struct Stop { float pos; juce::Colour c; };
+        static const Stop stops[] = {
+            { 0.00f, XaLZaColour::panelBg },
+            { 0.30f, juce::Colour(0xff3a2360) },
+            { 0.58f, juce::Colour(0xffb43a5a) },
+            { 0.82f, XaLZaColour::accent },
+            { 1.00f, juce::Colour(0xfffff2c8) },
+        };
+        constexpr int numStops = (int) (sizeof(stops) / sizeof(stops[0]));
+        for (int i = 1; i < numStops; ++i)
+        {
+            if (t <= stops[i].pos)
+            {
+                float span = juce::jmax(0.0001f, stops[i].pos - stops[i - 1].pos);
+                float localT = juce::jlimit(0.0f, 1.0f, (t - stops[i - 1].pos) / span);
+                return stops[i - 1].c.interpolatedWith(stops[i].c, localT);
+            }
+        }
+        return stops[numStops - 1].c;
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        if (!image.isNull())
+            g.drawImageAt(image, 0, 0);
+        else
+            g.fillAll(XaLZaColour::panelBg);
+        g.setColour(XaLZaColour::border);
+        g.drawRect(getLocalBounds(), 1);
+    }
+
+    void resized() override
+    {
+        // Drop the cached image so pushBlock() reallocates fresh at the
+        // new size next frame instead of stretching old content into the
+        // wrong aspect ratio.
+        image = {};
+    }
+
+    juce::dsp::FFT fft;
+    juce::dsp::WindowingFunction<float> window;
+    float fftData[2 * fftSize];
+    float sampleRateHint = 44100.0f;
+    juce::Image image;
+};
+
 /** Oscilloscope-style raw waveform trace. Fed a fixed window of raw,
     genuinely POST-process samples each frame by the editor's Timer — used
     for modules whose visualiser is "show me the actual waveform this
@@ -722,6 +862,40 @@ private:
     EnvelopeGraph lufsGraph;
     juce::Label truePeakLabel;
     juce::Label lufsLabel;
+};
+
+/** LIM page composite: the existing brickwall-output/loudness view on the
+    left, the new real-time Spectrogram waterfall of the actual final
+    output on the right — same 50/50 side-by-side pattern every other
+    module page's composite "big viz" already uses (DoublerView,
+    ReverbView, ResonanceView, DelayView). update() forwards straight to
+    the inner LimiterView so every existing call site keeps working
+    unchanged; pushSpectrogramBlock()/setSampleRate() are the only new
+    calls a caller needs to add. */
+class LimiterAnalysisView : public juce::Component
+{
+public:
+    LimiterAnalysisView() { addAndMakeVisible(limView); addAndMakeVisible(spectrogram); }
+
+    void update(const float* waveform, float lufsDb, float truePeakDb)
+    {
+        limView.update(waveform, lufsDb, truePeakDb);
+    }
+    void setSampleRate(double sr) { spectrogram.setSampleRate(sr); }
+    void pushSpectrogramBlock(const float* fftWindow) { spectrogram.pushBlock(fftWindow); }
+
+private:
+    void resized() override
+    {
+        auto b = getLocalBounds();
+        auto left = b.removeFromLeft(b.getWidth() / 2);
+        left.removeFromRight(4);
+        limView.setBounds(left);
+        spectrogram.setBounds(b);
+    }
+
+    LimiterView limView;
+    Spectrogram spectrogram;
 };
 
 /** Analytic input-vs-output transfer curve for a simple hard-knee
@@ -1593,7 +1767,7 @@ private:
     int irProbeCounter = 0;
     DelayView dlyView;
     juce::Label dlyScopeTitle;
-    LimiterView limView;
+    LimiterAnalysisView limView;
     juce::Label limViewTitle;
 
     // Resolved from tabNames in the constructor.

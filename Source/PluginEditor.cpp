@@ -639,7 +639,7 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     setupVizLabel(dblGoniometerTitle, "STEREO FIELD + PER-VOICE (POST-DOUBLER)");
     setupVizLabel(revDecayTitle,      "DECAY TAIL (LIVE) + IMPULSE RESPONSE");
     setupVizLabel(dlyScopeTitle,      "ECHO WAVEFORM + TAP TIMELINE (POST-DELAY)");
-    setupVizLabel(limViewTitle,       "BRICKWALL OUTPUT + LOUDNESS");
+    setupVizLabel(limViewTitle,       "BRICKWALL OUTPUT + SPECTROGRAM");
     addChildComponent(preView);
     addChildComponent(gateView);
     addChildComponent(essEnvGraph);
@@ -1485,6 +1485,17 @@ void XaLZaEditor::timerCallback()
         for (int i = 0; i < WaveformScope::numPoints; ++i)
             buf[i] = proc.rawSample((int) XaLZaProcessor::RawLim, pos - WaveformScope::numPoints + i);
         limView.update(buf, proc.getLufs(), proc.getTruePeakDb());
+
+        // Spectrogram: a genuine FFT of the same post-limiter tap above,
+        // just a wider window (fftSize, not WaveformScope::numPoints) —
+        // one real new time-column per frame, not a reused/decimated copy
+        // of the waveform trace.
+        double sampleRateLim = proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0;
+        limView.setSampleRate(sampleRateLim);
+        float specBufLim[Spectrogram::fftSize];
+        for (int i = 0; i < Spectrogram::fftSize; ++i)
+            specBufLim[i] = proc.rawSample((int) XaLZaProcessor::RawLim, pos - Spectrogram::fftSize + i);
+        limView.pushSpectrogramBlock(specBufLim);
     }
 
     if (currentTab == 0)
