@@ -210,7 +210,9 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     // Selectable band centre/corner frequencies — matches the "550"-style
     // idea of a per-band frequency choice rather than each band being
     // welded to one fixed frequency.
-    add(XID::EqLowFreq, "EQ Low Freq", 40.0f, 500.0f, 150.0f);
+    // Widened to 30Hz so the low-band seg-group can offer the same 30Hz
+    // first option the original web mockup's eqLowFreqSegs does.
+    add(XID::EqLowFreq, "EQ Low Freq", 30.0f, 500.0f, 150.0f);
     add(XID::EqMidFreq, "EQ Mid Freq", 200.0f, 8000.0f, 1000.0f);
     add(XID::EqHighFreq, "EQ High Freq", 2000.0f, 18000.0f, 6000.0f);
 

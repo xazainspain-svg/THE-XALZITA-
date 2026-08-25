@@ -791,16 +791,20 @@ private:
     TransferCurveView curve;
 };
 
-/** Composite Preamp page view: the input-level VU gauge, a real FFT
-    "harmonic color" bar view fed genuinely POST the Character waveshaper
-    (so it shows the actual harmonics that stage adds, not a fake
-    animation), and the HPF's analytic frequency-response curve. */
+/** Composite Preamp page view: the input-level VU gauge, a raw post-Gain/
+    Character output-waveform trace, a real FFT "harmonic color" bar view
+    fed genuinely POST the Character waveshaper (so it shows the actual
+    harmonics that stage adds, not a fake animation), and the HPF's
+    analytic frequency-response curve — four equal cards, matching the
+    original web mockup's Preamp row (Input Level / Output Waveform /
+    Harmonic Color / Frequency Response). */
 class PreampView : public juce::Component
 {
 public:
-    PreampView() { addAndMakeVisible(vu); addAndMakeVisible(harmColor); addAndMakeVisible(freqResp); }
+    PreampView() { addAndMakeVisible(vu); addAndMakeVisible(outWave); addAndMakeVisible(harmColor); addAndMakeVisible(freqResp); }
 
     void pushVu(float db) { vu.pushDb(db); }
+    void setOutputWaveform(const float* samples) { outWave.setSamples(samples); }
     void updateHarmonic(const float* samples) { harmColor.update(samples); }
     void setHarmonicSampleRate(double sr) { harmColor.setSampleRate(sr); }
     void setHpf(float hz, double sr) { freqResp.setHighPass(hz, sr); }
@@ -809,18 +813,45 @@ private:
     void resized() override
     {
         auto b = getLocalBounds();
-        auto left = b.removeFromLeft(juce::jmin(b.getWidth() / 3, 150));
-        vu.setBounds(left.withSizeKeepingCentre(juce::jmin(left.getWidth(), 130), left.getHeight()));
-        b.removeFromLeft(6);
-        auto mid = b.removeFromLeft(b.getWidth() / 2);
-        mid.removeFromRight(4);
-        harmColor.setBounds(mid);
+        constexpr int gap = 6;
+        int colW = (b.getWidth() - gap * 3) / 4;
+        auto take = [&] { auto c = b.removeFromLeft(colW); b.removeFromLeft(gap); return c; };
+        vu.setBounds(take());
+        outWave.setBounds(take());
+        harmColor.setBounds(take());
         freqResp.setBounds(b);
     }
 
     VUMeter vu;
+    WaveformScope outWave;
     SpectrumAnalyzer harmColor;
     FreqResponseView freqResp;
+};
+
+/** Composite Gate page view: a raw post-gate output waveform trace plus
+    the existing gate-reduction depth history, side by side — matches the
+    original web mockup's two-card Gate row ("Post-Gate Output — Waveform"
+    + "Gate Envelope") instead of the reduction history on its own. */
+class GateView : public juce::Component
+{
+public:
+    GateView() { addAndMakeVisible(scope); addAndMakeVisible(env); }
+
+    void setWaveform(const float* samples) { scope.setSamples(samples); }
+    void push(float normReduction) { env.push(normReduction); }
+
+private:
+    void resized() override
+    {
+        auto b = getLocalBounds();
+        auto left = b.removeFromLeft(b.getWidth() / 2);
+        left.removeFromRight(4);
+        scope.setBounds(left);
+        env.setBounds(b);
+    }
+
+    WaveformScope scope;
+    EnvelopeGraph env;
 };
 
 /** Composite Saturator page view: the existing in-vs-out waveform scope
@@ -1058,7 +1089,7 @@ private:
     //   SAT: waveform in-vs-out oscilloscope (dual trace)
     PreampView preView;
     juce::Label preVuTitle;
-    EnvelopeGraph gateEnvGraph;
+    GateView gateView;
     juce::Label gateEnvTitle;
     EnvelopeGraph essEnvGraph;
     juce::Label essEnvTitle;
@@ -1103,6 +1134,12 @@ private:
     // above. Snaps the same existing CompRatio float parameter, so old
     // presets/automation still work unchanged.
     std::unique_ptr<SegButtonGroup> compRatioSeg;
+
+    // EQ's three band-frequency choices are real seg-groups too (matches
+    // the mockup's eqLowFreqSegs/eqMidFreqSegs/eqHighFreqSegs), snapping
+    // the existing continuous EqLowFreq/EqMidFreq/EqHighFreq parameters —
+    // same zero-new-parameter approach as compRatioSeg above.
+    std::unique_ptr<SegButtonGroup> eqLowFreqSeg, eqMidFreqSeg, eqHighFreqSeg;
 
     // Factory preset picker (title bar) — drives the 12 macro knobs.
     juce::ComboBox presetBox;

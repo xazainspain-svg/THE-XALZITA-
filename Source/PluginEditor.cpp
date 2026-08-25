@@ -362,9 +362,18 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
                                                { "20:1", 20.0f }, { "Limit", 50.0f } });
     addChildComponent(*compRatioSeg);
     addPage("OPTO", { { XID::OptoReduction, "Reduction" }, { XID::OptoGain, "Gain" }, { XID::OptoMix, "Mix" } });
-    addPage("EQ",   { { XID::EqLow, "Low" }, { XID::EqLowFreq, "Low Freq" },
-                       { XID::EqMid, "Mid" }, { XID::EqMidFreq, "Mid Freq" },
-                       { XID::EqHigh, "High" }, { XID::EqHighFreq, "High Freq" } });
+    // Low/Mid/High Freq are real seg-groups (matches the mockup's
+    // eqLowFreqSegs/eqMidFreqSegs/eqHighFreqSegs), constructed just below —
+    // only the three gain knobs stay in the fine-tune knob row.
+    addPage("EQ",   { { XID::EqLow, "Low" }, { XID::EqMid, "Mid" }, { XID::EqHigh, "High" } });
+    eqLowFreqSeg = std::make_unique<SegButtonGroup>(proc.apvts, XID::EqLowFreq,
+        std::vector<SegButtonGroup::Option>{ { "30", 30.0f }, { "60", 60.0f }, { "100", 100.0f }, { "200", 200.0f } });
+    eqMidFreqSeg = std::make_unique<SegButtonGroup>(proc.apvts, XID::EqMidFreq,
+        std::vector<SegButtonGroup::Option>{ { "400", 400.0f }, { "800", 800.0f }, { "1.5k", 1500.0f }, { "3k", 3000.0f } });
+    eqHighFreqSeg = std::make_unique<SegButtonGroup>(proc.apvts, XID::EqHighFreq,
+        std::vector<SegButtonGroup::Option>{ { "5k", 5000.0f }, { "7k", 7000.0f }, { "10k", 10000.0f }, { "15k", 15000.0f } });
+    for (auto* s : { eqLowFreqSeg.get(), eqMidFreqSeg.get(), eqHighFreqSeg.get() })
+        addChildComponent(*s);
     addPage("SAT",  { { XID::SatDrive, "Drive" }, { XID::SatTone, "Tone" }, { XID::SatCeiling, "Ceiling" }, { XID::SatMix, "Mix" } });
     addPage("REV",  { { XID::RevSize, "Size" }, { XID::RevDecay, "Decay" }, { XID::RevPreDelay, "PreDelay" },
                        { XID::RevMix, "Mix" }, { XID::RevDuck, "Duck" }, { XID::RevDuckRelease, "DuckRel" },
@@ -456,8 +465,8 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
         l.setColour(juce::Label::textColourId, XaLZaColour::textMuted);
         addChildComponent(l);
     };
-    setupVizLabel(preVuTitle,         "INPUT LEVEL + HARMONIC COLOR + HPF RESPONSE");
-    setupVizLabel(gateEnvTitle,       "GATE REDUCTION");
+    setupVizLabel(preVuTitle,         "INPUT LEVEL + OUTPUT WAVEFORM + HARMONIC COLOR + HPF RESPONSE");
+    setupVizLabel(gateEnvTitle,       "POST-GATE WAVEFORM + REDUCTION");
     setupVizLabel(essEnvTitle,        "SIBILANCE BAND + REDUCTION");
     setupVizLabel(compGrTitle,        "GAIN REDUCTION + OUTPUT + TRANSFER CURVE");
     setupVizLabel(optoScopeTitle,     "POST-OPTO OSCILLOSCOPE + TRANSFER CURVE");
@@ -469,7 +478,7 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     setupVizLabel(dlyScopeTitle,      "ECHO WAVEFORM (POST-DELAY)");
     setupVizLabel(limViewTitle,       "BRICKWALL OUTPUT + LOUDNESS");
     addChildComponent(preView);
-    addChildComponent(gateEnvGraph);
+    addChildComponent(gateView);
     addChildComponent(essEnvGraph);
     addChildComponent(compView);
     addChildComponent(optoView);
@@ -526,7 +535,7 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
 
     bigViz = {
         { preTabIndex,  &preView,          &preVuTitle },
-        { gateTabIndex, &gateEnvGraph,     &gateEnvTitle },
+        { gateTabIndex, &gateView,         &gateEnvTitle },
         { essTabIndex,  &essEnvGraph,      &essEnvTitle },
         { compTabIndex, &compView,         &compGrTitle },
         { optoTabIndex, &optoView,         &optoScopeTitle },
@@ -834,6 +843,8 @@ void XaLZaEditor::showPage(int index)
     gateScBtn.setVisible(currentTab == gateTabIndex);
     essListenBtn.setVisible(currentTab == essTabIndex);
     compRatioSeg->setVisible(currentTab == compTabIndex);
+    for (auto* s : { eqLowFreqSeg.get(), eqMidFreqSeg.get(), eqHighFreqSeg.get() })
+        s->setVisible(currentTab == eqTabIndex);
 
     resized();
     repaint();
@@ -895,6 +906,9 @@ void XaLZaEditor::timerCallback()
     // load, or the Comp macro — not just from clicking a button here.
     if (currentTab == compTabIndex)
         compRatioSeg->refresh();
+    if (currentTab == eqTabIndex)
+        for (auto* s : { eqLowFreqSeg.get(), eqMidFreqSeg.get(), eqHighFreqSeg.get() })
+            s->refresh();
 
     auto fmtDb = [] (float l, float r)
     {
@@ -990,10 +1004,21 @@ void XaLZaEditor::timerCallback()
             preSpecBuf[i] = proc.rawSample((int) XaLZaProcessor::RawPre, prePos - SpectrumAnalyzer::fftSize + i);
         preView.updateHarmonic(preSpecBuf);
         preView.setHpf(proc.getCurrentHpfHz(), sampleRatePre);
+
+        float preWaveBuf[WaveformScope::numPoints];
+        for (int i = 0; i < WaveformScope::numPoints; ++i)
+            preWaveBuf[i] = proc.rawSample((int) XaLZaProcessor::RawPre, prePos - WaveformScope::numPoints + i);
+        preView.setOutputWaveform(preWaveBuf);
     }
     else if (currentTab == gateTabIndex)
     {
-        gateEnvGraph.push(juce::jlimit(0.0f, 1.0f, proc.getGateGrDb() / 60.0f));
+        gateView.push(juce::jlimit(0.0f, 1.0f, proc.getGateGrDb() / 60.0f));
+
+        float gateWaveBuf[WaveformScope::numPoints];
+        int gatePos = proc.getRawWritePos((int) XaLZaProcessor::RawGate);
+        for (int i = 0; i < WaveformScope::numPoints; ++i)
+            gateWaveBuf[i] = proc.rawSample((int) XaLZaProcessor::RawGate, gatePos - WaveformScope::numPoints + i);
+        gateView.setWaveform(gateWaveBuf);
     }
     else if (currentTab == essTabIndex)
     {
@@ -1337,6 +1362,20 @@ void XaLZaEditor::resized()
         {
             auto knobArea = content.removeFromTop(fineLabelH + fineKnobH + 14);
             layoutKnobRow(pageKnobs[(size_t) currentTab], knobArea, fineLabelH, fineKnobW, fineKnobH, fineCellW);
+
+            if (currentTab == eqTabIndex)
+            {
+                // One freq seg-group centred under each of the three gain
+                // knobs above (Low/Mid/High), same cell width/centring
+                // layoutKnobRow used for those knobs.
+                content.removeFromTop(4);
+                auto segRow = content.removeFromTop(22);
+                int totalW = juce::jmin(segRow.getWidth(), fineCellW * 3);
+                auto rowArea = segRow.withSizeKeepingCentre(totalW, segRow.getHeight()).withY(segRow.getY());
+                eqLowFreqSeg->setBounds(rowArea.removeFromLeft(fineCellW).reduced(4, 1));
+                eqMidFreqSeg->setBounds(rowArea.removeFromLeft(fineCellW).reduced(4, 1));
+                eqHighFreqSeg->setBounds(rowArea.removeFromLeft(fineCellW).reduced(4, 1));
+            }
 
             content.removeFromTop(10);
             auto titleRow = content.removeFromTop(bigVizTitleH);
