@@ -1,5 +1,6 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_dsp/juce_dsp.h>
 #include "Params.h"
 
@@ -66,6 +67,12 @@ public:
 
     float getMeterDbL(int tap) const noexcept { return meterDbL[(size_t) juce::jlimit(0, kNumMeterTaps - 1, tap)].load(std::memory_order_relaxed); }
     float getMeterDbR(int tap) const noexcept { return meterDbR[(size_t) juce::jlimit(0, kNumMeterTaps - 1, tap)].load(std::memory_order_relaxed); }
+
+    // Real RMS (mean-square) companion reading for the same tap — a
+    // genuinely different measurement from the peak ballistics above, not
+    // a derived/smoothed copy of it. See updateMeter().
+    float getRmsDbL(int tap) const noexcept { return rmsDbL[(size_t) juce::jlimit(0, kNumMeterTaps - 1, tap)].load(std::memory_order_relaxed); }
+    float getRmsDbR(int tap) const noexcept { return rmsDbR[(size_t) juce::jlimit(0, kNumMeterTaps - 1, tap)].load(std::memory_order_relaxed); }
 
     // ---- Reorderable chain: which of the 12 modules processBlock() runs
     //      first/second/.../last. Identity order (Pre, Gate, ... Lim, same
@@ -162,6 +169,12 @@ public:
     float getEssBandDb() const noexcept { return essBandDbUI.load(std::memory_order_relaxed); }
     float getEssReductionDb() const noexcept { return essReductionDbUI.load(std::memory_order_relaxed); }
     float getResCutDb() const noexcept { return resCutDbUI.load(std::memory_order_relaxed); }
+
+    // Real live phase (radians, wraps at 2*pi) of the Delay's ping-pong
+    // auto-pan LFO — read directly by the UI so the Delay page's bounce
+    // indicator swings in exact sync with what's actually panning the
+    // repeats between L/R, not a separately-clocked visual guess.
+    float getDlyPanPhase() const noexcept { return dlyPanPhaseUI.load(std::memory_order_relaxed); }
     // Per-band cut depth (real, one entry per currently-active Resonance
     // band) for the Dynamic Suppression bars — see runRes.
     float getResBandCutDb(int band) const noexcept
@@ -175,6 +188,25 @@ public:
     float dblScopeSampleL(int i) const noexcept { return dblScopeL[(size_t) (i & (kScopeSize - 1))].load(std::memory_order_relaxed); }
     float dblScopeSampleR(int i) const noexcept { return dblScopeR[(size_t) (i & (kScopeSize - 1))].load(std::memory_order_relaxed); }
     int   getDblScopeWritePos() const noexcept { return dblScopeWritePos.load(std::memory_order_relaxed); }
+
+    // ---- Reverb: user-loadable impulse response for the hybrid
+    // algorithmic/convolution engine (see runRev). Decoding an audio file
+    // is real disk/CPU work, so this is called from the MESSAGE thread
+    // only (the Reverb page's "Load IR" file-chooser callback, or a saved
+    // patch's own reload in setStateInformation) — never from
+    // processBlock(). The decoded buffer is handed to the audio thread
+    // through a lock-free SpinLock-tryLock transfer (irTransfer, drained
+    // at the top of runRev every block); the actual
+    // juce::dsp::Convolution::loadImpulseResponse() call only ever
+    // happens on the audio thread, which is the realtime-safe pattern
+    // JUCE's own ConvolutionDemo uses. Returns false if the file couldn't
+    // be read as audio (unsupported format, corrupt data) — the
+    // previously-loaded IR (if any) is left untouched in that case.
+    bool loadImpulseResponseFile(const juce::File& file);
+    void clearImpulseResponse();
+    juce::String getIrFileName() const { return currentIrFile.existsAsFile() ? currentIrFile.getFileNameWithoutExtension() : juce::String(); }
+    juce::File   getIrFile() const { return currentIrFile; }
+    bool isIrLoaded() const noexcept { return irLoaded; }
 
     // Real (simplified, one-pole-integrated) ITU-R BS.1770 K-weighted
     // momentary loudness of the true final output (post-limiter, post-
@@ -218,6 +250,7 @@ private:
     std::atomic<float> essBandDbUI { -100.0f };
     std::atomic<float> essReductionDbUI { 0.0f };
     std::atomic<float> resCutDbUI { 0.0f };
+    std::atomic<float> dlyPanPhaseUI { 0.0f };
 
     std::array<std::atomic<float>, kScopeSize> dblScopeL, dblScopeR;
     std::atomic<int> dblScopeWritePos { 0 };
@@ -234,6 +267,14 @@ private:
     std::array<std::atomic<float>, kNumMeterTaps> meterDbL, meterDbR;
     std::array<std::atomic<float>, 3> grDb;
     float meterAttCoef = 0.3f, meterRelCoef = 0.9995f;
+
+    // Real RMS companion reading for every meter tap above — a genuine
+    // mean-square average (not the peak meter's fast-attack/slow-release
+    // ballistics), symmetrically integrated over ~300ms like a real VU
+    // instrument, so the LedMeter can show Peak and RMS together the way
+    // the iZotope Insight Levels reference does.
+    std::array<std::atomic<float>, kNumMeterTaps> rmsDbL, rmsDbR;
+    float rmsCoef = 0.9f;
 
     std::array<std::atomic<float>, kScopeSize> scopePointsL, scopePointsR;
     std::atomic<int> scopeWritePos { 0 };
@@ -323,6 +364,48 @@ private:
     // internal room-size/damping model.
     juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
                                     juce::dsp::IIR::Coefficients<float>> revWetHpf, revWetLpf;
+
+    // Hybrid convolution engine — blended with the algorithmic reverb
+    // above via RevHybrid (0 = pure algorithmic, 100 = pure loaded IR).
+    // See loadImpulseResponseFile()'s comment above for the threading
+    // model; runRev drains irTransfer (real-time safe, non-blocking)
+    // every block before doing anything else.
+    juce::dsp::Convolution revConvolution;
+    juce::AudioBuffer<float> revConvBuffer;
+    juce::AudioFormatManager irFormatManager;
+    juce::File currentIrFile;
+    bool irLoaded = false;
+
+    struct IrBufferWithRate
+    {
+        juce::AudioBuffer<float> buffer;
+        double sampleRate = 0.0;
+    };
+    class IrBufferTransfer
+    {
+    public:
+        void set(IrBufferWithRate&& p)
+        {
+            const juce::SpinLock::ScopedLockType lock(mutex);
+            pending = std::move(p);
+            hasNew = true;
+        }
+        template <typename Fn>
+        void get(Fn&& fn)
+        {
+            const juce::SpinLock::ScopedTryLockType lock(mutex);
+            if (lock.isLocked() && hasNew)
+            {
+                fn(pending);
+                hasNew = false;
+            }
+        }
+    private:
+        IrBufferWithRate pending;
+        bool hasNew = false;
+        juce::SpinLock mutex;
+    };
+    IrBufferTransfer irTransfer;
 
     // ---- 11) Delay — ping-pong with spread, duck, and an auto-pan LFO ----
     juce::dsp::DelayLine<float> delayL, delayR;

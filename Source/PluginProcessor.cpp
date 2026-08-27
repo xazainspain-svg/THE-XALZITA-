@@ -27,6 +27,8 @@ XaLZaProcessor::XaLZaProcessor()
 {
     for (auto& a : meterDbL) a.store(-100.0f);
     for (auto& a : meterDbR) a.store(-100.0f);
+    for (auto& a : rmsDbL) a.store(-100.0f);
+    for (auto& a : rmsDbR) a.store(-100.0f);
     for (auto& a : grDb) a.store(0.0f);
     for (auto& a : scopePointsL) a.store(0.0f);
     for (auto& a : scopePointsR) a.store(0.0f);
@@ -37,23 +39,32 @@ XaLZaProcessor::XaLZaProcessor()
     for (auto& a : dblScopeR) a.store(0.0f);
     for (auto& a : macroCcMap) a.store(-1);
     for (int i = 0; i < kNumSlots; ++i) chainOrder[(size_t) i].store(i);
+    irFormatManager.registerBasicFormats();
 }
 
 void XaLZaProcessor::updateMeter(int tap, const juce::AudioBuffer<float>& buf, int numSamples, int numCh)
 {
     float peakL = 0.0f, peakR = 0.0f;
+    double sumSqL = 0.0, sumSqR = 0.0;
     auto* l = buf.getReadPointer(0);
     for (int n = 0; n < numSamples; ++n)
+    {
         peakL = juce::jmax(peakL, std::abs(l[n]));
+        sumSqL += (double) l[n] * (double) l[n];
+    }
     if (numCh > 1)
     {
         auto* r = buf.getReadPointer(1);
         for (int n = 0; n < numSamples; ++n)
+        {
             peakR = juce::jmax(peakR, std::abs(r[n]));
+            sumSqR += (double) r[n] * (double) r[n];
+        }
     }
     else
     {
         peakR = peakL;
+        sumSqR = sumSqL;
     }
 
     float dbL = juce::Decibels::gainToDecibels(peakL, -100.0f);
@@ -67,6 +78,23 @@ void XaLZaProcessor::updateMeter(int tap, const juce::AudioBuffer<float>& buf, i
     };
     smooth(meterDbL[(size_t) tap], dbL);
     smooth(meterDbR[(size_t) tap], dbR);
+
+    // Real RMS: genuine mean-square over this block, not a derived copy
+    // of the peak reading above — converted to dB and integrated
+    // symmetrically (see rmsCoef, set in prepareToPlay) like a real VU
+    // instrument, so it reads "how loud does this actually sound" rather
+    // than chasing the same fast transients the peak ballistics do.
+    float rmsGainL = std::sqrt((float) (sumSqL / juce::jmax(1, numSamples)));
+    float rmsGainR = std::sqrt((float) (sumSqR / juce::jmax(1, numSamples)));
+    float rmsTargetL = juce::Decibels::gainToDecibels(rmsGainL, -100.0f);
+    float rmsTargetR = juce::Decibels::gainToDecibels(rmsGainR, -100.0f);
+    auto smoothRms = [this] (std::atomic<float>& state, float target)
+    {
+        float prev = state.load(std::memory_order_relaxed);
+        state.store(rmsCoef * prev + (1.0f - rmsCoef) * target, std::memory_order_relaxed);
+    };
+    smoothRms(rmsDbL[(size_t) tap], rmsTargetL);
+    smoothRms(rmsDbR[(size_t) tap], rmsTargetR);
 }
 
 void XaLZaProcessor::updateGr(int moduleIdx, float preDb, float postDb)
@@ -97,6 +125,44 @@ void XaLZaProcessor::pushRaw(int tap, const juce::AudioBuffer<float>& buf, int n
         rawRing[t][(size_t) (pos & (kRawSize - 1))].store(0.5f * (l[n] + r[n]), std::memory_order_relaxed);
         rawWritePos[t].store(pos + 1, std::memory_order_relaxed);
     }
+}
+
+bool XaLZaProcessor::loadImpulseResponseFile(const juce::File& file)
+{
+    if (!file.existsAsFile())
+        return false;
+
+    std::unique_ptr<juce::AudioFormatReader> reader(irFormatManager.createReaderFor(file));
+    if (reader == nullptr)
+        return false;   // unsupported/corrupt file — previous IR (if any) stays active
+
+    // 30s hard sanity cap — generous for any real reverb/hall/plate IR,
+    // just a ceiling against accidentally selecting a huge music file.
+    auto numSamplesIr = (int) juce::jmin((juce::int64) reader->lengthInSamples,
+                                          (juce::int64) (reader->sampleRate * 30.0));
+    if (numSamplesIr <= 0)
+        return false;
+
+    juce::AudioBuffer<float> irBuf((int) juce::jlimit((juce::int64) 1, (juce::int64) 2, (juce::int64) reader->numChannels),
+                                    numSamplesIr);
+    reader->read(&irBuf, 0, numSamplesIr, 0, true, true);
+
+    currentIrFile = file;
+    irLoaded = true;
+    irTransfer.set({ std::move(irBuf), reader->sampleRate });
+    return true;
+}
+
+void XaLZaProcessor::clearImpulseResponse()
+{
+    currentIrFile = juce::File();
+    irLoaded = false;
+    // A silent 2-sample buffer effectively mutes the convolution path —
+    // RevHybrid still works, it just blends toward silence until a new
+    // IR is loaded.
+    juce::AudioBuffer<float> silence(2, 2);
+    silence.clear();
+    irTransfer.set({ std::move(silence), sr > 0.0 ? sr : 44100.0 });
 }
 
 bool XaLZaProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -138,6 +204,7 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     reverb.prepare(spec);
     revWetHpf.prepare(spec);
     revWetLpf.prepare(spec);
+    revConvolution.prepare(spec);
 
     essDetectL.prepare(spec);
     essDetectR.prepare(spec);
@@ -248,6 +315,7 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
     dryBuffer.setSize(2, samplesPerBlock, false, false, true);
     revBuffer.setSize(2, samplesPerBlock, false, false, true);
+    revConvBuffer.setSize(2, samplesPerBlock, false, false, true);
     dlyBuffer.setSize(2, samplesPerBlock, false, false, true);
     dblBuffer.setSize(2, samplesPerBlock, false, false, true);
 
@@ -263,6 +331,11 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
     meterAttCoef = onePoleCoef(1.0f, sampleRate);
     meterRelCoef = onePoleCoef(130.0f, sampleRate);   // fast, real-time feel — was 400ms
+    // RMS companion reading: symmetric ~300ms integration both directions
+    // (a real VU-style average, not fast-attack/slow-release like the
+    // peak ballistics above), so it settles to "how loud does this
+    // actually sound" rather than chasing the same transients Peak does.
+    rmsCoef = onePoleCoef(300.0f, sampleRate);
 }
 
 void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -1033,6 +1106,18 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     // ---------------------------------------------------------------
     auto runRev = [&]()
     {
+    // Drain any pending "Load IR" request (real-time safe, non-blocking —
+    // see loadImpulseResponseFile()'s comment) even when Reverb is
+    // currently bypassed, so a queued Load IR click never has to wait for
+    // the module to be re-enabled to take effect.
+    irTransfer.get([this] (IrBufferWithRate& buf)
+    {
+        revConvolution.loadImpulseResponse(std::move(buf.buffer), buf.sampleRate,
+                                            juce::dsp::Convolution::Stereo::yes,
+                                            juce::dsp::Convolution::Trim::yes,
+                                            juce::dsp::Convolution::Normalise::yes);
+    });
+
     bool revBypassed = apvts.getRawParameterValue(XID::RevBypass)->load() > 0.5f;
     if (!revBypassed)
     {
@@ -1042,6 +1127,14 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         float mixPct     = mt.effectiveByID(XID::RevMacro, XID::RevMix) / 100.0f;
         float duckPct    = mt.effectiveByID(XID::RevMacro, XID::RevDuck) / 100.0f;
         float duckRelMs  = mt.effectiveByID(XID::RevMacro, XID::RevDuckRelease);
+        // Independent damping trim, centred at 50 = no change from the
+        // original Decay-derived formula (so existing sessions/defaults
+        // sound identical) — real extra control either side of that.
+        float dampingTrimPct = apvts.getRawParameterValue(XID::RevDamping)->load();
+        // Hybrid blend: 0 = pure algorithmic (unchanged), 100 = pure
+        // loaded-impulse convolution, in between a genuine crossfade of
+        // both engines' wet signal.
+        float hybridPct = apvts.getRawParameterValue(XID::RevHybrid)->load() / 100.0f;
 
         revBuffer.setSize(numCh, numSamples, false, false, true);
 
@@ -1065,9 +1158,25 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             }
         }
 
+        // Both engines process the SAME pre-delayed dry signal, in
+        // parallel — the standard hybrid-reverb architecture. Snapshot it
+        // into revConvBuffer for the convolution engine BEFORE the
+        // algorithmic reverb below turns revBuffer into wet audio in
+        // place; skipped entirely (no copy, no convolution CPU cost) when
+        // Hybrid is fully off, which is the default/common case.
+        bool useConv = hybridPct > 0.0005f;
+        if (useConv)
+        {
+            revConvBuffer.setSize(numCh, numSamples, false, false, true);
+            for (int ch = 0; ch < numCh; ++ch)
+                revConvBuffer.copyFrom(ch, 0, revBuffer, ch, 0, numSamples);
+        }
+
         juce::dsp::Reverb::Parameters rp;
         rp.roomSize   = juce::jlimit(0.0f, 1.0f, sizePct);
-        rp.damping    = juce::jlimit(0.05f, 0.95f, juce::jmap(decaySec, 0.3f, 8.0f, 0.9f, 0.1f));
+        rp.damping    = juce::jlimit(0.05f, 0.95f,
+                            juce::jmap(decaySec, 0.3f, 8.0f, 0.9f, 0.1f)
+                            + (dampingTrimPct - 50.0f) / 50.0f * 0.3f);
         rp.wetLevel   = 1.0f;
         rp.dryLevel   = 0.0f;
         rp.width      = 1.0f;
@@ -1077,6 +1186,21 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         juce::dsp::AudioBlock<float> revBlock(revBuffer);
         juce::dsp::ProcessContextReplacing<float> revCtx(revBlock);
         reverb.process(revCtx);
+
+        if (useConv)
+        {
+            juce::dsp::AudioBlock<float> revConvBlock(revConvBuffer);
+            juce::dsp::ProcessContextReplacing<float> revConvCtx(revConvBlock);
+            revConvolution.process(revConvCtx);
+
+            for (int ch = 0; ch < numCh; ++ch)
+            {
+                auto* algo = revBuffer.getWritePointer(ch);
+                auto* conv = revConvBuffer.getReadPointer(ch);
+                for (int n = 0; n < numSamples; ++n)
+                    algo[n] = algo[n] * (1.0f - hybridPct) + conv[n] * hybridPct;
+            }
+        }
 
         // Wet-only tone shaping — a genuine user-facing filter pair on the
         // tail, separate from the reverb's own internal room-size/damping
@@ -1219,6 +1343,8 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             float coef = rect > dlyDuckEnv ? attCoef : relCoef;
             dlyDuckEnv = coef * dlyDuckEnv + (1.0f - coef) * rect;
         }
+
+        dlyPanPhaseUI.store(dlyPanPhase, std::memory_order_relaxed);
 
         if (mixPct > 0.0005f)
         {
@@ -1462,6 +1588,13 @@ void XaLZaProcessor::getStateInformation(juce::MemoryBlock& destData)
     for (int i = 0; i < kNumSlots; ++i)
         orderStr << chainOrder[(size_t) i].load(std::memory_order_relaxed) << (i + 1 < kNumSlots ? "," : "");
     xml->setAttribute("xalzaChainOrder", orderStr);
+    // Reverb's loaded impulse response: the audio itself isn't stored (an
+    // arbitrary-length WAV embedded in every preset would bloat it hugely)
+    // — just the absolute path, re-decoded on reload if the file's still
+    // there. Missing/moved files just leave Hybrid with nothing to blend
+    // toward, same as never having loaded one.
+    if (currentIrFile.existsAsFile())
+        xml->setAttribute("xalzaRevIrPath", currentIrFile.getFullPathName());
     copyXmlToBinary(*xml, destData);
 }
 
@@ -1511,6 +1644,17 @@ void XaLZaProcessor::setStateInformation(const void* data, int sizeInBytes)
             }
             for (int i = 0; i < kNumSlots; ++i)
                 chainOrder[(size_t) i].store(valid ? loaded[(size_t) i] : i, std::memory_order_relaxed);
+        }
+
+        // Reverb's loaded impulse response: re-decode from the saved path
+        // if it's still there. Real disk I/O, but setStateInformation is
+        // already a message-thread, load-time-only call — same cost
+        // class as everything else happening in this function.
+        if (xml->hasAttribute("xalzaRevIrPath"))
+        {
+            juce::File irFile(xml->getStringAttribute("xalzaRevIrPath"));
+            if (irFile.existsAsFile())
+                loadImpulseResponseFile(irFile);
         }
 
         apvts.replaceState(juce::ValueTree::fromXml(*xml));

@@ -124,6 +124,10 @@ namespace XID
     // room-size/damping model.
     static const juce::String RevWetHpf        = "RevWetHpf";
     static const juce::String RevWetLpf        = "RevWetLpf";
+    // Independent damping trim (offset on top of the Decay-derived value)
+    // and the Algorithmic<->Convolution hybrid blend — see runRev.
+    static const juce::String RevDamping       = "RevDamping";
+    static const juce::String RevHybrid        = "RevHybrid";
 
     static const juce::String DlyMacro       = "DlyMacro";
     static const juce::String DlyTime        = "DlyTime";
@@ -307,6 +311,16 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     add(XID::RevDuckRelease, "Rev Duck Release", 20.0f, 800.0f, 220.0f);
     add(XID::RevWetHpf, "Rev Wet HPF", 20.0f, 1000.0f, 150.0f);
     add(XID::RevWetLpf, "Rev Wet LPF", 1000.0f, 18000.0f, 12000.0f);
+    // Damping trim: a genuine independent offset on top of the existing
+    // Decay-derived damping formula, centred at 50 = no change from the
+    // old behaviour (so old sessions/defaults sound identical), giving
+    // real extra control either side of that.
+    add(XID::RevDamping, "Rev Damping Trim", 0.0f, 100.0f, 50.0f);
+    // Hybrid blend: 0 = pure algorithmic (juce::dsp::Reverb) as before,
+    // 100 = pure loaded-impulse convolution; in between genuinely mixes
+    // both engines' wet signal. Defaults to 0 so nothing changes for
+    // anyone until they load an IR and turn this up.
+    add(XID::RevHybrid, "Rev Hybrid (IR Blend)", 0.0f, 100.0f, 0.0f);
 
     add(XID::DlyMacro, "Dly Intensity", 0.0f, 100.0f, 0.0f);
     add(XID::DlyTime, "Dly Time", 20.0f, 1000.0f, 250.0f);

@@ -80,16 +80,25 @@ private:
 class LedMeter : public juce::Component
 {
 public:
-    void setDb(float dbL, float dbR)
+    // rmsDbL/rmsDbR: the processor's real mean-square (RMS) reading for
+    // this same tap — a genuinely different measurement from the peak
+    // ballistics above (see XaLZaProcessor::updateMeter), not a derived
+    // or smoothed copy of the peak value. Drawn as a thin marker line
+    // across the LED column, the same "Peak + RMS together" pairing the
+    // iZotope Insight Levels reference this whole meters pass was built
+    // from shows.
+    void setDb(float dbL, float dbR, float rmsDbL, float rmsDbR)
     {
         updateChannel(dbL, heldL, holdFramesLeftL, clipLatchFramesLeftL);
         updateChannel(dbR, heldR, holdFramesLeftR, clipLatchFramesLeftR);
 
         if (std::abs(dbL - lastDbL) > 0.05f || std::abs(dbR - lastDbR) > 0.05f
-            || std::abs(heldL - lastHeldL) > 0.05f || std::abs(heldR - lastHeldR) > 0.05f)
+            || std::abs(heldL - lastHeldL) > 0.05f || std::abs(heldR - lastHeldR) > 0.05f
+            || std::abs(rmsDbL - lastRmsL) > 0.05f || std::abs(rmsDbR - lastRmsR) > 0.05f)
         {
             lastDbL = dbL; lastDbR = dbR;
             lastHeldL = heldL; lastHeldR = heldR;
+            lastRmsL = rmsDbL; lastRmsR = rmsDbR;
             repaint();
         }
     }
@@ -135,14 +144,15 @@ private:
         float colW = (full.getWidth() - gap) * 0.5f;
         auto colL = full.removeFromLeft(colW);
         full.removeFromLeft(gap);
-        drawColumn(g, colL, lastDbL, lastHeldL, clipLatchFramesLeftL > 0);
-        drawColumn(g, full, lastDbR, lastHeldR, clipLatchFramesLeftR > 0);
+        drawColumn(g, colL, lastDbL, lastHeldL, clipLatchFramesLeftL > 0, lastRmsL);
+        drawColumn(g, full, lastDbR, lastHeldR, clipLatchFramesLeftR > 0, lastRmsR);
     }
 
-    static void drawColumn(juce::Graphics& g, juce::Rectangle<float> col, float db, float heldDb, bool clipped)
+    static void drawColumn(juce::Graphics& g, juce::Rectangle<float> col, float db, float heldDb, bool clipped, float rmsDb)
     {
         constexpr int numSeg = 12;
         constexpr float minDb = -50.0f, maxDb = 0.0f;
+        auto colFull = col;   // the loop below consumes `col` bottom-up; keep the original bounds for the RMS line
         float t = juce::jlimit(0.0f, 1.0f, (db - minDb) / (maxDb - minDb));
         int lit = (int) std::round(t * (float) numSeg);
         float tHeld = juce::jlimit(0.0f, 1.0f, (heldDb - minDb) / (maxDb - minDb));
@@ -173,11 +183,24 @@ private:
             g.setColour(c);
             g.fillRect(seg);
         }
+
+        // RMS marker: a thin line across the column at the real mean-
+        // square level — the "how loud does this actually sound" reading
+        // sitting underneath the peak segments' "what's the instantaneous
+        // maximum" one, the same Peak+RMS pairing Insight's Levels panel
+        // shows. Drawn last so it's never hidden behind a lit segment.
+        float tRms = juce::jlimit(0.0f, 1.0f, (rmsDb - minDb) / (maxDb - minDb));
+        float rmsY = colFull.getBottom() - tRms * colFull.getHeight();
+        // Teal, not the peak-hold marker's white — a thin line reads as a
+        // distinct "average level" indicator rather than a second peak cap.
+        g.setColour(XaLZaColour::accent2.withAlpha(0.95f));
+        g.fillRect(juce::Rectangle<float>(colFull.getX(), rmsY - 0.6f, colFull.getWidth(), 1.2f));
     }
 
     float lastDbL = -100.0f, lastDbR = -100.0f;
     float heldL = -100.0f, heldR = -100.0f;
     float lastHeldL = -100.0f, lastHeldR = -100.0f;
+    float lastRmsL = -100.0f, lastRmsR = -100.0f;
     int holdFramesLeftL = 0, holdFramesLeftR = 0;
     int clipLatchFramesLeftL = 0, clipLatchFramesLeftR = 0;
 };
@@ -386,6 +409,55 @@ private:
 
     std::vector<std::pair<float, float>> points;
     juce::Image trail;
+};
+
+/** Real stereo phase-correlation meter, the natural numeric companion to
+    the Goniometer's scatter plot — every pro metering suite pairs the
+    two (this session's own iZotope Insight reference included, under
+    "Sound Field"), but this plugin never had one. Computed live in the
+    editor as the standard Pearson correlation coefficient over the exact
+    same decimated post-chain L/R samples the Goniometer already reads
+    (proc.scopeSampleL/R): +1 = perfectly in-phase/mono-safe, 0 = wide,
+    uncorrelated stereo, -1 = out-of-phase (would cancel toward silence
+    summed to mono) — a genuine measurement, not a decorative needle. */
+class CorrelationMeterView : public juce::Component
+{
+public:
+    void setCorrelation(float c) { corr = juce::jlimit(-1.0f, 1.0f, c); repaint(); }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto full = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(full);
+        g.setColour(XaLZaColour::border);
+        g.drawRect(full, 1.0f);
+
+        auto bar = full.reduced(3.0f, 3.0f);
+        float midX = bar.getCentreX();
+
+        auto fillC = corr >= 0.0f ? XaLZaColour::accent2 : XaLZaColour::danger;
+        float x = midX + corr * bar.getWidth() * 0.5f;
+        g.setColour(fillC.withAlpha(0.5f));
+        g.fillRect(juce::Rectangle<float>(juce::jmin(midX, x), bar.getY(),
+                                           std::abs(x - midX), bar.getHeight()));
+
+        g.setColour(XaLZaColour::borderSoft);
+        g.drawLine(midX, bar.getY(), midX, bar.getBottom(), 1.0f);
+        g.setColour(fillC);
+        g.fillRoundedRectangle(x - 1.4f, bar.getY(), 2.8f, bar.getHeight(), 1.2f);
+
+        g.setFont(juce::Font(juce::FontOptions(7.5f).withStyle("Bold")));
+        g.setColour(XaLZaColour::textMuted);
+        auto left12 = full.removeFromLeft(12.0f);
+        auto right12 = full.removeFromRight(12.0f);
+        g.drawText("-1", left12, juce::Justification::centredLeft);
+        g.drawText("+1", right12, juce::Justification::centredRight);
+        g.drawText("CORR " + juce::String(corr, 2), full, juce::Justification::centred);
+    }
+
+    float corr = 0.0f;
 };
 
 /** Analog-style VU gauge (semicircular arc, ticks, needle) — matches the
@@ -1058,11 +1130,146 @@ private:
     bool hasB = false;
 };
 
-/** Composite Limiter-page view: a real "brickwall" oscilloscope of the
-    post-limiter waveform (the ceiling reads as a visibly flattened top),
-    plus a real (simplified ITU-R BS.1770) K-weighted LUFS numeric readout
-    with a scrolling history line underneath — matches the mockup's
-    "Brickwall Output" + "Loudness - LUFS" pairing for this page. */
+/** Limiter's brickwall scope. A plain oscilloscope shows the flattened
+    top but not WHY it's flat — this does the real per-sample comparison
+    runLim's own look-ahead brickwall is doing: any point within ~0.5dB of
+    the LIVE ceiling (the exact value the Ceiling knob is set to right
+    now) draws in the danger colour instead of the normal trace colour, so
+    the moments the limiter is actually clamping read as visibly distinct
+    from the moments it's just passing audio through untouched — plus a
+    real dashed reference line at the true ceiling level itself. */
+class BrickwallScope : public juce::Component
+{
+public:
+    static constexpr int numPoints = 256;
+
+    void setData(const float* trace, float ceilingDbIn)
+    {
+        std::copy(trace, trace + numPoints, wave);
+        ceilingDb = ceilingDbIn;
+        repaint();
+    }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto bnds = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(bnds);
+        g.setColour(XaLZaColour::borderSoft);
+        g.drawLine(bnds.getX(), bnds.getCentreY(), bnds.getRight(), bnds.getCentreY(), 0.6f);
+        g.setColour(XaLZaColour::border);
+        g.drawRect(bnds, 1.0f);
+
+        float ceilLin = juce::Decibels::decibelsToGain(ceilingDb);
+        float nearCeil = ceilLin * 0.94f;   // ~ -0.5dB below ceiling: "about to hit the wall"
+
+        float ceilY  = bnds.getCentreY() - juce::jlimit(0.0f, 1.0f, ceilLin) * bnds.getHeight() * 0.46f;
+        float floorY = bnds.getCentreY() + juce::jlimit(0.0f, 1.0f, ceilLin) * bnds.getHeight() * 0.46f;
+        juce::Path ceilLines;
+        ceilLines.startNewSubPath(bnds.getX(), ceilY);  ceilLines.lineTo(bnds.getRight(), ceilY);
+        ceilLines.startNewSubPath(bnds.getX(), floorY); ceilLines.lineTo(bnds.getRight(), floorY);
+        float dashLens[] = { 4.0f, 3.0f };
+        juce::Path dashed;
+        juce::PathStrokeType(1.0f).createDashedStroke(dashed, ceilLines, dashLens, 2);
+        g.setColour(XaLZaColour::danger.withAlpha(0.4f));
+        g.strokePath(dashed, juce::PathStrokeType(1.0f));
+
+        for (int i = 0; i < numPoints - 1; ++i)
+        {
+            float x0 = bnds.getX() + bnds.getWidth() * (float) i / (float) (numPoints - 1);
+            float x1 = bnds.getX() + bnds.getWidth() * (float) (i + 1) / (float) (numPoints - 1);
+            float y0 = bnds.getCentreY() - juce::jlimit(-1.0f, 1.0f, wave[i])     * bnds.getHeight() * 0.46f;
+            float y1 = bnds.getCentreY() - juce::jlimit(-1.0f, 1.0f, wave[i + 1]) * bnds.getHeight() * 0.46f;
+            bool hot = std::abs(wave[i]) >= nearCeil || std::abs(wave[i + 1]) >= nearCeil;
+            g.setColour(hot ? XaLZaColour::danger : XaLZaColour::accent2);
+            g.drawLine(x0, y0, x1, y1, hot ? 2.0f : 1.4f);
+        }
+    }
+
+    float wave[numPoints] = {};
+    float ceilingDb = 0.0f;
+};
+
+/** Limiter's loudness history: a filled-area LUFS trace (not a bare line)
+    with the common streaming normalization target zone (roughly -16 to
+    -9 LUFS across Spotify/YouTube/Apple Music) shaded in as a real fixed
+    reference band, so where the mix sits relative to typical streaming
+    targets reads at a glance rather than only as a number. The pushed
+    value is the processor's own real (simplified ITU-R BS.1770
+    K-weighted) momentary loudness — same figure the numeric readout
+    above shows, just with 5 seconds of genuine history behind it. */
+class LoudnessHistoryView : public juce::Component
+{
+public:
+    LoudnessHistoryView() { hist.fill(std::numeric_limits<float>::quiet_NaN()); }
+
+    void push(float lufsDb)
+    {
+        hist[(size_t) writePos] = lufsDb;
+        writePos = (writePos + 1) % histLen;
+        repaint();
+    }
+
+private:
+    static float mapY(juce::Rectangle<float> b, float lufsDb)
+    {
+        float norm = juce::jlimit(0.0f, 1.0f, (lufsDb + 36.0f) / 36.0f);   // -36..0 LUFS window
+        return b.getBottom() - norm * b.getHeight();
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(b);
+
+        float zoneTop = mapY(b, -9.0f), zoneBot = mapY(b, -16.0f);
+        g.setColour(XaLZaColour::accent.withAlpha(0.10f));
+        g.fillRect(juce::Rectangle<float>(b.getX(), zoneTop, b.getWidth(), zoneBot - zoneTop));
+        g.setColour(XaLZaColour::accent.withAlpha(0.28f));
+        g.drawLine(b.getX(), zoneTop, b.getRight(), zoneTop, 0.6f);
+        g.drawLine(b.getX(), zoneBot, b.getRight(), zoneBot, 0.6f);
+
+        g.setColour(XaLZaColour::border);
+        g.drawRect(b, 1.0f);
+
+        juce::Path fill, line;
+        bool started = false;
+        for (int i = 0; i < histLen; ++i)
+        {
+            int idx = (writePos + i) % histLen;
+            float v = hist[(size_t) idx];
+            if (std::isnan(v)) continue;
+            float x = b.getX() + b.getWidth() * (float) i / (float) (histLen - 1);
+            float y = mapY(b, v);
+            if (!started) { fill.startNewSubPath(x, b.getBottom()); fill.lineTo(x, y); line.startNewSubPath(x, y); started = true; }
+            else { fill.lineTo(x, y); line.lineTo(x, y); }
+        }
+        if (started)
+        {
+            fill.lineTo(b.getRight(), b.getBottom());
+            fill.closeSubPath();
+            g.setColour(XaLZaColour::accent2.withAlpha(0.18f));
+            g.fillPath(fill);
+            g.setColour(XaLZaColour::accent2);
+            g.strokePath(line, juce::PathStrokeType(1.6f));
+        }
+
+        g.setFont(juce::Font(juce::FontOptions(8.0f)));
+        g.setColour(XaLZaColour::textMuted);
+        g.drawText("TARGET -16..-9 LUFS", b.reduced(3.0f), juce::Justification::topLeft);
+    }
+
+    static constexpr int histLen = 150;   // 5 seconds of history at 30Hz
+    std::array<float, (size_t) histLen> hist;
+    int writePos = 0;
+};
+
+/** Composite Limiter-page view: the brickwall scope above, the loudness
+    history below — matches the mockup's "Brickwall Output" + "Loudness -
+    LUFS" pairing for this page, now with both halves genuinely specific
+    to what a limiter/loudness readout actually needs to show. */
 class LimiterView : public juce::Component
 {
 public:
@@ -1080,11 +1287,10 @@ public:
         truePeakLabel.setColour(juce::Label::textColourId, XaLZaColour::textHi);
     }
 
-    void update(const float* waveform, float lufsDb, float truePeakDb)
+    void update(const float* waveform, float lufsDb, float truePeakDb, float ceilingDb)
     {
-        scope.setSamples(waveform);
-        float norm = juce::jlimit(0.0f, 1.0f, (lufsDb + 36.0f) / 36.0f);   // -36..0 LUFS window
-        lufsGraph.push(norm);
+        scope.setData(waveform, ceilingDb);
+        lufsGraph.push(lufsDb);
         lufsLabel.setText(lufsDb <= -69.5f ? juce::String("LUFS  -inf")
                                             : ("LUFS  " + juce::String(lufsDb, 1)),
                            juce::dontSendNotification);
@@ -1106,8 +1312,8 @@ private:
         lufsGraph.setBounds(b);
     }
 
-    WaveformScope scope;
-    EnvelopeGraph lufsGraph;
+    BrickwallScope scope;
+    LoudnessHistoryView lufsGraph;
     juce::Label truePeakLabel;
     juce::Label lufsLabel;
 };
@@ -1125,9 +1331,9 @@ class LimiterAnalysisView : public juce::Component
 public:
     LimiterAnalysisView() { addAndMakeVisible(limView); addAndMakeVisible(spectrogram); }
 
-    void update(const float* waveform, float lufsDb, float truePeakDb)
+    void update(const float* waveform, float lufsDb, float truePeakDb, float ceilingDb)
     {
-        limView.update(waveform, lufsDb, truePeakDb);
+        limView.update(waveform, lufsDb, truePeakDb, ceilingDb);
     }
     void setSampleRate(double sr) { spectrogram.setSampleRate(sr); }
     void pushSpectrogramBlock(const float* fftWindow) { spectrogram.pushBlock(fftWindow); }
@@ -2018,14 +2224,97 @@ private:
     float preMs = 0.0f, mainMs = 250.0f, fbPct = 0.3f;
 };
 
-/** Composite Delay page view: the existing post-delay echo waveform scope
-    alongside the real Tap Timeline above. */
+/** Delay's ping-pong bounce path. A plain oscilloscope never shows the
+    single thing this module's DSP is actually built around — see runDly's
+    own comment, "ping-pong with spread, duck, and an auto-pan LFO" — since
+    the auto-pan only ever shows up as a stereo balance shift, invisible in
+    a mono trace. This draws the real post-delay echo waveform as two
+    rails (L on top, R below), each weighted every frame by the EXACT same
+    panL/panR law runDly applies per sample (0.5 -/+ 0.5*sin(phase)*0.6),
+    so the rail that's momentarily louder visibly swells while the other
+    thins out — plus a bouncing ball along the bottom whose X position is
+    that same live phase read straight from the processor
+    (getDlyPanPhase(), a genuine per-block value), so the ball's swing is
+    always in exact sync with what's actually panning the repeats right
+    now, not a separately clocked animation guessing at the LFO rate. */
+class PingPongBounceView : public juce::Component
+{
+public:
+    static constexpr int numPoints = 256;
+
+    void setWaveform(const float* trace) { std::copy(trace, trace + numPoints, wave); repaint(); }
+    void setPhase(float phaseRadians) { phase = phaseRadians; repaint(); }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto full = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(full);
+        g.setColour(XaLZaColour::border);
+        g.drawRect(full, 1.0f);
+
+        auto b = full.reduced(1.0f);
+        auto ballRow = b.removeFromBottom(14.0f);
+        b.removeFromBottom(2.0f);
+        auto topRail = b.removeFromTop(b.getHeight() * 0.5f);
+        auto botRail = b;
+
+        g.setColour(XaLZaColour::borderSoft);
+        g.drawLine(topRail.getX(), topRail.getCentreY(), topRail.getRight(), topRail.getCentreY(), 0.4f);
+        g.drawLine(botRail.getX(), botRail.getCentreY(), botRail.getRight(), botRail.getCentreY(), 0.4f);
+        g.drawLine(b.getX(), topRail.getBottom(), b.getRight(), topRail.getBottom(), 0.5f);
+
+        // Same per-sample pan law runDly applies, evaluated at the live
+        // phase so the rail weighting visibly breathes together with the
+        // ball below — a genuine reflection of the current auto-pan state.
+        float panL = 0.5f - 0.5f * std::sin(phase) * 0.6f;
+        float panR = 0.5f + 0.5f * std::sin(phase) * 0.6f;
+
+        auto drawRail = [&] (juce::Rectangle<float> rail, float weight, juce::Colour c)
+        {
+            juce::Path p;
+            for (int i = 0; i < numPoints; ++i)
+            {
+                float x = rail.getX() + rail.getWidth() * (float) i / (float) (numPoints - 1);
+                float y = rail.getCentreY() - juce::jlimit(-1.0f, 1.0f, wave[i]) * weight * rail.getHeight() * 0.46f;
+                if (i == 0) p.startNewSubPath(x, y); else p.lineTo(x, y);
+            }
+            g.setColour(c.withAlpha(juce::jlimit(0.28f, 1.0f, 0.3f + weight * 0.7f)));
+            g.strokePath(p, juce::PathStrokeType(1.2f + weight * 0.7f));
+        };
+
+        drawRail(topRail, panL, XaLZaColour::accent2);
+        drawRail(botRail, panR, XaLZaColour::accent);
+
+        g.setFont(juce::Font(juce::FontOptions(8.0f)));
+        g.setColour(XaLZaColour::textMuted);
+        g.drawText("L", topRail.reduced(3.0f, 1.0f), juce::Justification::topLeft);
+        g.drawText("R", botRail.reduced(3.0f, 1.0f), juce::Justification::bottomLeft);
+
+        g.setColour(XaLZaColour::borderSoft);
+        g.drawLine(ballRow.getX(), ballRow.getCentreY(), ballRow.getRight(), ballRow.getCentreY(), 1.0f);
+        float ballX = ballRow.getX() + ballRow.getWidth() * (0.5f + 0.5f * std::sin(phase) * 0.6f);
+        auto ballColour = XaLZaColour::accent2.interpolatedWith(XaLZaColour::accent, 0.5f + 0.5f * std::sin(phase));
+        g.setColour(ballColour);
+        g.fillEllipse(ballX - 4.0f, ballRow.getCentreY() - 4.0f, 8.0f, 8.0f);
+        g.setColour(ballColour.withAlpha(0.35f));
+        g.drawEllipse(ballX - 6.0f, ballRow.getCentreY() - 6.0f, 12.0f, 12.0f, 1.2f);
+    }
+
+    float wave[numPoints] = {};
+    float phase = 0.0f;
+};
+
+/** Composite Delay page view: the ping-pong bounce path above alongside
+    the real Tap Timeline. */
 class DelayView : public juce::Component
 {
 public:
-    DelayView() { addAndMakeVisible(scope); addAndMakeVisible(timeline); }
+    DelayView() { addAndMakeVisible(bounce); addAndMakeVisible(timeline); }
 
-    void setSamples(const float* s) { scope.setSamples(s); }
+    void setSamples(const float* s) { bounce.setWaveform(s); }
+    void setPanPhase(float phaseRadians) { bounce.setPhase(phaseRadians); }
     void setTapData(float preDelayMs, float timeMs, float feedbackPct) { timeline.setData(preDelayMs, timeMs, feedbackPct); }
 
 private:
@@ -2034,12 +2323,119 @@ private:
         auto b = getLocalBounds();
         auto left = b.removeFromLeft(b.getWidth() / 2);
         left.removeFromRight(4);
-        scope.setBounds(left);
+        bounce.setBounds(left);
         timeline.setBounds(b);
     }
 
-    WaveformScope scope;
+    PingPongBounceView bounce;
     TapTimelineView timeline;
+};
+
+/** MACROS-page signal-chain flow strip — a whole-plugin overview that
+    didn't exist anywhere before now: the 12 modules drawn as connected
+    nodes in their REAL live processing order (XaLZaProcessor::
+    getChainSlotAt — the exact order moveModule()/the Chain Order popup
+    actually runs processBlock() in, so a reorder shows up here
+    immediately, not the fixed original sequence). Each node's glow
+    brightness is that module's own real post-processing output level
+    (proc.getMeterDbL/R at tapForSlot(slot) — the identical MeterTap value
+    that module's own page IN/OUT bars read), and a bypassed module draws
+    hollow/dim from its own real bypass parameter — nothing here is
+    inferred or animated. Clicking a node jumps straight to that module's
+    page, the same "glance at the LED ladder, click the stage you care
+    about" workflow a hardware channel strip gives you. */
+class SignalChainFlowView : public juce::Component
+{
+public:
+    static constexpr int kNumSlots = 12;
+
+    struct NodeState { bool bypassed = false; float levelDb = -100.0f; };
+
+    std::function<void(int)> onNodeClicked;   // called with the tab index to jump to
+
+    void setTabIndices(const int* tabIdx) { std::copy(tabIdx, tabIdx + kNumSlots, tabIndexBySlot); }
+
+    void setChainOrder(const int* slotOrder) { std::copy(slotOrder, slotOrder + kNumSlots, order); repaint(); }
+
+    void setNodeState(int slotId, bool bypassed, float levelDb)
+    {
+        auto s = (size_t) juce::jlimit(0, kNumSlots - 1, slotId);
+        nodes[s] = { bypassed, levelDb };
+        repaint();
+    }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(b);
+        g.setColour(XaLZaColour::border);
+        g.drawRect(b, 1.0f);
+
+        auto area = b.reduced(8.0f, 3.0f);
+        float nodeW = area.getWidth() / (float) kNumSlots;
+        float cy = area.getY() + 11.0f;
+        float r = 7.5f;
+
+        for (int i = 0; i < kNumSlots - 1; ++i)
+        {
+            float x0 = area.getX() + nodeW * (i + 0.5f) + r + 2.0f;
+            float x1 = area.getX() + nodeW * (i + 1.5f) - r - 2.0f;
+            g.setColour(XaLZaColour::borderSoft);
+            g.drawLine(x0, cy, x1, cy, 1.2f);
+        }
+
+        for (int i = 0; i < kNumSlots; ++i)
+        {
+            int slotId = order[i];
+            auto& n = nodes[(size_t) juce::jlimit(0, kNumSlots - 1, slotId)];
+            float cx = area.getX() + nodeW * (i + 0.5f);
+            float norm = juce::jlimit(0.0f, 1.0f, (n.levelDb + 60.0f) / 60.0f);
+
+            if (n.bypassed)
+            {
+                g.setColour(XaLZaColour::textMuted.withAlpha(0.55f));
+                g.drawEllipse(cx - r, cy - r, r * 2.0f, r * 2.0f, 1.3f);
+            }
+            else
+            {
+                auto core = XaLZaColour::accent2.interpolatedWith(XaLZaColour::accent, norm * 0.6f);
+                g.setColour(core.withAlpha(0.10f + norm * 0.25f));
+                g.fillEllipse(cx - r * 1.9f, cy - r * 1.9f, r * 3.8f, r * 3.8f);
+                g.setColour(core);
+                g.fillEllipse(cx - r, cy - r, r * 2.0f, r * 2.0f);
+            }
+
+            g.setFont(juce::Font(juce::FontOptions(7.2f).withStyle("Bold")));
+            g.setColour(n.bypassed ? XaLZaColour::textMuted : XaLZaColour::textHi);
+            g.drawText(shortCode(slotId), juce::Rectangle<float>(cx - nodeW * 0.5f, cy + r + 3.0f, nodeW, 11.0f),
+                        juce::Justification::centred);
+        }
+    }
+
+    void mouseUp(const juce::MouseEvent& e) override
+    {
+        if (onNodeClicked == nullptr)
+            return;
+        auto area = getLocalBounds().toFloat().reduced(8.0f, 3.0f);
+        float nodeW = area.getWidth() / (float) kNumSlots;
+        int i = (int) ((e.position.x - area.getX()) / juce::jmax(1.0f, nodeW));
+        i = juce::jlimit(0, kNumSlots - 1, i);
+        int slotId = order[i];
+        onNodeClicked(tabIndexBySlot[(size_t) juce::jlimit(0, kNumSlots - 1, slotId)]);
+    }
+
+    static const char* shortCode(int slotId)
+    {
+        static const char* codes[kNumSlots] = { "PRE", "GATE", "ESS", "COMP", "OPTO", "EQ",
+                                                  "RES", "SAT", "DBL", "REV", "DLY", "LIM" };
+        return codes[(size_t) juce::jlimit(0, kNumSlots - 1, slotId)];
+    }
+
+    int order[kNumSlots] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+    int tabIndexBySlot[kNumSlots] = {};
+    std::array<NodeState, kNumSlots> nodes;
 };
 
 /** Chain-order popup content: 12 rows (current processing order, top =
@@ -2237,6 +2633,9 @@ private:
     juce::Label masterDbIn, masterDbOut;
     Goniometer goniometer;
     juce::Label goniometerCap;
+    // Real Pearson-correlation phase meter, computed from the same L/R
+    // samples the Goniometer above already reads — see CorrelationMeterView.
+    CorrelationMeterView correlationMeter;
 
     // Momentary LUFS readout on the Master panel (matches the mockup's
     // "LOUDNESS -70.0 LUFS (momentary)" line) — reuses the same real
@@ -2368,6 +2767,22 @@ private:
     DuckingCurveView revDuckCurve;
     CardFrame revDuckFrame;
 
+    // Hybrid convolution: load a real impulse response file and blend it
+    // with the algorithmic reverb via the Hybrid knob (pageKnobs[revTabIndex][9]).
+    // revIrNameLabel shows the loaded file's name (or "NO IR LOADED"); the
+    // decoded IR itself lives in the processor (see
+    // XaLZaProcessor::loadImpulseResponseFile) — loadedIrMono here is a
+    // SEPARATE, editor-owned decode of the same file, kept short (a few
+    // seconds) purely so the Reverb page's decay heatmap can show the
+    // real loaded impulse instead of the algorithmic-engine probe once
+    // Hybrid > 0, without needing to read the DSP engine's internal state
+    // back out (juce::dsp::Convolution doesn't expose that).
+    juce::TextButton revLoadIrBtn { "LOAD IR" };
+    juce::Label revIrNameLabel;
+    std::vector<float> loadedIrMono;
+    double loadedIrSr = 0.0;
+    void loadImpulseResponseFile();
+
     // Resonance's Style and Bands seg-groups — real filter-topology
     // changes (Q/detect-width scaling and parallel-notch count), see
     // runRes.
@@ -2413,6 +2828,13 @@ private:
     // there's one place to see the whole chain's on/off state at a glance
     // instead of having to visit every page.
     juce::Label bypassSummaryLabel;
+
+    // Macros-page signal-chain flow strip — whole-plugin overview of all
+    // 12 modules in their real live order, each glowing with its own
+    // real output level; click a node to jump to that page. See
+    // SignalChainFlowView's own comment for what's genuinely measured.
+    SignalChainFlowView chainFlow;
+    juce::Label chainFlowCap;
 
     // Footer brand line, now a real clickable control (was static painted
     // text) — shows the actual build version and opens a small About box

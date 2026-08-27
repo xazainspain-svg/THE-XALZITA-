@@ -1,0 +1,13 @@
+Fonts embedded in The XaLZa
+============================
+
+- Space Grotesk (Regular, SemiBold) — designed by Florian Karsten
+- IBM Plex Mono (Regular, Medium) — designed by IBM / Bold Monday
+
+Both are licensed under the SIL Open Font License, Version 1.1
+(https://openfontlicense.org). The OFL permits embedding these fonts in a
+software binary (including a commercial VST3 plugin) and redistributing
+them as part of that software, at no cost and without additional
+permission, provided the fonts themselves are not sold on their own.
+
+Full license text: https://openfontlicense.org

@@ -477,6 +477,10 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     addPage("REV",  { { XID::RevSize, "Size" }, { XID::RevDecay, "Decay" }, { XID::RevPreDelay, "PreDelay" }, { XID::RevMix, "Mix" } });
     addPage("REV",  { { XID::RevDuck, "Duck" }, { XID::RevDuckRelease, "DuckRel" } });
     addPage("REV",  { { XID::RevWetHpf, "Wet HPF" }, { XID::RevWetLpf, "Wet LPF" } });
+    // Damping trim + Hybrid IR blend — indices 8/9, placed beside the
+    // Load IR button in the custom REV layout below (see currentTab ==
+    // revTabIndex in resized()).
+    addPage("REV",  { { XID::RevDamping, "Damping" }, { XID::RevHybrid, "Hybrid" } });
     // Time is a real seg-group (was the 9th knob crowding this page badly
     // enough to clip its own neighbours' labels) — fixed ms presets when
     // not synced to host tempo.
@@ -563,6 +567,7 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     addChildComponent(masterMeterIn);
     addChildComponent(masterMeterOut);
     addChildComponent(goniometer);
+    addChildComponent(correlationMeter);
 
     // Held-peak numbers under the master bars — same mono-font readout
     // every per-module meter already has, just missing here before.
@@ -587,6 +592,20 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     bypassSummaryLabel.setColour(juce::Label::textColourId, XaLZaColour::textMuted);
     bypassSummaryLabel.setText("ALL MODULES ACTIVE", juce::dontSendNotification);
     addChildComponent(bypassSummaryLabel);
+
+    // Signal-chain flow strip: whole-plugin overview, click a node to jump
+    // straight to that module's page.
+    setupCap(chainFlowCap, "SIGNAL CHAIN (CLICK TO JUMP)");
+    addChildComponent(chainFlow);
+    addChildComponent(chainFlowCap);
+    {
+        const int tabIdxBySlot[XaLZaProcessor::kNumSlots] = {
+            preTabIndex, gateTabIndex, essTabIndex, compTabIndex, optoTabIndex, eqTabIndex,
+            resTabIndex, satTabIndex, dblTabIndex, revTabIndex, dlyTabIndex, limTabIndex
+        };
+        chainFlow.setTabIndices(tabIdxBySlot);
+    }
+    chainFlow.onNodeClicked = [this] (int tabIdx) { showPage(tabIdx); };
 
     // Footer brand/About control — styled to read as plain label text
     // (no border/fill) but genuinely clickable, showing the real build
@@ -638,7 +657,7 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     setupVizLabel(satScopeTitle,      "SATURATION CURVE + HARMONIC CONTENT");
     setupVizLabel(dblGoniometerTitle, "STEREO FIELD + PER-VOICE (POST-DOUBLER)");
     setupVizLabel(revDecayTitle,      "SPECTRAL DECAY HEATMAP + IMPULSE RESPONSE");
-    setupVizLabel(dlyScopeTitle,      "ECHO WAVEFORM + TAP TIMELINE (POST-DELAY)");
+    setupVizLabel(dlyScopeTitle,      "PING-PONG BOUNCE + TAP TIMELINE (POST-DELAY)");
     setupVizLabel(limViewTitle,       "BRICKWALL OUTPUT + SPECTROGRAM");
     addChildComponent(preView);
     addChildComponent(gateView);
@@ -654,6 +673,15 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     addChildComponent(revDuckCurve);
     addChildComponent(revDuckFrame);
     revDuckFrame.toBack();
+
+    revLoadIrBtn.setTooltip("Load a real impulse response (WAV/AIFF/FLAC/OGG) for the Hybrid convolution engine");
+    revLoadIrBtn.onClick = [this] { loadImpulseResponseFile(); };
+    addChildComponent(revLoadIrBtn);
+    revIrNameLabel.setText("NO IR LOADED", juce::dontSendNotification);
+    revIrNameLabel.setJustificationType(juce::Justification::centredLeft);
+    revIrNameLabel.setFont(juce::Font(juce::FontOptions(9.5f)));
+    revIrNameLabel.setColour(juce::Label::textColourId, XaLZaColour::textMuted);
+    addChildComponent(revIrNameLabel);
     addChildComponent(dlyView);
     addChildComponent(limView);
     eqSpectrum.setSampleRate(proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0);
@@ -841,6 +869,57 @@ void XaLZaEditor::loadPresetFromFile()
     });
 }
 
+void XaLZaEditor::loadImpulseResponseFile()
+{
+    fileChooser = std::make_unique<juce::FileChooser>(
+        "Load Impulse Response", juce::File(), "*.wav;*.aiff;*.aif;*.flac;*.ogg");
+    fileChooser->launchAsync(juce::FileBrowserComponent::openMode, [this] (const juce::FileChooser& fc)
+    {
+        auto file = fc.getResult();
+        if (file == juce::File() || !file.existsAsFile())
+            return;
+
+        // The real DSP-side decode/load lives in the processor (message-
+        // thread call; the actual convolution engine update happens later
+        // on the audio thread — see loadImpulseResponseFile()'s comment
+        // in PluginProcessor.h). If that fails (unsupported/corrupt file)
+        // don't touch the heatmap preview either, so the two stay honest
+        // about what's actually loaded.
+        if (!proc.loadImpulseResponseFile(file))
+            return;
+
+        // Separate, short editor-side decode of the SAME file purely for
+        // the decay-heatmap preview below — capped to 4 real seconds
+        // (plenty for any vocal-chain reverb tail) so this stays cheap;
+        // the processor's own copy (used for the actual audio) has no
+        // such cap beyond the generous 30s sanity ceiling.
+        juce::AudioFormatManager fm;
+        fm.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> reader(fm.createReaderFor(file));
+        if (reader == nullptr)
+            return;
+
+        int vizLen = (int) juce::jmin((juce::int64) reader->lengthInSamples,
+                                       (juce::int64) (reader->sampleRate * 4.0));
+        if (vizLen <= 0)
+            return;
+
+        juce::AudioBuffer<float> irBuf((int) juce::jlimit((juce::int64) 1, (juce::int64) 2, (juce::int64) reader->numChannels), vizLen);
+        reader->read(&irBuf, 0, vizLen, 0, true, true);
+
+        loadedIrMono.assign((size_t) vizLen, 0.0f);
+        int nCh = irBuf.getNumChannels();
+        for (int n = 0; n < vizLen; ++n)
+        {
+            float sum = 0.0f;
+            for (int ch = 0; ch < nCh; ++ch)
+                sum += irBuf.getSample(ch, n);
+            loadedIrMono[(size_t) n] = sum / (float) nCh;
+        }
+        loadedIrSr = reader->sampleRate;
+    });
+}
+
 void XaLZaEditor::toggleSolo(const juce::String& bypassParamID)
 {
     static const std::array<juce::String, 12> allBypass = {
@@ -1004,8 +1083,11 @@ void XaLZaEditor::showPage(int index)
     masterDbOut.setVisible(onMacros);
     goniometer.setVisible(onMacros);
     goniometerCap.setVisible(onMacros);
+    correlationMeter.setVisible(onMacros);
     masterLoudnessLabel.setVisible(onMacros);
     bypassSummaryLabel.setVisible(onMacros);
+    chainFlow.setVisible(onMacros);
+    chainFlowCap.setVisible(onMacros);
 
     for (auto* mm : moduleMeterByTab)
         if (mm != nullptr)
@@ -1043,7 +1125,8 @@ void XaLZaEditor::showPage(int index)
     optoModeSeg->setVisible(currentTab == optoTabIndex);
     satCharSeg->setVisible(currentTab == satTabIndex);
     dblVoicesSeg->setVisible(currentTab == dblTabIndex);
-    for (auto* c : { (juce::Component*) &revDuckCardTitle, (juce::Component*) &revDuckCurve, (juce::Component*) &revDuckFrame })
+    for (auto* c : { (juce::Component*) &revDuckCardTitle, (juce::Component*) &revDuckCurve, (juce::Component*) &revDuckFrame,
+                      (juce::Component*) &revLoadIrBtn, (juce::Component*) &revIrNameLabel })
         c->setVisible(currentTab == revTabIndex);
     resStyleSeg->setVisible(currentTab == resTabIndex);
     resBandsSeg->setVisible(currentTab == resTabIndex);
@@ -1134,8 +1217,10 @@ void XaLZaEditor::timerCallback()
         l.setColour(juce::Label::textColourId, colourForDb(v));
     };
 
-    masterMeterIn.setDb(proc.getMeterDbL((int) XaLZaProcessor::TapIn), proc.getMeterDbR((int) XaLZaProcessor::TapIn));
-    masterMeterOut.setDb(proc.getMeterDbL((int) XaLZaProcessor::TapOut), proc.getMeterDbR((int) XaLZaProcessor::TapOut));
+    masterMeterIn.setDb(proc.getMeterDbL((int) XaLZaProcessor::TapIn), proc.getMeterDbR((int) XaLZaProcessor::TapIn),
+                         proc.getRmsDbL((int) XaLZaProcessor::TapIn), proc.getRmsDbR((int) XaLZaProcessor::TapIn));
+    masterMeterOut.setDb(proc.getMeterDbL((int) XaLZaProcessor::TapOut), proc.getMeterDbR((int) XaLZaProcessor::TapOut),
+                          proc.getRmsDbL((int) XaLZaProcessor::TapOut), proc.getRmsDbR((int) XaLZaProcessor::TapOut));
     updateDbLabel(masterDbIn, masterMeterIn);
     updateDbLabel(masterDbOut, masterMeterOut);
 
@@ -1188,8 +1273,8 @@ void XaLZaEditor::timerCallback()
         int liveTapIn = mm.slotId >= 0 ? proc.getPredecessorTap(mm.slotId) : mm.tapIn;
         float inL = proc.getMeterDbL(liveTapIn), inR = proc.getMeterDbR(liveTapIn);
         float outL = proc.getMeterDbL(mm.tapOut), outR = proc.getMeterDbR(mm.tapOut);
-        mm.meterIn.setDb(inL, inR);
-        mm.meterOut.setDb(outL, outR);
+        mm.meterIn.setDb(inL, inR, proc.getRmsDbL(liveTapIn), proc.getRmsDbR(liveTapIn));
+        mm.meterOut.setDb(outL, outR, proc.getRmsDbL(mm.tapOut), proc.getRmsDbR(mm.tapOut));
         updateDbLabel(mm.dbIn, mm.meterIn);
         updateDbLabel(mm.dbOut, mm.meterOut);
 
@@ -1234,6 +1319,24 @@ void XaLZaEditor::timerCallback()
                                     juce::dontSendNotification);
         bypassSummaryLabel.setColour(juce::Label::textColourId,
                                       bypassed.isEmpty() ? XaLZaColour::textMuted : XaLZaColour::danger);
+
+        // Signal-chain flow strip: real live chain order plus each node's
+        // real bypass state and real post-processing output level (same
+        // MeterTap that module's own page IN/OUT bars read).
+        {
+            int order[XaLZaProcessor::kNumSlots];
+            for (int pos = 0; pos < XaLZaProcessor::kNumSlots; ++pos)
+                order[pos] = proc.getChainSlotAt(pos);
+            chainFlow.setChainOrder(order);
+
+            for (int slot = 0; slot < XaLZaProcessor::kNumSlots; ++slot)
+            {
+                bool slotBypassed = proc.apvts.getRawParameterValue(bypassIds[(size_t) slot].first)->load() > 0.5f;
+                int tap = XaLZaProcessor::tapForSlot(slot);
+                float levelDb = juce::jmax(proc.getMeterDbL(tap), proc.getMeterDbR(tap));
+                chainFlow.setNodeState(slot, slotBypassed, levelDb);
+            }
+        }
 
         // MIDI Learn state, reflected as each macro knob's tooltip (right-
         // click shows the actual Learn/Clear menu — this is just the
@@ -1404,59 +1507,95 @@ void XaLZaEditor::timerCallback()
         float duckRelMs = proc.apvts.getRawParameterValue(XID::RevDuckRelease)->load();
         revDuckCurve.setCurve(duckPct, duckRelMs);
 
+        float hybridPct = proc.apvts.getRawParameterValue(XID::RevHybrid)->load() / 100.0f;
+        bool showRealIr = proc.isIrLoaded() && hybridPct > 0.0005f && !loadedIrMono.empty();
+        revIrNameLabel.setText(proc.isIrLoaded() ? proc.getIrFileName() : juce::String("NO IR LOADED"),
+                                juce::dontSendNotification);
+        revIrNameLabel.setColour(juce::Label::textColourId,
+                                  showRealIr ? XaLZaColour::accent2 : XaLZaColour::textMuted);
+
         // Recompute the Impulse Response a few times a second (not every
         // frame — it's message-thread work, not audio-thread, but no need
         // to redo it 30x/sec for a control that changes slowly).
         if (++irProbeCounter >= 10)
         {
             irProbeCounter = 0;
-            double srIr = proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0;
-            int lenSamples = (int) (srIr * 1.6);
-            if (irProbeBuffer.getNumSamples() != lenSamples)
-                irProbeBuffer.setSize(1, lenSamples, false, false, true);
-            irProbeBuffer.clear();
-            irProbeBuffer.setSample(0, 0, 1.0f);
 
-            juce::dsp::ProcessSpec probeSpec { srIr, (juce::uint32) lenSamples, 1u };
-            irProbeReverb.prepare(probeSpec);
-            irProbeReverb.reset();
-
-            float sizePct = proc.apvts.getRawParameterValue(XID::RevSize)->load() / 100.0f;
-            float decaySec = proc.apvts.getRawParameterValue(XID::RevDecay)->load();
-            juce::dsp::Reverb::Parameters rp;
-            rp.roomSize   = juce::jlimit(0.0f, 1.0f, sizePct);
-            rp.damping    = juce::jlimit(0.05f, 0.95f, juce::jmap(decaySec, 0.3f, 8.0f, 0.9f, 0.1f));
-            rp.wetLevel   = 1.0f;
-            rp.dryLevel   = 0.0f;
-            rp.width      = 1.0f;
-            rp.freezeMode = 0.0f;
-            irProbeReverb.setParameters(rp);
-
-            juce::dsp::AudioBlock<float> irBlock(irProbeBuffer);
-            juce::dsp::ProcessContextReplacing<float> irCtx(irBlock);
-            irProbeReverb.process(irCtx);
-
-            auto* raw = irProbeBuffer.getReadPointer(0);
-            // The full-resolution buffer goes straight to the spectral
-            // heatmap (it needs real sample-rate content to FFT, not the
-            // decimated display trace below).
-            revView.setImpulseResponse(raw, lenSamples, srIr);
-
-            float irDisp[WaveformScope::numPoints];
-            int stride = juce::jmax(1, lenSamples / WaveformScope::numPoints);
-            for (int i = 0; i < WaveformScope::numPoints; ++i)
+            if (showRealIr)
             {
-                // Peak-hold within each bucket (preserving sign) so the
-                // trace still shows the algorithm's early reflections
-                // rather than aliasing them away with plain decimation.
-                int start = i * stride;
-                int end = juce::jmin(lenSamples, start + stride);
-                float best = 0.0f;
-                for (int n = start; n < end; ++n)
-                    if (std::abs(raw[n]) > std::abs(best)) best = raw[n];
-                irDisp[i] = juce::jlimit(-1.0f, 1.0f, best);
+                // Hybrid > 0 and a real IR is loaded: show the ACTUAL
+                // loaded impulse (the same file feeding the convolution
+                // engine), not the algorithmic probe below — genuinely
+                // honest once the user is actually using it.
+                int lenSamples = (int) loadedIrMono.size();
+                revView.setImpulseResponse(loadedIrMono.data(), lenSamples, loadedIrSr);
+
+                float irDisp[WaveformScope::numPoints];
+                int stride = juce::jmax(1, lenSamples / WaveformScope::numPoints);
+                for (int i = 0; i < WaveformScope::numPoints; ++i)
+                {
+                    int start = i * stride;
+                    int end = juce::jmin(lenSamples, start + stride);
+                    float best = 0.0f;
+                    for (int n = start; n < end; ++n)
+                        if (std::abs(loadedIrMono[(size_t) n]) > std::abs(best)) best = loadedIrMono[(size_t) n];
+                    irDisp[i] = juce::jlimit(-1.0f, 1.0f, best);
+                }
+                revView.setIrWaveform(irDisp);
             }
-            revView.setIrWaveform(irDisp);
+            else
+            {
+                double srIr = proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0;
+                int lenSamples = (int) (srIr * 1.6);
+                if (irProbeBuffer.getNumSamples() != lenSamples)
+                    irProbeBuffer.setSize(1, lenSamples, false, false, true);
+                irProbeBuffer.clear();
+                irProbeBuffer.setSample(0, 0, 1.0f);
+
+                juce::dsp::ProcessSpec probeSpec { srIr, (juce::uint32) lenSamples, 1u };
+                irProbeReverb.prepare(probeSpec);
+                irProbeReverb.reset();
+
+                float sizePct = proc.apvts.getRawParameterValue(XID::RevSize)->load() / 100.0f;
+                float decaySec = proc.apvts.getRawParameterValue(XID::RevDecay)->load();
+                float dampingTrimPct = proc.apvts.getRawParameterValue(XID::RevDamping)->load();
+                juce::dsp::Reverb::Parameters rp;
+                rp.roomSize   = juce::jlimit(0.0f, 1.0f, sizePct);
+                rp.damping    = juce::jlimit(0.05f, 0.95f,
+                                    juce::jmap(decaySec, 0.3f, 8.0f, 0.9f, 0.1f)
+                                    + (dampingTrimPct - 50.0f) / 50.0f * 0.3f);
+                rp.wetLevel   = 1.0f;
+                rp.dryLevel   = 0.0f;
+                rp.width      = 1.0f;
+                rp.freezeMode = 0.0f;
+                irProbeReverb.setParameters(rp);
+
+                juce::dsp::AudioBlock<float> irBlock(irProbeBuffer);
+                juce::dsp::ProcessContextReplacing<float> irCtx(irBlock);
+                irProbeReverb.process(irCtx);
+
+                auto* raw = irProbeBuffer.getReadPointer(0);
+                // The full-resolution buffer goes straight to the spectral
+                // heatmap (it needs real sample-rate content to FFT, not the
+                // decimated display trace below).
+                revView.setImpulseResponse(raw, lenSamples, srIr);
+
+                float irDisp[WaveformScope::numPoints];
+                int stride = juce::jmax(1, lenSamples / WaveformScope::numPoints);
+                for (int i = 0; i < WaveformScope::numPoints; ++i)
+                {
+                    // Peak-hold within each bucket (preserving sign) so the
+                    // trace still shows the algorithm's early reflections
+                    // rather than aliasing them away with plain decimation.
+                    int start = i * stride;
+                    int end = juce::jmin(lenSamples, start + stride);
+                    float best = 0.0f;
+                    for (int n = start; n < end; ++n)
+                        if (std::abs(raw[n]) > std::abs(best)) best = raw[n];
+                    irDisp[i] = juce::jlimit(-1.0f, 1.0f, best);
+                }
+                revView.setIrWaveform(irDisp);
+            }
         }
     }
     else if (currentTab == dlyTabIndex)
@@ -1466,6 +1605,7 @@ void XaLZaEditor::timerCallback()
         for (int i = 0; i < WaveformScope::numPoints; ++i)
             buf[i] = proc.rawSample((int) XaLZaProcessor::RawDly, pos - WaveformScope::numPoints + i);
         dlyView.setSamples(buf);
+        dlyView.setPanPhase(proc.getDlyPanPhase());
 
         // Same real computation runDly does — live host BPM (or the 120
         // fallback), current Time/Sync/Pre-Delay settings — so the timeline
@@ -1502,7 +1642,8 @@ void XaLZaEditor::timerCallback()
         int pos = proc.getRawWritePos((int) XaLZaProcessor::RawLim);
         for (int i = 0; i < WaveformScope::numPoints; ++i)
             buf[i] = proc.rawSample((int) XaLZaProcessor::RawLim, pos - WaveformScope::numPoints + i);
-        limView.update(buf, proc.getLufs(), proc.getTruePeakDb());
+        float limCeilingDb = proc.macroTracker.effectiveByID(XID::LimMacro, XID::LimCeiling);
+        limView.update(buf, proc.getLufs(), proc.getTruePeakDb(), limCeilingDb);
 
         // Spectrogram: a genuine FFT of the same post-limiter tap above,
         // just a wider window (fftSize, not WaveformScope::numPoints) —
@@ -1528,6 +1669,20 @@ void XaLZaEditor::timerCallback()
             pts.emplace_back(proc.scopeSampleL(idx), proc.scopeSampleR(idx));
         }
         goniometer.setPoints(pts);
+
+        // Real Pearson correlation coefficient over the same window, the
+        // standard phase-correlation reading every pro meter pairs with a
+        // stereo scatter plot: sum(L*R) / sqrt(sum(L^2) * sum(R^2)).
+        double sumLR = 0.0, sumLL = 0.0, sumRR = 0.0;
+        for (auto& p : pts)
+        {
+            sumLR += (double) p.first * (double) p.second;
+            sumLL += (double) p.first * (double) p.first;
+            sumRR += (double) p.second * (double) p.second;
+        }
+        double denom = std::sqrt(sumLL * sumRR);
+        float corr = denom > 1.0e-9 ? (float) (sumLR / denom) : 1.0f;   // silence reads as mono-safe, not undefined
+        correlationMeter.setCorrelation(corr);
     }
 
     // Unscoped: at a scaled window size the real on-screen footer is
@@ -1710,6 +1865,9 @@ void XaLZaEditor::resized()
 
         masterPanel.removeFromTop(10);
         goniometerCap.setBounds(masterPanel.removeFromTop(11));
+        auto corrRow = masterPanel.removeFromBottom(16);
+        masterPanel.removeFromBottom(3);
+        correlationMeter.setBounds(corrRow);
         {
             auto side = juce::jmin(masterPanel.getWidth(), masterPanel.getHeight());
             goniometer.setBounds(masterPanel.withSizeKeepingCentre(side, side).withY(masterPanel.getY()));
@@ -1718,6 +1876,10 @@ void XaLZaEditor::resized()
         content.removeFromRight(8);
         bypassSummaryLabel.setBounds(content.removeFromBottom(16));
         content.removeFromBottom(4);
+
+        chainFlow.setBounds(content.removeFromBottom(34));
+        chainFlowCap.setBounds(content.removeFromBottom(11));
+        content.removeFromBottom(6);
 
         // 6 columns x 2 rows, matching the mockup's Macros grid (was 4x3 of
         // short tab-style codes in an unrelated order — see macroDefs).
@@ -1806,11 +1968,13 @@ void XaLZaEditor::resized()
             {
                 // Duck/DuckRelease live inside a bordered "Sidechain
                 // Ducking" card with their own real curve; Wet HPF/LPF sit
-                // beside it as a normal small knob pair — see addPage("REV",
-                // ...) above for why pageKnobs[revTabIndex] has these at
-                // indices 4/5 and 6/7 after the 4 main knobs.
+                // beside it as a normal small knob pair; Damping/Hybrid
+                // plus the Load IR button+name fill the remaining space on
+                // the right — see addPage("REV", ...) above for why
+                // pageKnobs[revTabIndex] has these at indices 4/5, 6/7 and
+                // 8/9 after the 4 main knobs.
                 content.removeFromTop(6);
-                constexpr int ctrlRowH = 126, cardW = 380, wetGap = 18;
+                constexpr int ctrlRowH = 126, cardW = 380, wetGap = 18, wetAreaW = fineCellW * 2;
                 auto ctrlRow = content.removeFromTop(ctrlRowH);
 
                 auto cardArea = ctrlRow.removeFromLeft(cardW);
@@ -1826,7 +1990,17 @@ void XaLZaEditor::resized()
                 layoutKnobRow({ knobs[4], knobs[5] }, cardInner, fineLabelH, fineKnobW, fineKnobH, fineCellW);
 
                 ctrlRow.removeFromLeft(wetGap);
-                layoutKnobRow({ knobs[6], knobs[7] }, ctrlRow, fineLabelH, fineKnobW, fineKnobH, fineCellW);
+                auto wetArea = ctrlRow.removeFromLeft(wetAreaW);
+                layoutKnobRow({ knobs[6], knobs[7] }, wetArea, fineLabelH, fineKnobW, fineKnobH, fineCellW);
+
+                ctrlRow.removeFromLeft(wetGap);
+                auto irArea = ctrlRow;
+                auto irHeader = irArea.removeFromTop(18);
+                revLoadIrBtn.setBounds(irHeader.removeFromLeft(66));
+                irHeader.removeFromLeft(6);
+                revIrNameLabel.setBounds(irHeader);
+                irArea.removeFromTop(4);
+                layoutKnobRow({ knobs[8], knobs[9] }, irArea, fineLabelH, fineKnobW, fineKnobH, fineCellW);
             }
 
             content.removeFromTop(10);
