@@ -80,25 +80,16 @@ private:
 class LedMeter : public juce::Component
 {
 public:
-    // rmsDbL/rmsDbR: the processor's real mean-square (RMS) reading for
-    // this same tap — a genuinely different measurement from the peak
-    // ballistics above (see XaLZaProcessor::updateMeter), not a derived
-    // or smoothed copy of the peak value. Drawn as a thin marker line
-    // across the LED column, the same "Peak + RMS together" pairing the
-    // iZotope Insight Levels reference this whole meters pass was built
-    // from shows.
-    void setDb(float dbL, float dbR, float rmsDbL, float rmsDbR)
+    void setDb(float dbL, float dbR)
     {
         updateChannel(dbL, heldL, holdFramesLeftL, clipLatchFramesLeftL);
         updateChannel(dbR, heldR, holdFramesLeftR, clipLatchFramesLeftR);
 
         if (std::abs(dbL - lastDbL) > 0.05f || std::abs(dbR - lastDbR) > 0.05f
-            || std::abs(heldL - lastHeldL) > 0.05f || std::abs(heldR - lastHeldR) > 0.05f
-            || std::abs(rmsDbL - lastRmsL) > 0.05f || std::abs(rmsDbR - lastRmsR) > 0.05f)
+            || std::abs(heldL - lastHeldL) > 0.05f || std::abs(heldR - lastHeldR) > 0.05f)
         {
             lastDbL = dbL; lastDbR = dbR;
             lastHeldL = heldL; lastHeldR = heldR;
-            lastRmsL = rmsDbL; lastRmsR = rmsDbR;
             repaint();
         }
     }
@@ -144,15 +135,14 @@ private:
         float colW = (full.getWidth() - gap) * 0.5f;
         auto colL = full.removeFromLeft(colW);
         full.removeFromLeft(gap);
-        drawColumn(g, colL, lastDbL, lastHeldL, clipLatchFramesLeftL > 0, lastRmsL);
-        drawColumn(g, full, lastDbR, lastHeldR, clipLatchFramesLeftR > 0, lastRmsR);
+        drawColumn(g, colL, lastDbL, lastHeldL, clipLatchFramesLeftL > 0);
+        drawColumn(g, full, lastDbR, lastHeldR, clipLatchFramesLeftR > 0);
     }
 
-    static void drawColumn(juce::Graphics& g, juce::Rectangle<float> col, float db, float heldDb, bool clipped, float rmsDb)
+    static void drawColumn(juce::Graphics& g, juce::Rectangle<float> col, float db, float heldDb, bool clipped)
     {
         constexpr int numSeg = 12;
         constexpr float minDb = -50.0f, maxDb = 0.0f;
-        auto colFull = col;   // the loop below consumes `col` bottom-up; keep the original bounds for the RMS line
         float t = juce::jlimit(0.0f, 1.0f, (db - minDb) / (maxDb - minDb));
         int lit = (int) std::round(t * (float) numSeg);
         float tHeld = juce::jlimit(0.0f, 1.0f, (heldDb - minDb) / (maxDb - minDb));
@@ -183,24 +173,11 @@ private:
             g.setColour(c);
             g.fillRect(seg);
         }
-
-        // RMS marker: a thin line across the column at the real mean-
-        // square level — the "how loud does this actually sound" reading
-        // sitting underneath the peak segments' "what's the instantaneous
-        // maximum" one, the same Peak+RMS pairing Insight's Levels panel
-        // shows. Drawn last so it's never hidden behind a lit segment.
-        float tRms = juce::jlimit(0.0f, 1.0f, (rmsDb - minDb) / (maxDb - minDb));
-        float rmsY = colFull.getBottom() - tRms * colFull.getHeight();
-        // Teal, not the peak-hold marker's white — a thin line reads as a
-        // distinct "average level" indicator rather than a second peak cap.
-        g.setColour(XaLZaColour::accent2.withAlpha(0.95f));
-        g.fillRect(juce::Rectangle<float>(colFull.getX(), rmsY - 0.6f, colFull.getWidth(), 1.2f));
     }
 
     float lastDbL = -100.0f, lastDbR = -100.0f;
     float heldL = -100.0f, heldR = -100.0f;
     float lastHeldL = -100.0f, lastHeldR = -100.0f;
-    float lastRmsL = -100.0f, lastRmsR = -100.0f;
     int holdFramesLeftL = 0, holdFramesLeftR = 0;
     int clipLatchFramesLeftL = 0, clipLatchFramesLeftR = 0;
 };

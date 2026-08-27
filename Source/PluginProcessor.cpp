@@ -27,8 +27,6 @@ XaLZaProcessor::XaLZaProcessor()
 {
     for (auto& a : meterDbL) a.store(-100.0f);
     for (auto& a : meterDbR) a.store(-100.0f);
-    for (auto& a : rmsDbL) a.store(-100.0f);
-    for (auto& a : rmsDbR) a.store(-100.0f);
     for (auto& a : grDb) a.store(0.0f);
     for (auto& a : scopePointsL) a.store(0.0f);
     for (auto& a : scopePointsR) a.store(0.0f);
@@ -45,26 +43,18 @@ XaLZaProcessor::XaLZaProcessor()
 void XaLZaProcessor::updateMeter(int tap, const juce::AudioBuffer<float>& buf, int numSamples, int numCh)
 {
     float peakL = 0.0f, peakR = 0.0f;
-    double sumSqL = 0.0, sumSqR = 0.0;
     auto* l = buf.getReadPointer(0);
     for (int n = 0; n < numSamples; ++n)
-    {
         peakL = juce::jmax(peakL, std::abs(l[n]));
-        sumSqL += (double) l[n] * (double) l[n];
-    }
     if (numCh > 1)
     {
         auto* r = buf.getReadPointer(1);
         for (int n = 0; n < numSamples; ++n)
-        {
             peakR = juce::jmax(peakR, std::abs(r[n]));
-            sumSqR += (double) r[n] * (double) r[n];
-        }
     }
     else
     {
         peakR = peakL;
-        sumSqR = sumSqL;
     }
 
     float dbL = juce::Decibels::gainToDecibels(peakL, -100.0f);
@@ -78,23 +68,6 @@ void XaLZaProcessor::updateMeter(int tap, const juce::AudioBuffer<float>& buf, i
     };
     smooth(meterDbL[(size_t) tap], dbL);
     smooth(meterDbR[(size_t) tap], dbR);
-
-    // Real RMS: genuine mean-square over this block, not a derived copy
-    // of the peak reading above — converted to dB and integrated
-    // symmetrically (see rmsCoef, set in prepareToPlay) like a real VU
-    // instrument, so it reads "how loud does this actually sound" rather
-    // than chasing the same fast transients the peak ballistics do.
-    float rmsGainL = std::sqrt((float) (sumSqL / juce::jmax(1, numSamples)));
-    float rmsGainR = std::sqrt((float) (sumSqR / juce::jmax(1, numSamples)));
-    float rmsTargetL = juce::Decibels::gainToDecibels(rmsGainL, -100.0f);
-    float rmsTargetR = juce::Decibels::gainToDecibels(rmsGainR, -100.0f);
-    auto smoothRms = [this] (std::atomic<float>& state, float target)
-    {
-        float prev = state.load(std::memory_order_relaxed);
-        state.store(rmsCoef * prev + (1.0f - rmsCoef) * target, std::memory_order_relaxed);
-    };
-    smoothRms(rmsDbL[(size_t) tap], rmsTargetL);
-    smoothRms(rmsDbR[(size_t) tap], rmsTargetR);
 }
 
 void XaLZaProcessor::updateGr(int moduleIdx, float preDb, float postDb)
@@ -331,11 +304,6 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
     meterAttCoef = onePoleCoef(1.0f, sampleRate);
     meterRelCoef = onePoleCoef(130.0f, sampleRate);   // fast, real-time feel — was 400ms
-    // RMS companion reading: symmetric ~300ms integration both directions
-    // (a real VU-style average, not fast-attack/slow-release like the
-    // peak ballistics above), so it settles to "how loud does this
-    // actually sound" rather than chasing the same transients Peak does.
-    rmsCoef = onePoleCoef(300.0f, sampleRate);
 }
 
 void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)

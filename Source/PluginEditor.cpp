@@ -1217,10 +1217,8 @@ void XaLZaEditor::timerCallback()
         l.setColour(juce::Label::textColourId, colourForDb(v));
     };
 
-    masterMeterIn.setDb(proc.getMeterDbL((int) XaLZaProcessor::TapIn), proc.getMeterDbR((int) XaLZaProcessor::TapIn),
-                         proc.getRmsDbL((int) XaLZaProcessor::TapIn), proc.getRmsDbR((int) XaLZaProcessor::TapIn));
-    masterMeterOut.setDb(proc.getMeterDbL((int) XaLZaProcessor::TapOut), proc.getMeterDbR((int) XaLZaProcessor::TapOut),
-                          proc.getRmsDbL((int) XaLZaProcessor::TapOut), proc.getRmsDbR((int) XaLZaProcessor::TapOut));
+    masterMeterIn.setDb(proc.getMeterDbL((int) XaLZaProcessor::TapIn), proc.getMeterDbR((int) XaLZaProcessor::TapIn));
+    masterMeterOut.setDb(proc.getMeterDbL((int) XaLZaProcessor::TapOut), proc.getMeterDbR((int) XaLZaProcessor::TapOut));
     updateDbLabel(masterDbIn, masterMeterIn);
     updateDbLabel(masterDbOut, masterMeterOut);
 
@@ -1273,8 +1271,8 @@ void XaLZaEditor::timerCallback()
         int liveTapIn = mm.slotId >= 0 ? proc.getPredecessorTap(mm.slotId) : mm.tapIn;
         float inL = proc.getMeterDbL(liveTapIn), inR = proc.getMeterDbR(liveTapIn);
         float outL = proc.getMeterDbL(mm.tapOut), outR = proc.getMeterDbR(mm.tapOut);
-        mm.meterIn.setDb(inL, inR, proc.getRmsDbL(liveTapIn), proc.getRmsDbR(liveTapIn));
-        mm.meterOut.setDb(outL, outR, proc.getRmsDbL(mm.tapOut), proc.getRmsDbR(mm.tapOut));
+        mm.meterIn.setDb(inL, inR);
+        mm.meterOut.setDb(outL, outR);
         updateDbLabel(mm.dbIn, mm.meterIn);
         updateDbLabel(mm.dbOut, mm.meterOut);
 

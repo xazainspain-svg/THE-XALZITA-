@@ -68,12 +68,6 @@ public:
     float getMeterDbL(int tap) const noexcept { return meterDbL[(size_t) juce::jlimit(0, kNumMeterTaps - 1, tap)].load(std::memory_order_relaxed); }
     float getMeterDbR(int tap) const noexcept { return meterDbR[(size_t) juce::jlimit(0, kNumMeterTaps - 1, tap)].load(std::memory_order_relaxed); }
 
-    // Real RMS (mean-square) companion reading for the same tap — a
-    // genuinely different measurement from the peak ballistics above, not
-    // a derived/smoothed copy of it. See updateMeter().
-    float getRmsDbL(int tap) const noexcept { return rmsDbL[(size_t) juce::jlimit(0, kNumMeterTaps - 1, tap)].load(std::memory_order_relaxed); }
-    float getRmsDbR(int tap) const noexcept { return rmsDbR[(size_t) juce::jlimit(0, kNumMeterTaps - 1, tap)].load(std::memory_order_relaxed); }
-
     // ---- Reorderable chain: which of the 12 modules processBlock() runs
     //      first/second/.../last. Identity order (Pre, Gate, ... Lim, same
     //      as MeterTap above) by default — matches every original meter/
