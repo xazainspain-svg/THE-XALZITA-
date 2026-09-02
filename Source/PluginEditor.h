@@ -1,5 +1,6 @@
 #pragma once
 #include <cstring>
+#include <map>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_extra/juce_gui_extra.h>
 #include <juce_dsp/juce_dsp.h>
@@ -2743,6 +2744,13 @@ private:
     std::unique_ptr<SegButtonGroup> preImpedanceSeg;
     std::unique_ptr<SegButtonGroup> optoModeSeg;
 
+    // "Input Doctor": one-click gain staging. Reads the real measured
+    // input RMS (the same reading the IN meter/RMS marker show) and nudges
+    // Pre Gain by exactly the dB needed to land the average around a sane
+    // -18dBFS working level — a real measurement-driven suggestion, not a
+    // fixed preset value, so it adapts to whatever's actually coming in.
+    juce::TextButton autoGainBtn { "AUTO GAIN" };
+
     // Saturator's Character seg-group (Tube/Tape/Transistor/Diode) — real
     // distinct waveshapes, see runSat.
     std::unique_ptr<SegButtonGroup> satCharSeg;
@@ -2835,6 +2843,22 @@ private:
     // grid used to occupy.
     SpectrumAnalyzer masterSpectrum;
     juce::Label masterSpectrumCap;
+
+    // Real-time A<->B parameter morphing: "SET A"/"SET B" freeze the
+    // CURRENT value of every real parameter into a snapshot (not linked to
+    // the separate stateA/stateB full-session A/B compare feature above —
+    // this is its own independent pair). Once both are captured, dragging
+    // MORPH continuously blends every parameter's actual value between the
+    // two frozen snapshots and pushes it live via setValueNotifyingHost —
+    // an audible morph between two completely different vocal-chain
+    // settings while the audio keeps playing, not a preset switch.
+    juce::Slider morphSlider { juce::Slider::LinearHorizontal, juce::Slider::NoTextBox };
+    juce::Label morphCap;
+    juce::TextButton morphSetA { "SET A" }, morphSetB { "SET B" };
+    std::map<juce::String, float> morphSnapA, morphSnapB;   // paramID -> normalised (0..1) value
+    bool morphHasA = false, morphHasB = false;
+    void captureMorphSnapshot(bool intoA);
+    void applyMorph(float t01);
 
     // Footer brand line, now a real clickable control (was static painted
     // text) — shows the actual build version and opens a small About box

@@ -415,6 +415,32 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     preImpedanceSeg = std::make_unique<SegButtonGroup>(proc.apvts, XID::PreImpedance,
         std::vector<SegButtonGroup::Option>{ { "300ohm", 300.0f }, { "1.2k", 1200.0f }, { "2.4k", 2400.0f } });
     addChildComponent(*preImpedanceSeg);
+
+    // Input Doctor: nudge Pre Gain from the REAL measured input level, not
+    // a guess. Reads the same RMS reading the IN meter's teal marker
+    // shows, and moves Pre Gain by exactly the dB needed to land around a
+    // healthy -18dBFS average.
+    autoGainBtn.setTooltip("Measure the real input level and nudge Pre Gain toward a healthy -18dBFS average");
+    autoGainBtn.setColour(juce::TextButton::buttonColourId, XaLZaColour::panelBg);
+    autoGainBtn.onClick = [this]
+    {
+        float avgDb = 0.5f * (proc.getRmsDbL((int) XaLZaProcessor::TapIn)
+                             + proc.getRmsDbR((int) XaLZaProcessor::TapIn));
+        if (avgDb <= -90.0f)
+            return;   // no real signal coming in yet - nothing to measure
+
+        constexpr float targetDb = -18.0f;
+        float delta = targetDb - avgDb;
+        if (auto* param = proc.apvts.getParameter(XID::PreGain))
+        {
+            float current = proc.apvts.getRawParameterValue(XID::PreGain)->load();
+            float suggested = juce::jlimit(0.0f, 70.0f, current + delta);
+            param->beginChangeGesture();
+            param->setValueNotifyingHost(param->convertTo0to1(suggested));
+            param->endChangeGesture();
+        }
+    };
+    addChildComponent(autoGainBtn);
     addPage("COMP", { { XID::CompThresh, "Thresh" }, { XID::CompMakeup, "Makeup" }, { XID::CompAttack, "Attack" },
                        { XID::CompRelease, "Release" }, { XID::CompMix, "Mix" } });
     // Ratio is a seg-group of fixed presets (matches the mockup's
@@ -593,6 +619,35 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     setupCap(masterSpectrumCap, "MASTER SPECTRUM");
     addChildComponent(masterSpectrum);
     addChildComponent(masterSpectrumCap);
+
+    // Real-time A<->B morph: SET A/SET B freeze the whole plugin's current
+    // parameter values into two independent snapshots (nothing to do with
+    // the stateA/stateB full-session compare feature — see the header
+    // comment); MORPH then continuously blends every real parameter
+    // between them, live, while the plugin keeps processing audio.
+    setupCap(morphCap, "MORPH A <-> B");
+    morphSlider.setRange(0.0, 100.0, 0.1);
+    morphSlider.setValue(0.0, juce::dontSendNotification);
+    morphSlider.setColour(juce::Slider::trackColourId, XaLZaColour::accent2);
+    morphSlider.setColour(juce::Slider::thumbColourId, XaLZaColour::accent2);
+    morphSlider.setTooltip("Capture two full snapshots with SET A / SET B, then drag to morph "
+                            "every real parameter between them live.");
+    morphSlider.onValueChange = [this]
+    {
+        if (morphHasA && morphHasB)
+            applyMorph((float) morphSlider.getValue() / 100.0f);
+    };
+    morphSetA.setTooltip("Freeze the CURRENT settings of every module as morph endpoint A");
+    morphSetB.setTooltip("Freeze the CURRENT settings of every module as morph endpoint B");
+    morphSetA.setColour(juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
+    morphSetB.setColour(juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
+    morphSlider.setEnabled(false);
+    morphSetA.onClick = [this] { captureMorphSnapshot(true); };
+    morphSetB.onClick = [this] { captureMorphSnapshot(false); };
+    addChildComponent(morphSlider);
+    addChildComponent(morphCap);
+    addChildComponent(morphSetA);
+    addChildComponent(morphSetB);
     masterSpectrum.setSampleRate(proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0);
 
     // Footer brand/About control — styled to read as plain label text
@@ -980,6 +1035,43 @@ void XaLZaEditor::switchAbSlot(bool toA)
     abButtonB.setToggleState(!onSlotA, juce::dontSendNotification);
 }
 
+void XaLZaEditor::captureMorphSnapshot(bool intoA)
+{
+    auto& snap = intoA ? morphSnapA : morphSnapB;
+    snap.clear();
+    for (auto* param : proc.getParameters())
+    {
+        if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*>(param))
+            snap[ranged->paramID] = ranged->getValue();   // already normalised 0..1
+    }
+    (intoA ? morphHasA : morphHasB) = true;
+
+    // Visual confirmation: the captured button goes solid accent while the
+    // other stays outlined, so it's obvious at a glance which side (if
+    // either) still needs capturing.
+    morphSetA.setColour(juce::TextButton::buttonColourId,
+                         morphHasA ? XaLZaColour::accent2 : juce::Colours::transparentBlack);
+    morphSetB.setColour(juce::TextButton::buttonColourId,
+                         morphHasB ? XaLZaColour::accent2 : juce::Colours::transparentBlack);
+    morphSlider.setEnabled(morphHasA && morphHasB);
+}
+
+void XaLZaEditor::applyMorph(float t01)
+{
+    t01 = juce::jlimit(0.0f, 1.0f, t01);
+    for (auto& [paramID, valueA] : morphSnapA)
+    {
+        auto itB = morphSnapB.find(paramID);
+        if (itB == morphSnapB.end())
+            continue;   // only blend parameters captured on both sides
+        if (auto* param = proc.apvts.getParameter(paramID))
+        {
+            float blended = juce::jmap(t01, 0.0f, 1.0f, valueA, itB->second);
+            param->setValueNotifyingHost(juce::jlimit(0.0f, 1.0f, blended));
+        }
+    }
+}
+
 void XaLZaEditor::applyPreset(int presetIndex)
 {
     auto& presets = xalzaFactoryPresets();
@@ -1040,6 +1132,10 @@ void XaLZaEditor::showPage(int index)
     chainFlowCap.setVisible(onOverview);
     masterSpectrum.setVisible(onOverview);
     masterSpectrumCap.setVisible(onOverview);
+    morphSlider.setVisible(onOverview);
+    morphCap.setVisible(onOverview);
+    morphSetA.setVisible(onOverview);
+    morphSetB.setVisible(onOverview);
 
     for (auto* mm : moduleMeterByTab)
         if (mm != nullptr)
@@ -1074,6 +1170,7 @@ void XaLZaEditor::showPage(int index)
     preImpedanceSeg->setVisible(currentTab == preTabIndex);
     for (auto* b : { &prePadBtn, &prePhaseBtn, &prePhantomBtn })
         b->setVisible(currentTab == preTabIndex);
+    autoGainBtn.setVisible(currentTab == preTabIndex);
     optoModeSeg->setVisible(currentTab == optoTabIndex);
     satCharSeg->setVisible(currentTab == satTabIndex);
     dblVoicesSeg->setVisible(currentTab == dblTabIndex);
@@ -1811,6 +1908,20 @@ void XaLZaEditor::resized()
         chainFlowCap.setBounds(content.removeFromBottom(11));
         content.removeFromBottom(6);
 
+        // Real-time A<->B morph strip: two small capture buttons flanking
+        // the blend slider, right above the master spectrum.
+        {
+            auto morphRow = content.removeFromTop(macroLabelH);
+            morphCap.setBounds(morphRow);
+            auto sliderRow = content.removeFromTop(22);
+            morphSetA.setBounds(sliderRow.removeFromLeft(52));
+            sliderRow.removeFromLeft(6);
+            morphSetB.setBounds(sliderRow.removeFromRight(52));
+            sliderRow.removeFromRight(6);
+            morphSlider.setBounds(sliderRow);
+            content.removeFromTop(6);
+        }
+
         // Whole-mix spectrum analyser fills the space the old 12-knob macro
         // grid used to occupy.
         masterSpectrumCap.setBounds(content.removeFromTop(macroLabelH));
@@ -1865,6 +1976,12 @@ void XaLZaEditor::resized()
                 prePhantomBtn.setBounds(rowArea.removeFromLeft(phantomW));
                 rowArea.removeFromLeft(gap);
                 preImpedanceSeg->setBounds(rowArea.removeFromLeft(impW));
+
+                // Input Doctor, its own row underneath — real measurement
+                // driven, deliberately kept apart from the fixed toggles.
+                content.removeFromTop(6);
+                auto gainRow = content.removeFromTop(22);
+                autoGainBtn.setBounds(gainRow.withSizeKeepingCentre(110, gainRow.getHeight()).withY(gainRow.getY()));
             }
 
             if (currentTab == eqTabIndex)
