@@ -186,7 +186,7 @@ public:
     // (oscilloscopes / harmonic bars). Each is genuinely POST that module's
     // own processing — never the module's input — so every visualiser shows
     // what that stage actually did to the signal.
-    enum RawTap { RawPre = 0, RawGate, RawEss, RawSatIn, RawSatOut, RawOpto, RawDly, RawLim, RawRes, kNumRawTaps };
+    enum RawTap { RawPre = 0, RawGate, RawSatIn, RawSatOut, RawOpto, RawDly, RawLim, kNumRawTaps };
     static constexpr int kRawSize = 8192; // power of two
     float rawSample(int tap, int i) const noexcept
     {
