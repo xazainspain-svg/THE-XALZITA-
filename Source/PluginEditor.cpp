@@ -6,15 +6,19 @@
 // =============================================================================
 XaLZaLookAndFeel::XaLZaLookAndFeel()
 {
-    // Embedded fonts — the exact two typefaces the original web mockup uses
-    // (Space Grotesk for UI text, IBM Plex Mono for numeric/technical
-    // readouts), compiled into the binary via BinaryData so no system
-    // install is required. See getTypefaceForFont() below for how every
-    // Font constructed anywhere in the editor resolves to one of these.
+    // Embedded fonts — Space Grotesk for general UI text (unchanged from
+    // the original web mockup), plus the Xazainspain brand's own type
+    // system: Space Mono for numeric/technical readouts (replacing IBM
+    // Plex Mono) and Bebas Neue for headline moments. Compiled into the
+    // binary via BinaryData so no system install is required. See
+    // getTypefaceForFont() below for how every Font constructed anywhere
+    // in the editor resolves to one of these.
     sansRegular = juce::Typeface::createSystemTypefaceFor(BinaryData::SpaceGroteskRegular_ttf, BinaryData::SpaceGroteskRegular_ttfSize);
     sansBold    = juce::Typeface::createSystemTypefaceFor(BinaryData::SpaceGroteskSemiBold_ttf, BinaryData::SpaceGroteskSemiBold_ttfSize);
-    monoRegular = juce::Typeface::createSystemTypefaceFor(BinaryData::IBMPlexMonoRegular_ttf, BinaryData::IBMPlexMonoRegular_ttfSize);
-    monoBold    = juce::Typeface::createSystemTypefaceFor(BinaryData::IBMPlexMonoMedium_ttf, BinaryData::IBMPlexMonoMedium_ttfSize);
+    monoRegular = juce::Typeface::createSystemTypefaceFor(BinaryData::SpaceMonoRegular_ttf, BinaryData::SpaceMonoRegular_ttfSize);
+    monoBold    = juce::Typeface::createSystemTypefaceFor(BinaryData::SpaceMonoBold_ttf, BinaryData::SpaceMonoBold_ttfSize);
+    titleRegular = juce::Typeface::createSystemTypefaceFor(BinaryData::BebasNeueRegular_ttf, BinaryData::BebasNeueRegular_ttfSize);
+    scriptBold  = juce::Typeface::createSystemTypefaceFor(BinaryData::DancingScriptBold_ttf, BinaryData::DancingScriptBold_ttfSize);
 
     setColour(juce::Slider::textBoxTextColourId, XaLZaColour::textLabel);
     setColour(juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
@@ -30,19 +34,34 @@ XaLZaLookAndFeel::XaLZaLookAndFeel()
 juce::Typeface::Ptr XaLZaLookAndFeel::getTypefaceForFont(const juce::Font& f)
 {
     // Every Font built anywhere in this editor — whether it explicitly asks
-    // for "IBM Plex Mono" (numeric readouts, via monoFont() below) or just
-    // uses the default typeface name (every other label/button, unchanged
-    // call sites) — is routed through here, so this one place decides which
-    // of the four embedded weights actually gets drawn.
-    const bool wantsMono = f.getTypefaceName().containsIgnoreCase("Plex Mono");
-    if (wantsMono)
+    // for "Space Mono" (numeric readouts, via monoFont() below), "Bebas
+    // Neue" (headline text, via titleFont() below), or just uses the
+    // default typeface name (every other label/button, unchanged call
+    // sites) — is routed through here, so this one place decides which of
+    // the embedded weights actually gets drawn.
+    const auto& name = f.getTypefaceName();
+    if (name.containsIgnoreCase("Bebas Neue"))
+        return titleRegular;
+    if (name.containsIgnoreCase("Dancing Script"))
+        return scriptBold;
+    if (name.containsIgnoreCase("Space Mono"))
         return f.isBold() ? monoBold : monoRegular;
     return f.isBold() ? sansBold : sansRegular;
 }
 
 juce::Font XaLZaLookAndFeel::monoFont(float size, bool bold)
 {
-    return juce::Font(juce::FontOptions(size).withName("IBM Plex Mono").withStyle(bold ? "Bold" : "Regular"));
+    return juce::Font(juce::FontOptions(size).withName("Space Mono").withStyle(bold ? "Bold" : "Regular"));
+}
+
+juce::Font XaLZaLookAndFeel::titleFont(float size)
+{
+    return juce::Font(juce::FontOptions(size).withName("Bebas Neue"));
+}
+
+juce::Font XaLZaLookAndFeel::scriptFont(float size)
+{
+    return juce::Font(juce::FontOptions(size).withName("Dancing Script").withStyle("Bold"));
 }
 
 juce::Label* XaLZaLookAndFeel::createSliderTextBox(juce::Slider& slider)
@@ -1396,10 +1415,24 @@ void XaLZaEditor::timerCallback()
         preView.updateHarmonic(preSpecBuf);
         preView.setHpf(proc.getCurrentHpfHz(), sampleRatePre);
 
+        // Vowel/formant tracker reuses this exact same RawPre window —
+        // same tap, same fftSize (2048) — no extra sampling needed.
+        preView.setVowelSampleRate(sampleRatePre);
+        preView.pushVowel(preSpecBuf);
+
         float preWaveBuf[WaveformScope::numPoints];
         for (int i = 0; i < WaveformScope::numPoints; ++i)
             preWaveBuf[i] = proc.rawSample((int) XaLZaProcessor::RawPre, prePos - WaveformScope::numPoints + i);
         preView.setOutputWaveform(preWaveBuf);
+
+        // Real vocal pitch trace — same RawPre tap, a longer window so
+        // the autocorrelation has enough cycles of even a low male note
+        // (~70Hz) to lock onto.
+        preView.setPitchSampleRate(sampleRatePre);
+        float pitchBuf[PitchContourView::windowSize];
+        for (int i = 0; i < PitchContourView::windowSize; ++i)
+            pitchBuf[i] = proc.rawSample((int) XaLZaProcessor::RawPre, prePos - PitchContourView::windowSize + i);
+        preView.pushPitch(pitchBuf);
     }
     else if (currentTab == gateTabIndex)
     {
@@ -1418,13 +1451,14 @@ void XaLZaEditor::timerCallback()
         double sampleRateEss = proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0;
         essView.setSampleRate(sampleRateEss);
 
-        // RawGate is genuinely Ess's own input (Ess is the very next stage
-        // after Gate in the chain) — the exact signal runEss's detector
-        // analyzes, not an approximation.
+        // Post-fader, like every other visualiser in the plugin: RawEss is
+        // tapped right after the De-esser's own processing, so this shows
+        // the real reduced result (what actually continues down the
+        // chain), not the pre-Ess sibilant peak the detector reacted to.
         float specBufEss[DeEsserSpectrumView::fftSize];
-        int essPos = proc.getRawWritePos((int) XaLZaProcessor::RawGate);
+        int essPos = proc.getRawWritePos((int) XaLZaProcessor::RawEss);
         for (int i = 0; i < DeEsserSpectrumView::fftSize; ++i)
-            specBufEss[i] = proc.rawSample((int) XaLZaProcessor::RawGate, essPos - DeEsserSpectrumView::fftSize + i);
+            specBufEss[i] = proc.rawSample((int) XaLZaProcessor::RawEss, essPos - DeEsserSpectrumView::fftSize + i);
         essView.update(specBufEss);
 
         // Mirrors runEss's own bandFreq computation exactly (see
@@ -1489,6 +1523,16 @@ void XaLZaEditor::timerCallback()
         for (int b = 0; b < numBands; ++b)
             perBand[b] = proc.getResBandCutDb(b);
         resView.setBandData(numBands, perBand);
+
+        // Real POST-Resonance waterfall — same RawRes tap the module's
+        // own gain-reduction detector already reacted to, see runRes.
+        double sampleRateRes = proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0;
+        resView.setSpectrogramSampleRate(sampleRateRes);
+        float resSpecBuf[Spectrogram::fftSize];
+        int resPos = proc.getRawWritePos((int) XaLZaProcessor::RawRes);
+        for (int i = 0; i < Spectrogram::fftSize; ++i)
+            resSpecBuf[i] = proc.rawSample((int) XaLZaProcessor::RawRes, resPos - Spectrogram::fftSize + i);
+        resView.pushSpectrogramBlock(resSpecBuf);
     }
     else if (currentTab == satTabIndex)
     {
@@ -1719,6 +1763,74 @@ void XaLZaEditor::timerCallback()
     repaint();
 }
 
+// A palmera frond whose silhouette is drawn BY the real master-output
+// waveform — not a decoration animated to look tropical, the actual
+// signal reshaped into a leaf. Takes a real amplitude envelope (peak-per-
+// bin over the last ~93ms of the same specRingMaster data feeding the
+// whole-mix spectrum analyser — a smoothed real outline, not raw
+// sample-by-sample jitter, so it reads as a leaf edge rather than noise),
+// bends it along a hand-computed quadratic-bezier spine (point AND
+// tangent available at every t, so the amplitude can offset perpendicular
+// to the curve instead of just up/down), and widens/narrows it with a
+// sine taper so it closes to a point at both the base and the tip like a
+// real leaf blade. Drawn low-opacity, first, so every other overview-page
+// widget sits on top of it as a watermark rather than competing with it.
+void XaLZaEditor::paintPalmFrond(juce::Graphics& g, juce::Rectangle<int> area)
+{
+    if (area.getWidth() < 60 || area.getHeight() < 60)
+        return;
+
+    // The REAL brand-logo palm icon geometry — hub at local (50,38), five
+    // Q-curve fronds plus a tapered trunk, copied verbatim from the brand's
+    // own identidad/logo-full-color.svg (not an approximated/invented
+    // shape) — scaled up and rooted near the bottom of the overview page,
+    // low-opacity behind every other widget. Its silhouette never deforms;
+    // only its overall intensity breathes with the real current master
+    // output level, so it still reads as "alive" without ever drifting
+    // off-brand.
+    constexpr float localW = 100.0f, localH = 96.0f;   // local bbox: x 0-100, y 0-96
+    float scale = juce::jmin((float) area.getWidth() / localW, (float) area.getHeight() / localH) * 1.15f;
+    float originX = (float) area.getX() + (float) area.getWidth() * 0.5f - 50.0f * scale;
+    float originY = (float) area.getBottom() - 92.0f * scale;
+    auto xf = juce::AffineTransform::scale(scale).translated(originX, originY);
+
+    float outDb = juce::jmax(proc.getMeterDbL((int) XaLZaProcessor::TapOut), proc.getMeterDbR((int) XaLZaProcessor::TapOut));
+    float level = juce::jlimit(0.0f, 1.0f, (outDb + 50.0f) / 50.0f);
+
+    auto frondPath = [] (float hx, float hy, float c1x, float c1y, float mx, float my, float c2x, float c2y)
+    {
+        juce::Path p;
+        p.startNewSubPath(hx, hy);
+        p.quadraticTo(c1x, c1y, mx, my);
+        p.quadraticTo(c2x, c2y, hx, hy);
+        p.closeSubPath();
+        return p;
+    };
+
+    juce::Path trunk;
+    trunk.startNewSubPath(46.0f, 92.0f);
+    trunk.lineTo(48.0f, 40.0f);
+    trunk.lineTo(52.0f, 40.0f);
+    trunk.lineTo(54.0f, 92.0f);
+    trunk.closeSubPath();
+    trunk.applyTransform(xf);
+    g.setColour(XaLZaColour::accent2.withAlpha(0.12f + level * 0.10f));
+    g.fillPath(trunk);
+
+    juce::Path fronds;
+    fronds.addPath(frondPath(50, 38, 22, 30, 10, 56, 34, 50));
+    fronds.addPath(frondPath(50, 38, 20, 28, 22, 14, 38, 26));
+    fronds.addPath(frondPath(50, 38, 40, 10, 50, 4,  60, 10));
+    fronds.addPath(frondPath(50, 38, 80, 28, 78, 14, 62, 26));
+    fronds.addPath(frondPath(50, 38, 78, 30, 90, 56, 66, 50));
+    fronds.applyTransform(xf);
+
+    g.setColour(XaLZaColour::accent.withAlpha(0.09f + level * 0.11f));
+    g.fillPath(fronds);
+    g.setColour(XaLZaColour::accent.withAlpha(0.15f + level * 0.10f));
+    g.strokePath(fronds, juce::PathStrokeType(1.0f));
+}
+
 void XaLZaEditor::paint(juce::Graphics& g)
 {
     g.fillAll(XaLZaColour::panelBg);
@@ -1785,12 +1897,21 @@ void XaLZaEditor::paint(juce::Graphics& g)
     {
         auto content = body.reduced(marginX, marginY);
         auto masterPanel = content.removeFromRight(masterW);
+
+        // A palmera frond drawn BY the real master waveform, sitting low-
+        // opacity behind every other overview-page widget — the same real
+        // data the whole-mix spectrum analyser reads, just curved along a
+        // leaf spine instead of a straight oscilloscope line, so its
+        // silhouette genuinely bulges and textures with the actual output
+        // rather than being decoration. See paintPalmFrond() for the math.
+        paintPalmFrond(g, content);
+
         g.setColour(XaLZaColour::panelRaised);
         g.fillRoundedRectangle(masterPanel.toFloat(), 4.0f);
         g.setColour(XaLZaColour::borderSoft);
         g.drawRoundedRectangle(masterPanel.toFloat(), 4.0f, 1.0f);
         g.setColour(XaLZaColour::textMuted);
-        g.setFont(juce::Font(juce::FontOptions(11.0f).withStyle("Bold")));
+        g.setFont(XaLZaLookAndFeel::titleFont(15.0f));
         g.drawText("MASTER", masterPanel.removeFromTop(20), juce::Justification::centred);
     }
 
@@ -1800,6 +1921,29 @@ void XaLZaEditor::paint(juce::Graphics& g)
     g.fillRect(footer);
     g.setColour(XaLZaColour::borderSoft);
     g.drawLine(0.0f, (float) footer.getY(), (float) baseW, (float) footer.getY(), 1.0f);
+
+    // Brand wordmark, left-aligned: "XAZA" (Bebas Neue, all-caps) glued
+    // straight to "inspain" (Dancing Script Bold, lowercase, rose accent)
+    // with no separator and the same baseline — exactly the lockup rule
+    // in GUIA-DE-MARCA.md ("inspain va siempre en minuscula y en
+    // manuscrita... no hay separador entre XAZA e inspain"), now that a
+    // real static instance of the brand's script face is embedded.
+    {
+        auto brandArea = footer.reduced(14, 0);
+        auto xazaFont = XaLZaLookAndFeel::titleFont(15.0f);
+        auto scriptFontHere = XaLZaLookAndFeel::scriptFont(19.0f);
+        float xazaW = juce::GlyphArrangement::getStringWidth(xazaFont, "XAZA");
+        float scriptW = juce::GlyphArrangement::getStringWidth(scriptFontHere, "inspain");
+
+        auto wordmarkArea = brandArea.removeFromLeft((int) (xazaW + scriptW) + 4);
+        auto xazaArea = wordmarkArea.removeFromLeft((int) xazaW + 2);
+        g.setFont(xazaFont);
+        g.setColour(XaLZaColour::textHi);
+        g.drawText("XAZA", xazaArea, juce::Justification::centredLeft);
+        g.setFont(scriptFontHere);
+        g.setColour(XaLZaColour::accent);
+        g.drawText("inspain", wordmarkArea, juce::Justification::centredLeft);
+    }
 
     float outDb = juce::jmax(proc.getMeterDbL((int) XaLZaProcessor::TapOut), proc.getMeterDbR((int) XaLZaProcessor::TapOut));
     juce::String outText = outDb <= -99.0f ? "OUT  -inf dB" : ("OUT  " + juce::String(outDb, 1) + " dB");
@@ -1904,7 +2048,9 @@ void XaLZaEditor::resized()
         bypassSummaryLabel.setBounds(content.removeFromBottom(16));
         content.removeFromBottom(4);
 
-        chainFlow.setBounds(content.removeFromBottom(34));
+        // Taller than the old flat node row (34px) — the 5-frond layout
+        // needs real vertical room for the leaf-wash shapes to read.
+        chainFlow.setBounds(content.removeFromBottom(78));
         chainFlowCap.setBounds(content.removeFromBottom(11));
         content.removeFromBottom(6);
 

@@ -20,16 +20,30 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(JUCE)
 
 # --- Embedded fonts --------------------------------------------------------
-# Space Grotesk + IBM Plex Mono, the exact two typefaces the original web
-# mockup uses (SIL OFL 1.1, free to embed/redistribute — see
-# Source/Fonts/LICENSE-FONTS.txt). Compiled straight into the plugin binary
-# via JUCE's BinaryData mechanism so the .vst3 never depends on the user
+# Space Grotesk for the original web mockup's body/control text, plus the
+# Xazainspain brand's own full type system (see GUIA-DE-MARCA.md): Bebas
+# Neue for headline/title text and the "XAZA" wordmark, Space Mono — the
+# brand's own choice for "etiquetas tecnicas, datos, precios" (technical
+# labels/data), replacing the previous IBM Plex Mono for every dB/Hz/ms/
+# LUFS readout in the plugin — and now Dancing Script (Bold/700), the
+# brand's required face for the lowercase "inspain" half of the wordmark.
+# Dancing Script ships from Google Fonts as a variable font with no static
+# weight file, which is why it was deferred initially; this is a genuine
+# static, single-instance Bold TTF (pre-instanced by the Fontsource
+# project's build pipeline from the same upstream Google Fonts source —
+# see Source/Fonts/LICENSE-FONTS.txt), not the variable font, so it
+# renders at the correct brand weight everywhere, including here on
+# Windows where it's never been visually checked. All SIL OFL 1.1, free
+# to embed/redistribute. Compiled straight into the plugin binary via
+# JUCE's BinaryData mechanism so the .vst3 never depends on the user
 # having these fonts installed on their system.
 juce_add_binary_data(XaLZaFonts SOURCES
     Source/Fonts/SpaceGrotesk-Regular.ttf
     Source/Fonts/SpaceGrotesk-SemiBold.ttf
-    Source/Fonts/IBMPlexMono-Regular.ttf
-    Source/Fonts/IBMPlexMono-Medium.ttf)
+    Source/Fonts/BebasNeue-Regular.ttf
+    Source/Fonts/SpaceMono-Regular.ttf
+    Source/Fonts/SpaceMono-Bold.ttf
+    Source/Fonts/DancingScript-Bold.ttf)
 
 juce_add_plugin(XaLZa
     COMPANY_NAME "xaza"
