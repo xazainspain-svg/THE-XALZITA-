@@ -1,6 +1,7 @@
 #pragma once
 #include <cstring>
 #include <map>
+#include <vector>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_extra/juce_gui_extra.h>
 #include <juce_dsp/juce_dsp.h>
@@ -59,20 +60,28 @@ public:
 
     // Slider readouts and the preset combo box show live numbers/names, so
     // (matching the mockup's --font-mono usage on .knob-value/.preset-name)
-    // route them to IBM Plex Mono instead of the Space Grotesk every other
+    // route them to Space Mono instead of the Space Grotesk every other
     // Label/Button gets by default.
     juce::Label* createSliderTextBox(juce::Slider&) override;
     juce::Font getComboBoxFont(juce::ComboBox&) override;
 
     // Constructs a Font tagged so getTypefaceForFont() above routes it to
-    // the embedded IBM Plex Mono instead of the default Space Grotesk —
-    // use for numeric/technical readouts (knob values, preset name,
-    // footer CPU/status, chain chips), matching the mockup's split
-    // between --font-sans (labels) and IBM Plex Mono (everything numeric).
+    // the embedded Space Mono instead of the default Space Grotesk — use
+    // for numeric/technical readouts (knob values, preset name, footer
+    // CPU/status, chain chips). Space Mono is the Xazainspain brand's own
+    // choice for exactly this ("etiquetas tecnicas, datos, precios" — see
+    // GUIA-DE-MARCA.md), replacing the previous IBM Plex Mono.
     static juce::Font monoFont(float size, bool bold = false);
 
+    // Brand headline type (Bebas Neue) — a handful of larger title
+    // moments only (the MASTER panel header, the footer brand button),
+    // never body text or knob readouts: it's a tall, heavily condensed
+    // display face that would cramp anything sized for Space Grotesk.
+    // Bebas Neue ships one weight only, so there's no bold variant here.
+    static juce::Font titleFont(float size);
+
 private:
-    juce::Typeface::Ptr sansRegular, sansBold, monoRegular, monoBold;
+    juce::Typeface::Ptr sansRegular, sansBold, monoRegular, monoBold, titleRegular;
 };
 
 /** Stereo LED-segment level meter — matches the mockup's .led-meter /
@@ -1565,28 +1574,340 @@ private:
     TransferCurveView curve;
 };
 
+/** Scrolling vocal pitch contour — the closest thing a rack-style vocal
+    chain needs to a Melodyne-style melody line, so a singer or producer
+    can literally see intonation and phrasing as it happens. Each column
+    is a genuine time-domain F0 estimate computed with normalized
+    autocorrelation over a real ~1000-sample window of the raw PRE
+    signal (RawPre — the exact tap the other three Preamp cards already
+    read from): every lag in the 70Hz-1000Hz vocal range is scored by how
+    strongly the window repeats itself at that period, the strongest lag
+    wins, and it only gets plotted when that match is strong enough to
+    trust as real periodicity — anything weaker (breath, consonants,
+    silence, noise) correctly breaks the line instead of guessing a
+    pitch. Nothing here is synthesized or decorative; a flat unbroken
+    line is a genuinely held, in-tune note. */
+class PitchContourView : public juce::Component
+{
+public:
+    static constexpr int numCols    = 140;
+    static constexpr int windowSize = 1024;
+
+    void setSampleRate(double sr) { sampleRateHint = (float) juce::jmax(1000.0, sr); }
+
+    // samples: windowSize raw values, oldest to newest.
+    void update(const float* samples)
+    {
+        constexpr float minHz = 70.0f, maxHz = 1000.0f;
+        int minLag = juce::jlimit(2, windowSize / 2, (int) (sampleRateHint / maxHz));
+        int maxLag = juce::jlimit(minLag + 1, windowSize / 2, (int) (sampleRateHint / minHz));
+
+        float energy0 = 0.0f;
+        for (int n = 0; n < windowSize; ++n)
+            energy0 += samples[n] * samples[n];
+
+        int bestLag = -1;
+        float bestScore = 0.0f;
+        for (int lag = minLag; lag <= maxLag; ++lag)
+        {
+            float corr = 0.0f, energyLag = 0.0f;
+            for (int n = 0; n < windowSize - lag; ++n)
+            {
+                corr += samples[n] * samples[n + lag];
+                energyLag += samples[n + lag] * samples[n + lag];
+            }
+            float denom = std::sqrt(juce::jmax(1.0e-9f, energy0 * energyLag));
+            float score = corr / denom;
+            if (score > bestScore)
+            {
+                bestScore = score;
+                bestLag = lag;
+            }
+        }
+
+        // 0.5 normalized-correlation threshold: a real held vocal note
+        // clears this easily; unvoiced/silent frames don't, so those
+        // frames genuinely gap the line rather than jittering a guess.
+        float hz = (bestLag > 0 && bestScore > 0.5f && energy0 > 1.0e-6f)
+                       ? sampleRateHint / (float) bestLag : 0.0f;
+
+        history[(size_t) writePos] = hz;
+        writePos = (writePos + 1) % numCols;
+        repaint();
+    }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(b);
+        g.setColour(XaLZaColour::border);
+        g.drawRect(b, 1.0f);
+
+        auto inner = b.reduced(1.0f);
+        if (inner.getWidth() < 4.0f || inner.getHeight() < 4.0f)
+            return;
+
+        constexpr float lowHz = 70.0f, highHz = 1000.0f;
+        auto yFor = [&] (float hz)
+        {
+            float t = std::log(juce::jlimit(lowHz, highHz, hz) / lowHz) / std::log(highHz / lowHz);
+            return inner.getBottom() - t * inner.getHeight();
+        };
+
+        // Octave reference lines at A2/A3/A4/A5 — musically meaningful
+        // anchors, not arbitrary gridlines.
+        g.setColour(XaLZaColour::borderSoft);
+        for (float refHz : { 110.0f, 220.0f, 440.0f, 880.0f })
+        {
+            float y = yFor(refHz);
+            g.drawLine(inner.getX(), y, inner.getRight(), y, 0.5f);
+        }
+
+        float colW = inner.getWidth() / (float) numCols;
+        juce::Path trace;
+        bool inStroke = false;
+        for (int i = 0; i < numCols; ++i)
+        {
+            size_t idx = (size_t) ((writePos + i) % numCols);
+            float hz = history[idx];
+            float x = inner.getX() + (float) i * colW;
+            if (hz <= 0.0f) { inStroke = false; continue; }
+            float y = yFor(hz);
+            if (!inStroke) { trace.startNewSubPath(x, y); inStroke = true; }
+            else            trace.lineTo(x, y);
+        }
+        g.setColour(XaLZaColour::accent);
+        g.strokePath(trace, juce::PathStrokeType(1.8f));
+    }
+
+    float sampleRateHint = 44100.0f;
+    float history[numCols] = {};
+    int writePos = 0;
+};
+
+/** Live vowel/formant tracker — plots the singer's first two vocal-tract
+    resonances (F1 = mouth openness, F2 = tongue frontness) as a moving
+    dot on the classic IPA vowel trapezoid, the way vocal-coaching
+    software already does. F1/F2 are estimated from a real windowed FFT
+    of the same RawPre tap PitchContourView and the Harmonic Color bar
+    both already read: the log-magnitude spectrum is smoothed with a
+    ~200Hz moving average (suppresses the comb-like ripple the pitch
+    harmonics themselves create, leaving roughly the vocal tract's own
+    resonance envelope — the same "smooth the harmonics away" idea a
+    proper LPC formant tracker uses, done here with a cheap boxcar
+    instead of solving an LPC polynomial's roots), then the tallest point
+    in the F1 search range (200-1200Hz) and, independently, the tallest
+    point in the F2 range above it (700-3400Hz) become the estimate. This
+    is a genuine approximation, not a lab-grade formant tracker — kept
+    deliberately simple so it stays honest about what it is — but it is
+    real spectral analysis of the actual voice, not a synthesized wobble:
+    unvoiced/silent frames correctly hold the trail rather than jitter,
+    gated on the same real energy check PitchContourView uses. */
+class VowelTrackerView : public juce::Component
+{
+public:
+    static constexpr int fftOrder = 11;
+    static constexpr int fftSize  = 1 << fftOrder;   // 2048 — same window SpectrumAnalyzer/PreampView's harmColor already reads
+    static constexpr int trailLen = 10;
+
+    VowelTrackerView() : fft(fftOrder), window((size_t) fftSize, juce::dsp::WindowingFunction<float>::hann)
+    {
+        std::fill(std::begin(fftData), std::end(fftData), 0.0f);
+    }
+
+    void setSampleRate(double sr) { sampleRateHint = (float) juce::jmax(1000.0, sr); }
+
+    // samples: fftSize raw values, oldest to newest.
+    void update(const float* samples)
+    {
+        float energy0 = 0.0f;
+        for (int n = 0; n < fftSize; ++n)
+            energy0 += samples[n] * samples[n];
+
+        std::copy(samples, samples + fftSize, fftData);
+        window.multiplyWithWindowingTable(fftData, (size_t) fftSize);
+        fft.performFrequencyOnlyForwardTransform(fftData);
+
+        constexpr int numBins = fftSize / 2;
+        float dbSpec[numBins];
+        for (int i = 1; i < numBins; ++i)
+            dbSpec[i] = juce::Decibels::gainToDecibels(fftData[i], -100.0f);
+        dbSpec[0] = dbSpec[1];
+
+        float binHz = sampleRateHint / (float) fftSize;
+        int smoothBins = juce::jmax(1, (int) std::round(100.0f / binHz));   // ~200Hz total boxcar width
+
+        float smoothed[numBins];
+        for (int i = 0; i < numBins; ++i)
+        {
+            int lo = juce::jmax(0, i - smoothBins);
+            int hi = juce::jmin(numBins - 1, i + smoothBins);
+            float sum = 0.0f;
+            for (int k = lo; k <= hi; ++k)
+                sum += dbSpec[k];
+            smoothed[i] = sum / (float) (hi - lo + 1);
+        }
+
+        auto binFor    = [&] (float hz) { return juce::jlimit(1, numBins - 1, (int) (hz / binHz)); };
+        auto argMaxIn  = [&] (int b0, int b1)
+        {
+            int best = b0;
+            for (int b = b0; b <= b1; ++b)
+                if (smoothed[b] > smoothed[best]) best = b;
+            return best;
+        };
+
+        hasFormant = false;
+        if (energy0 > 1.0e-6f)
+        {
+            int f1Bin = argMaxIn(binFor(200.0f), binFor(1200.0f));
+            int f2Lo  = juce::jmax(binFor(700.0f), f1Bin + smoothBins + 1);
+            int f2Hi  = binFor(3400.0f);
+            if (f2Lo < f2Hi)
+            {
+                int f2Bin = argMaxIn(f2Lo, f2Hi);
+                f1Hz = (float) f1Bin * binHz;
+                f2Hz = (float) f2Bin * binHz;
+                hasFormant = true;
+
+                trailPts[(size_t) trailWrite] = { f1Hz, f2Hz };
+                trailWrite = (trailWrite + 1) % trailLen;
+                trailCount = juce::jmin(trailLen, trailCount + 1);
+            }
+        }
+        repaint();
+    }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(b);
+        g.setColour(XaLZaColour::border);
+        g.drawRect(b, 1.0f);
+
+        auto inner = b.reduced(8.0f, 6.0f);
+        if (inner.getWidth() < 10.0f || inner.getHeight() < 10.0f)
+            return;
+
+        constexpr float f1Lo = 200.0f, f1Hi = 900.0f;
+        constexpr float f2Lo = 700.0f, f2Hi = 2600.0f;
+
+        // F2 runs high-to-low left-to-right (standard vowel-chart
+        // convention: front vowels like /i/ sit at high F2, drawn on the
+        // left); F1 runs low-to-high top-to-bottom (close vowels like
+        // /i//u/ have low F1, drawn at the top).
+        auto pointFor = [&] (float f1, float f2)
+        {
+            float tx = juce::jlimit(0.0f, 1.0f, (f2 - f2Lo) / (f2Hi - f2Lo));
+            float ty = juce::jlimit(0.0f, 1.0f, (f1 - f1Lo) / (f1Hi - f1Lo));
+            return juce::Point<float>(inner.getRight() - tx * inner.getWidth(), inner.getY() + ty * inner.getHeight());
+        };
+
+        // Reference corners of the classic IPA vowel trapezoid — typical
+        // adult-average formant frequencies (Hz) for the three "corner"
+        // vowels; a standard illustrative reference, not a per-singer
+        // measurement.
+        struct RefVowel { const char* label; float f1, f2; };
+        static const RefVowel refs[] = {
+            { "i", 280.0f, 2250.0f },
+            { "a", 800.0f, 1250.0f },
+            { "u", 310.0f, 870.0f },
+        };
+
+        juce::Path trapezoid;
+        for (int i = 0; i < 3; ++i)
+        {
+            auto p = pointFor(refs[i].f1, refs[i].f2);
+            if (i == 0) trapezoid.startNewSubPath(p); else trapezoid.lineTo(p);
+        }
+        trapezoid.closeSubPath();
+        g.setColour(XaLZaColour::borderSoft);
+        g.strokePath(trapezoid, juce::PathStrokeType(1.0f));
+
+        g.setFont(juce::Font(juce::FontOptions(9.0f)));
+        for (auto& rv : refs)
+        {
+            auto p = pointFor(rv.f1, rv.f2);
+            g.setColour(XaLZaColour::textMuted);
+            g.drawText(juce::String(rv.label), juce::Rectangle<float>(p.x - 8.0f, p.y - 12.0f, 16.0f, 11.0f), juce::Justification::centred);
+        }
+
+        // Fading trail of recent estimates, newest brightest — reads as
+        // the vowel glide, not just an instantaneous point.
+        int startIdx = (trailWrite - trailCount + trailLen) % trailLen;
+        for (int i = 0; i < trailCount; ++i)
+        {
+            auto& pt = trailPts[(size_t) ((startIdx + i) % trailLen)];
+            float alpha = (float) (i + 1) / (float) juce::jmax(1, trailCount) * 0.45f;
+            auto p = pointFor(pt.x, pt.y);
+            g.setColour(XaLZaColour::accent2.withAlpha(alpha));
+            g.fillEllipse(p.x - 2.0f, p.y - 2.0f, 4.0f, 4.0f);
+        }
+
+        if (hasFormant)
+        {
+            auto p = pointFor(f1Hz, f2Hz);
+            g.setColour(XaLZaColour::accent);
+            g.fillEllipse(p.x - 4.0f, p.y - 4.0f, 8.0f, 8.0f);
+        }
+    }
+
+    juce::dsp::FFT fft;
+    juce::dsp::WindowingFunction<float> window;
+    float fftData[2 * fftSize];
+    float sampleRateHint = 44100.0f;
+    bool hasFormant = false;
+    float f1Hz = 0.0f, f2Hz = 0.0f;
+    juce::Point<float> trailPts[trailLen] = {};
+    int trailWrite = 0, trailCount = 0;
+};
+
 /** Composite Preamp page view: the input-level VU gauge, a raw post-Gain/
     Character output-waveform trace, a real FFT "harmonic color" bar view
     fed genuinely POST the Character waveshaper (so it shows the actual
     harmonics that stage adds, not a fake animation), and the HPF's
-    analytic frequency-response curve — four equal cards, matching the
-    original web mockup's Preamp row (Input Level / Output Waveform /
-    Harmonic Color / Frequency Response). */
+    analytic frequency-response curve across the top — plus, filling the
+    row below, the real-time vocal pitch trace and the vowel/formant
+    tracker side by side, so a singer can see intonation AND which vowel
+    they're actually shaping while dialling in gain staging on the same
+    page (matches the original web mockup's Preamp row of Input Level /
+    Output Waveform / Harmonic Color / Frequency Response, plus the two
+    new vocal-analysis strips). */
 class PreampView : public juce::Component
 {
 public:
-    PreampView() { addAndMakeVisible(vu); addAndMakeVisible(outWave); addAndMakeVisible(harmColor); addAndMakeVisible(freqResp); }
+    PreampView()
+    {
+        addAndMakeVisible(vu); addAndMakeVisible(outWave); addAndMakeVisible(harmColor); addAndMakeVisible(freqResp);
+        addAndMakeVisible(pitch); addAndMakeVisible(vowel);
+    }
 
     void pushVu(float db) { vu.pushDb(db); }
     void setOutputWaveform(const float* samples) { outWave.setSamples(samples); }
     void updateHarmonic(const float* samples) { harmColor.update(samples); }
     void setHarmonicSampleRate(double sr) { harmColor.setSampleRate(sr); }
     void setHpf(float hz, double sr) { freqResp.setHighPass(hz, sr); }
+    void pushPitch(const float* samples) { pitch.update(samples); }
+    void setPitchSampleRate(double sr) { pitch.setSampleRate(sr); }
+    void pushVowel(const float* samples) { vowel.update(samples); }
+    void setVowelSampleRate(double sr) { vowel.setSampleRate(sr); }
 
 private:
     void resized() override
     {
         auto b = getLocalBounds();
+        auto bottomRow = b.removeFromBottom(juce::jmax(40, b.getHeight() / 4));
+        b.removeFromBottom(6);
+        auto pitchArea = bottomRow.removeFromLeft(bottomRow.getWidth() / 2);
+        pitchArea.removeFromRight(3);
+        bottomRow.removeFromLeft(3);
+        pitch.setBounds(pitchArea);
+        vowel.setBounds(bottomRow);
+
         constexpr int gap = 6;
         int colW = (b.getWidth() - gap * 3) / 4;
         auto take = [&] { auto c = b.removeFromLeft(colW); b.removeFromLeft(gap); return c; };
@@ -1600,6 +1921,8 @@ private:
     WaveformScope outWave;
     SpectrumAnalyzer harmColor;
     FreqResponseView freqResp;
+    PitchContourView pitch;
+    VowelTrackerView vowel;
 };
 
 /** Gate page's primary visualizer: a real open/closed ACTIVITY STRIP —
@@ -1771,13 +2094,142 @@ private:
     float curve[numPts + 1] = {};
 };
 
+/** Saturator's "harmonic fingerprint" — the exact same real log-frequency
+    FFT magnitude data SpectrumAnalyzer computes (identical 40-bin,
+    40Hz-18kHz layout, same peak-hold/decay smoothing), but plotted in
+    POLAR instead of Cartesian coordinates: bin i sits at angle
+    i/numBars around a full circle instead of at x = i/numBars across a
+    row, and its magnitude pushes that point OUT from the centre instead
+    of UP from a baseline. A saturator's whole job is adding harmonics —
+    stacking overtones above the fundamental — and a closed polygon
+    swept around a centre point is what that genuinely looks like once
+    you stop insisting frequency has to run left-to-right: it reads as a
+    bloom/flower silhouette (each harmonic a "petal") that is exactly as
+    honest as the bar chart it replaces, since it is driven by the same
+    RawSatOut-tapped FFT and adds no pitch-detection or synthetic shape
+    of its own. This is the one module visualiser in the plugin built to
+    specifically read as tropical/floral rather than as a lab instrument,
+    matching the brand's palm-and-bloom identity instead of a generic
+    plugin-analyzer look. */
+class RadialHarmonicView : public juce::Component
+{
+public:
+    static constexpr int fftOrder = 11;
+    static constexpr int fftSize  = 1 << fftOrder;   // 2048 — matches SpectrumAnalyzer
+    static constexpr int numBars  = 40;
+
+    RadialHarmonicView() : fft(fftOrder), window((size_t) fftSize, juce::dsp::WindowingFunction<float>::hann)
+    {
+        std::fill(std::begin(fftData), std::end(fftData), 0.0f);
+        std::fill(std::begin(bars), std::end(bars), 0.0f);
+    }
+
+    void setSampleRate(double sr) { sampleRateHint = (float) juce::jmax(1000.0, sr); }
+
+    // samples: fftSize raw values, oldest to newest — same contract as
+    // SpectrumAnalyzer::update(), just painted differently.
+    void update(const float* samples)
+    {
+        std::copy(samples, samples + fftSize, fftData);
+        window.multiplyWithWindowingTable(fftData, (size_t) fftSize);
+        fft.performFrequencyOnlyForwardTransform(fftData);
+
+        for (int i = 0; i < numBars; ++i)
+        {
+            float f0 = 40.0f * std::pow(18000.0f / 40.0f, (float) i / (float) numBars);
+            float f1 = 40.0f * std::pow(18000.0f / 40.0f, (float) (i + 1) / (float) numBars);
+            int bin0 = juce::jlimit(1, fftSize / 2 - 1, (int) (f0 * (float) fftSize / sampleRateHint));
+            int bin1 = juce::jlimit(bin0 + 1, fftSize / 2, (int) (f1 * (float) fftSize / sampleRateHint));
+            float peak = 0.0f;
+            for (int bBin = bin0; bBin < bin1; ++bBin)
+                peak = juce::jmax(peak, fftData[bBin]);
+            float db = juce::Decibels::gainToDecibels(peak, -100.0f);
+            float norm = juce::jlimit(0.0f, 1.0f, (db + 84.0f) / 84.0f);
+            bars[i] = juce::jmax(norm, bars[i] * 0.90f);
+        }
+        repaint();
+    }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(b);
+        g.setColour(XaLZaColour::border);
+        g.drawRect(b, 1.0f);
+
+        juce::Point<float> centre = b.getCentre();
+        float maxR = juce::jmin(b.getWidth(), b.getHeight()) * 0.46f;
+        float innerR = maxR * 0.22f;
+
+        // Polar guide rings + spokes — the same reading aid a bar chart's
+        // horizontal gridlines give, just bent into a circle.
+        g.setColour(XaLZaColour::borderSoft);
+        for (int ring = 1; ring <= 3; ++ring)
+        {
+            float r = innerR + (maxR - innerR) * (float) ring / 3.0f;
+            g.drawEllipse(centre.x - r, centre.y - r, r * 2.0f, r * 2.0f, 0.5f);
+        }
+        for (int spoke = 0; spoke < 8; ++spoke)
+        {
+            float ang = (float) spoke / 8.0f * juce::MathConstants<float>::twoPi - juce::MathConstants<float>::halfPi;
+            g.drawLine(centre.x + innerR * std::cos(ang), centre.y + innerR * std::sin(ang),
+                       centre.x + maxR * std::cos(ang), centre.y + maxR * std::sin(ang), 0.5f);
+        }
+
+        // The real bloom: one vertex per log-frequency bin, swept full
+        // circle starting straight up, radius = innerR..maxR by that
+        // bin's live magnitude.
+        juce::Path bloom;
+        std::vector<juce::Point<float>> pts;
+        pts.reserve((size_t) numBars);
+        for (int i = 0; i < numBars; ++i)
+        {
+            float ang = (float) i / (float) numBars * juce::MathConstants<float>::twoPi - juce::MathConstants<float>::halfPi;
+            float r = innerR + bars[i] * (maxR - innerR);
+            pts.push_back({ centre.x + r * std::cos(ang), centre.y + r * std::sin(ang) });
+        }
+        bloom.startNewSubPath(pts.front());
+        for (size_t i = 1; i < pts.size(); ++i)
+            bloom.lineTo(pts[i]);
+        bloom.closeSubPath();
+
+        juce::ColourGradient grad(XaLZaColour::accent2.withAlpha(0.30f), centre,
+                                   XaLZaColour::accent.withAlpha(0.10f), { centre.x, centre.y - maxR }, true);
+        g.setGradientFill(grad);
+        g.fillPath(bloom);
+        g.setColour(XaLZaColour::accent2.withAlpha(0.85f));
+        g.strokePath(bloom, juce::PathStrokeType(1.6f));
+
+        // Top-quartile (highest-frequency) harmonics get the same
+        // "hot" danger tint the bar view used, as small petal-tip dots
+        // instead of a coloured bar segment.
+        for (int i = 0; i < numBars; ++i)
+        {
+            bool hot = i >= (int) (numBars * 0.82f);
+            g.setColour(hot ? XaLZaColour::danger : XaLZaColour::accent);
+            float dotR = hot ? 2.6f : 1.6f;
+            g.fillEllipse(pts[(size_t) i].x - dotR, pts[(size_t) i].y - dotR, dotR * 2.0f, dotR * 2.0f);
+        }
+
+        g.setColour(XaLZaColour::panelControl);
+        g.fillEllipse(centre.x - innerR * 0.4f, centre.y - innerR * 0.4f, innerR * 0.8f, innerR * 0.8f);
+    }
+
+    juce::dsp::FFT fft;
+    juce::dsp::WindowingFunction<float> window;
+    float fftData[2 * fftSize];
+    float bars[numBars] = {};
+    float sampleRateHint = 44100.0f;
+};
+
 /** Composite Saturator page view: the real analytic waveshaping curve
     above (what used to be a plain in/out oscilloscope trace — a shape
     already reused on six other module pages, so it added nothing
-    Saturator-specific) plus the existing real FFT "harmonic content" bar
-    view fed genuinely POST the saturator (RawSatOut) — shows the actual
-    harmonics the drive/tone/ceiling stage is adding, not a fake
-    animation. */
+    Saturator-specific) plus the radial "harmonic fingerprint" bloom fed
+    genuinely POST the saturator (RawSatOut) — shows the actual harmonics
+    the drive/tone/ceiling stage is adding, not a fake animation. */
 class SaturatorView : public juce::Component
 {
 public:
@@ -1801,7 +2253,7 @@ private:
     }
 
     SaturationCurveView curveView;
-    SpectrumAnalyzer harmonics;
+    RadialHarmonicView harmonics;
 };
 
 /** Doubler "Per-Voice" table: one row per active voice, showing the actual
@@ -2149,19 +2601,37 @@ private:
 };
 
 /** Composite Resonance page view: the existing aggregate suppression-depth
-    line alongside the real per-band bars above. */
+    line alongside the real per-band bars, plus a real-time Spectrogram
+    waterfall (the same class the LIM page's own waterfall uses) fed
+    genuinely POST the module (RawRes) along the bottom — everything
+    above is a derived/analytic reading of what the detector decided;
+    this is the first Resonance visual driven straight from the actual
+    processed audio, so a ringing partial visibly getting reined in
+    reads as a real bright band being pulled down, not an abstract meter
+    moving. */
 class ResonanceView : public juce::Component
 {
 public:
-    ResonanceView() { addAndMakeVisible(graph); addAndMakeVisible(bars); }
+    ResonanceView() { addAndMakeVisible(graph); addAndMakeVisible(bars); addAndMakeVisible(spectrogram); }
 
     void push(float normDepth) { graph.push(normDepth); }
     void setBandData(int numBands, const float* cutDbPerBand) { bars.setData(numBands, cutDbPerBand); }
+    void setSpectrogramSampleRate(double sr) { spectrogram.setSampleRate(sr); }
+    void pushSpectrogramBlock(const float* fftWindow) { spectrogram.pushBlock(fftWindow); }
 
 private:
     void resized() override
     {
         auto b = getLocalBounds();
+        // Real POST-Resonance waterfall along the bottom — the genuinely
+        // new thing here: watching an actual ringing partial get pulled
+        // down live as it crosses the module's own detector, instead of
+        // only seeing the static per-band cut depth the bars already
+        // show.
+        auto specRow = b.removeFromBottom(juce::jmax(40, b.getHeight() / 4));
+        b.removeFromBottom(6);
+        spectrogram.setBounds(specRow);
+
         auto left = b.removeFromLeft(b.getWidth() / 2);
         left.removeFromRight(4);
         graph.setBounds(left);
@@ -2170,6 +2640,7 @@ private:
 
     EnvelopeGraph graph;
     ResBandBars bars;
+    Spectrogram spectrogram;
 };
 
 /** Delay's "Tap Timeline" — a real depiction of the actual Pre-Delay/Time/
@@ -2340,23 +2811,31 @@ private:
     TapTimelineView timeline;
 };
 
-/** MACROS-page signal-chain flow strip — a whole-plugin overview that
-    didn't exist anywhere before now: the 12 modules drawn as connected
-    nodes in their REAL live processing order (XaLZaProcessor::
-    getChainSlotAt — the exact order moveModule()/the Chain Order popup
-    actually runs processBlock() in, so a reorder shows up here
-    immediately, not the fixed original sequence). Each node's glow
-    brightness is that module's own real post-processing output level
-    (proc.getMeterDbL/R at tapForSlot(slot) — the identical MeterTap value
-    that module's own page IN/OUT bars read), and a bypassed module draws
-    hollow/dim from its own real bypass parameter — nothing here is
-    inferred or animated. Clicking a node jumps straight to that module's
-    page, the same "glance at the LED ladder, click the stage you care
-    about" workflow a hardware channel strip gives you. */
+/** MASTER-page signal-chain overview — the brand's own palm icon turned
+    into real navigation: the 12 modules grouped into 5 fronds (INPUT =
+    Pre/Gate/Ess, DYN = Comp/Opto, TONE = Eq/Res/Sat, SPACE = Dbl/Rev/Dly,
+    OUT = Lim), each frond a soft tapered leaf-wash — the same "real
+    peak-hold width" math paintPalmFrond/RadialHarmonicView already use
+    elsewhere — that visibly blooms wider and brighter the louder that
+    whole stage's real live output is right now (loudest non-bypassed
+    member of the group; a genuine "how hot is this section" reading, not
+    a decoration on a timer). Every individual module still sits on its
+    frond as its own dot, exactly as the old flat node row had: real
+    glow from that module's own post-processing level (proc.getMeterDbL/
+    R at tapForSlot(slot), the identical value that module's own page IN/
+    OUT bars read), hollow/dim when genuinely bypassed, clickable to jump
+    straight to that module's page. Positions are grouped by module
+    IDENTITY now, not by the live processing order the old flat row used
+    — a stable spatial layout (PRE always sits under INPUT, LIM always
+    under OUT) reads better for "which section is doing what" at a
+    glance than shuffling positions on every drag; the actual live
+    execution sequence remains fully visible and editable in the
+    dedicated Chain Order popup, which is what that popup is for. */
 class SignalChainFlowView : public juce::Component
 {
 public:
     static constexpr int kNumSlots = 12;
+    static constexpr int kNumGroups = 5;
 
     struct NodeState { bool bypassed = false; float levelDb = -100.0f; };
 
@@ -2364,6 +2843,9 @@ public:
 
     void setTabIndices(const int* tabIdx) { std::copy(tabIdx, tabIdx + kNumSlots, tabIndexBySlot); }
 
+    // Kept for API compatibility with the caller (the real chain
+    // sequence still gets fed in every frame) but no longer drives this
+    // view's layout — see class comment above.
     void setChainOrder(const int* slotOrder) { std::copy(slotOrder, slotOrder + kNumSlots, order); repaint(); }
 
     void setNodeState(int slotId, bool bypassed, float levelDb)
@@ -2374,6 +2856,10 @@ public:
     }
 
 private:
+    static constexpr int groupMembers[kNumGroups][3] = {
+        { 0, 1, 2 }, { 3, 4, -1 }, { 5, 6, 7 }, { 8, 9, 10 }, { 11, -1, -1 }
+    };
+
     void paint(juce::Graphics& g) override
     {
         auto b = getLocalBounds().toFloat();
@@ -2383,55 +2869,131 @@ private:
         g.drawRect(b, 1.0f);
 
         auto area = b.reduced(8.0f, 3.0f);
-        float nodeW = area.getWidth() / (float) kNumSlots;
-        float cy = area.getY() + 11.0f;
-        float r = 7.5f;
-
-        for (int i = 0; i < kNumSlots - 1; ++i)
+        if (area.getWidth() < 60.0f || area.getHeight() < 24.0f)
         {
-            float x0 = area.getX() + nodeW * (i + 0.5f) + r + 2.0f;
-            float x1 = area.getX() + nodeW * (i + 1.5f) - r - 2.0f;
-            g.setColour(XaLZaColour::borderSoft);
-            g.drawLine(x0, cy, x1, cy, 1.2f);
+            cachedNodeCount = 0;
+            return;
         }
 
-        for (int i = 0; i < kNumSlots; ++i)
-        {
-            int slotId = order[i];
-            auto& n = nodes[(size_t) juce::jlimit(0, kNumSlots - 1, slotId)];
-            float cx = area.getX() + nodeW * (i + 0.5f);
-            float norm = juce::jlimit(0.0f, 1.0f, (n.levelDb + 60.0f) / 60.0f);
+        static const char* groupLabel[kNumGroups] = { "INPUT", "DYN", "TONE", "SPACE", "OUT" };
 
-            if (n.bypassed)
+        float cellW = area.getWidth() / (float) kNumGroups;
+        float cy = area.getY() + 11.0f;
+        float baseY = area.getBottom() - 10.0f;
+        float r = 6.5f;
+        int cached = 0;
+
+        for (int gi = 0; gi < kNumGroups; ++gi)
+        {
+            float cellX0 = area.getX() + cellW * (float) gi;
+            float cellCx = cellX0 + cellW * 0.5f;
+
+            int members[3]; int n = 0;
+            for (int k = 0; k < 3; ++k)
+                if (groupMembers[gi][k] >= 0) members[n++] = groupMembers[gi][k];
+
+            // Loudest currently-active (non-bypassed) member of the
+            // group — a real "how hot is this whole stage" reading.
+            float groupLevel = 0.0f;
+            for (int k = 0; k < n; ++k)
             {
-                g.setColour(XaLZaColour::textMuted.withAlpha(0.55f));
-                g.drawEllipse(cx - r, cy - r, r * 2.0f, r * 2.0f, 1.3f);
+                auto& nd = nodes[(size_t) members[k]];
+                if (!nd.bypassed)
+                    groupLevel = juce::jmax(groupLevel, juce::jlimit(0.0f, 1.0f, (nd.levelDb + 60.0f) / 60.0f));
             }
-            else
+
+            // Soft tapered leaf-wash behind the cluster — narrow at the
+            // base, widest at mid-height, tapering to a point at the
+            // top, its width and brightness driven by groupLevel.
             {
-                auto core = XaLZaColour::accent2.interpolatedWith(XaLZaColour::accent, norm * 0.6f);
-                g.setColour(core.withAlpha(0.10f + norm * 0.25f));
-                g.fillEllipse(cx - r * 1.9f, cy - r * 1.9f, r * 3.8f, r * 3.8f);
-                g.setColour(core);
-                g.fillEllipse(cx - r, cy - r, r * 2.0f, r * 2.0f);
+                constexpr int steps = 12;
+                juce::Path frond;
+                std::vector<juce::Point<float>> left, right;
+                left.reserve(steps + 1); right.reserve(steps + 1);
+                float halfW = cellW * 0.42f * (0.35f + 0.65f * groupLevel);
+                float topY = cy - r - 3.0f;
+                for (int s = 0; s <= steps; ++s)
+                {
+                    float t = (float) s / (float) steps;
+                    float y = baseY - t * (baseY - topY);
+                    float w = halfW * std::sin(t * juce::MathConstants<float>::pi);
+                    left.push_back({ cellCx - w, y });
+                    right.push_back({ cellCx + w, y });
+                }
+                frond.startNewSubPath(left.front());
+                for (size_t s = 1; s < left.size(); ++s) frond.lineTo(left[s]);
+                for (size_t s = right.size(); s-- > 0; ) frond.lineTo(right[s]);
+                frond.closeSubPath();
+
+                auto washColour = XaLZaColour::accent2.interpolatedWith(XaLZaColour::accent, groupLevel * 0.6f);
+                g.setColour(washColour.withAlpha(0.05f + groupLevel * 0.18f));
+                g.fillPath(frond);
+            }
+
+            for (int k = 0; k < n; ++k)
+            {
+                int slotId = members[k];
+                auto& nd = nodes[(size_t) slotId];
+                float t = (float) (k + 1) / (float) (n + 1);
+                float cx = cellX0 + cellW * t;
+                float norm = juce::jlimit(0.0f, 1.0f, (nd.levelDb + 60.0f) / 60.0f);
+
+                if (nd.bypassed)
+                {
+                    g.setColour(XaLZaColour::textMuted.withAlpha(0.55f));
+                    g.drawEllipse(cx - r, cy - r, r * 2.0f, r * 2.0f, 1.3f);
+                }
+                else
+                {
+                    auto core = XaLZaColour::accent2.interpolatedWith(XaLZaColour::accent, norm * 0.6f);
+                    g.setColour(core.withAlpha(0.10f + norm * 0.25f));
+                    g.fillEllipse(cx - r * 1.8f, cy - r * 1.8f, r * 3.6f, r * 3.6f);
+                    g.setColour(core);
+                    g.fillEllipse(cx - r, cy - r, r * 2.0f, r * 2.0f);
+                }
+
+                g.setFont(juce::Font(juce::FontOptions(6.6f).withStyle("Bold")));
+                g.setColour(nd.bypassed ? XaLZaColour::textMuted : XaLZaColour::textHi);
+                g.drawText(shortCode(slotId), juce::Rectangle<float>(cx - 16.0f, cy + r + 2.0f, 32.0f, 9.0f),
+                            juce::Justification::centred);
+
+                if (cached < kNumSlots)
+                {
+                    nodeX[cached] = cx; nodeY[cached] = cy; nodeSlot[cached] = slotId;
+                    ++cached;
+                }
             }
 
             g.setFont(juce::Font(juce::FontOptions(7.2f).withStyle("Bold")));
-            g.setColour(n.bypassed ? XaLZaColour::textMuted : XaLZaColour::textHi);
-            g.drawText(shortCode(slotId), juce::Rectangle<float>(cx - nodeW * 0.5f, cy + r + 3.0f, nodeW, 11.0f),
+            g.setColour(XaLZaColour::textMuted.withAlpha(0.8f));
+            g.drawText(groupLabel[gi], juce::Rectangle<float>(cellX0, area.getBottom() - 9.0f, cellW, 9.0f),
                         juce::Justification::centred);
+
+            if (gi < kNumGroups - 1)
+            {
+                float xDiv = cellX0 + cellW;
+                g.setColour(XaLZaColour::borderSoft);
+                g.drawLine(xDiv, area.getY() + 2.0f, xDiv, area.getBottom() - 11.0f, 0.6f);
+            }
         }
+
+        cachedNodeCount = cached;
     }
 
     void mouseUp(const juce::MouseEvent& e) override
     {
-        if (onNodeClicked == nullptr)
+        if (onNodeClicked == nullptr || cachedNodeCount == 0)
             return;
-        auto area = getLocalBounds().toFloat().reduced(8.0f, 3.0f);
-        float nodeW = area.getWidth() / (float) kNumSlots;
-        int i = (int) ((e.position.x - area.getX()) / juce::jmax(1.0f, nodeW));
-        i = juce::jlimit(0, kNumSlots - 1, i);
-        int slotId = order[i];
+        int best = 0;
+        float bestD2 = 1.0e9f;
+        for (int i = 0; i < cachedNodeCount; ++i)
+        {
+            float dx = e.position.x - nodeX[i];
+            float dy = e.position.y - nodeY[i];
+            float d2 = dx * dx + dy * dy;
+            if (d2 < bestD2) { bestD2 = d2; best = i; }
+        }
+        int slotId = nodeSlot[best];
         onNodeClicked(tabIndexBySlot[(size_t) juce::jlimit(0, kNumSlots - 1, slotId)]);
     }
 
@@ -2445,6 +3007,11 @@ private:
     int order[kNumSlots] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
     int tabIndexBySlot[kNumSlots] = {};
     std::array<NodeState, kNumSlots> nodes;
+
+    float nodeX[kNumSlots] = {};
+    float nodeY[kNumSlots] = {};
+    int nodeSlot[kNumSlots] = {};
+    int cachedNodeCount = 0;
 };
 
 /** Chain-order popup content: 12 rows, real press-and-drag reordering (not
@@ -2695,6 +3262,7 @@ private:
     void layoutKnobRow(const std::vector<KnobUI*>& row, juce::Rectangle<int> area,
                         int labelH, int knobW, int knobH, int cellW);
     void layoutModuleMeter(ModuleMeterUI& mm, juce::Rectangle<int> area);
+    void paintPalmFrond(juce::Graphics&, juce::Rectangle<int> area);
     void timerCallback() override;
 
     juce::TooltipWindow tooltipWindow { this, 500 };

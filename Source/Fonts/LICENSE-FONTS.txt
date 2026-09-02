@@ -2,9 +2,15 @@ Fonts embedded in The XaLZa
 ============================
 
 - Space Grotesk (Regular, SemiBold) — designed by Florian Karsten
-- IBM Plex Mono (Regular, Medium) — designed by IBM / Bold Monday
+- Bebas Neue (Regular) — designed by Ryoichi Tsunekawa, Dharma Type
+- Space Mono (Regular, Bold) — designed by Colophon Foundry / Google Fonts
 
-Both are licensed under the SIL Open Font License, Version 1.1
+Bebas Neue and Space Mono are part of the Xazainspain brand's own type
+system (see the brand's GUIA-DE-MARCA.md): Bebas Neue for headline/title
+text, Space Mono for technical labels and data readouts (dB, Hz, ms, LUFS
+throughout the plugin) — replacing the previous IBM Plex Mono.
+
+All three are licensed under the SIL Open Font License, Version 1.1
 (https://openfontlicense.org). The OFL permits embedding these fonts in a
 software binary (including a commercial VST3 plugin) and redistributing
 them as part of that software, at no cost and without additional

@@ -626,6 +626,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         essReductionDbUI.store(0.0f, std::memory_order_relaxed);
     }
     updateMeter((int) TapEss, buffer, numSamples, numCh);
+    pushRaw((int) RawEss, buffer, numSamples, numCh);
     };
 
     // ---------------------------------------------------------------
@@ -881,6 +882,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         resCutDbUI.store(0.0f, std::memory_order_relaxed);
     }
     updateMeter((int) TapRes, buffer, numSamples, numCh);
+    pushRaw((int) RawRes, buffer, numSamples, numCh);
     };
 
     // ---------------------------------------------------------------

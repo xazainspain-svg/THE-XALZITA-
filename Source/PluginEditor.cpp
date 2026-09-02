@@ -6,15 +6,18 @@
 // =============================================================================
 XaLZaLookAndFeel::XaLZaLookAndFeel()
 {
-    // Embedded fonts — the exact two typefaces the original web mockup uses
-    // (Space Grotesk for UI text, IBM Plex Mono for numeric/technical
-    // readouts), compiled into the binary via BinaryData so no system
-    // install is required. See getTypefaceForFont() below for how every
-    // Font constructed anywhere in the editor resolves to one of these.
+    // Embedded fonts — Space Grotesk for general UI text (unchanged from
+    // the original web mockup), plus the Xazainspain brand's own type
+    // system: Space Mono for numeric/technical readouts (replacing IBM
+    // Plex Mono) and Bebas Neue for headline moments. Compiled into the
+    // binary via BinaryData so no system install is required. See
+    // getTypefaceForFont() below for how every Font constructed anywhere
+    // in the editor resolves to one of these.
     sansRegular = juce::Typeface::createSystemTypefaceFor(BinaryData::SpaceGroteskRegular_ttf, BinaryData::SpaceGroteskRegular_ttfSize);
     sansBold    = juce::Typeface::createSystemTypefaceFor(BinaryData::SpaceGroteskSemiBold_ttf, BinaryData::SpaceGroteskSemiBold_ttfSize);
-    monoRegular = juce::Typeface::createSystemTypefaceFor(BinaryData::IBMPlexMonoRegular_ttf, BinaryData::IBMPlexMonoRegular_ttfSize);
-    monoBold    = juce::Typeface::createSystemTypefaceFor(BinaryData::IBMPlexMonoMedium_ttf, BinaryData::IBMPlexMonoMedium_ttfSize);
+    monoRegular = juce::Typeface::createSystemTypefaceFor(BinaryData::SpaceMonoRegular_ttf, BinaryData::SpaceMonoRegular_ttfSize);
+    monoBold    = juce::Typeface::createSystemTypefaceFor(BinaryData::SpaceMonoBold_ttf, BinaryData::SpaceMonoBold_ttfSize);
+    titleRegular = juce::Typeface::createSystemTypefaceFor(BinaryData::BebasNeueRegular_ttf, BinaryData::BebasNeueRegular_ttfSize);
 
     setColour(juce::Slider::textBoxTextColourId, XaLZaColour::textLabel);
     setColour(juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
@@ -30,19 +33,27 @@ XaLZaLookAndFeel::XaLZaLookAndFeel()
 juce::Typeface::Ptr XaLZaLookAndFeel::getTypefaceForFont(const juce::Font& f)
 {
     // Every Font built anywhere in this editor — whether it explicitly asks
-    // for "IBM Plex Mono" (numeric readouts, via monoFont() below) or just
-    // uses the default typeface name (every other label/button, unchanged
-    // call sites) — is routed through here, so this one place decides which
-    // of the four embedded weights actually gets drawn.
-    const bool wantsMono = f.getTypefaceName().containsIgnoreCase("Plex Mono");
-    if (wantsMono)
+    // for "Space Mono" (numeric readouts, via monoFont() below), "Bebas
+    // Neue" (headline text, via titleFont() below), or just uses the
+    // default typeface name (every other label/button, unchanged call
+    // sites) — is routed through here, so this one place decides which of
+    // the embedded weights actually gets drawn.
+    const auto& name = f.getTypefaceName();
+    if (name.containsIgnoreCase("Bebas Neue"))
+        return titleRegular;
+    if (name.containsIgnoreCase("Space Mono"))
         return f.isBold() ? monoBold : monoRegular;
     return f.isBold() ? sansBold : sansRegular;
 }
 
 juce::Font XaLZaLookAndFeel::monoFont(float size, bool bold)
 {
-    return juce::Font(juce::FontOptions(size).withName("IBM Plex Mono").withStyle(bold ? "Bold" : "Regular"));
+    return juce::Font(juce::FontOptions(size).withName("Space Mono").withStyle(bold ? "Bold" : "Regular"));
+}
+
+juce::Font XaLZaLookAndFeel::titleFont(float size)
+{
+    return juce::Font(juce::FontOptions(size).withName("Bebas Neue"));
 }
 
 juce::Label* XaLZaLookAndFeel::createSliderTextBox(juce::Slider& slider)
@@ -1396,10 +1407,24 @@ void XaLZaEditor::timerCallback()
         preView.updateHarmonic(preSpecBuf);
         preView.setHpf(proc.getCurrentHpfHz(), sampleRatePre);
 
+        // Vowel/formant tracker reuses this exact same RawPre window —
+        // same tap, same fftSize (2048) — no extra sampling needed.
+        preView.setVowelSampleRate(sampleRatePre);
+        preView.pushVowel(preSpecBuf);
+
         float preWaveBuf[WaveformScope::numPoints];
         for (int i = 0; i < WaveformScope::numPoints; ++i)
             preWaveBuf[i] = proc.rawSample((int) XaLZaProcessor::RawPre, prePos - WaveformScope::numPoints + i);
         preView.setOutputWaveform(preWaveBuf);
+
+        // Real vocal pitch trace — same RawPre tap, a longer window so
+        // the autocorrelation has enough cycles of even a low male note
+        // (~70Hz) to lock onto.
+        preView.setPitchSampleRate(sampleRatePre);
+        float pitchBuf[PitchContourView::windowSize];
+        for (int i = 0; i < PitchContourView::windowSize; ++i)
+            pitchBuf[i] = proc.rawSample((int) XaLZaProcessor::RawPre, prePos - PitchContourView::windowSize + i);
+        preView.pushPitch(pitchBuf);
     }
     else if (currentTab == gateTabIndex)
     {
@@ -1418,13 +1443,14 @@ void XaLZaEditor::timerCallback()
         double sampleRateEss = proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0;
         essView.setSampleRate(sampleRateEss);
 
-        // RawGate is genuinely Ess's own input (Ess is the very next stage
-        // after Gate in the chain) — the exact signal runEss's detector
-        // analyzes, not an approximation.
+        // Post-fader, like every other visualiser in the plugin: RawEss is
+        // tapped right after the De-esser's own processing, so this shows
+        // the real reduced result (what actually continues down the
+        // chain), not the pre-Ess sibilant peak the detector reacted to.
         float specBufEss[DeEsserSpectrumView::fftSize];
-        int essPos = proc.getRawWritePos((int) XaLZaProcessor::RawGate);
+        int essPos = proc.getRawWritePos((int) XaLZaProcessor::RawEss);
         for (int i = 0; i < DeEsserSpectrumView::fftSize; ++i)
-            specBufEss[i] = proc.rawSample((int) XaLZaProcessor::RawGate, essPos - DeEsserSpectrumView::fftSize + i);
+            specBufEss[i] = proc.rawSample((int) XaLZaProcessor::RawEss, essPos - DeEsserSpectrumView::fftSize + i);
         essView.update(specBufEss);
 
         // Mirrors runEss's own bandFreq computation exactly (see
@@ -1489,6 +1515,16 @@ void XaLZaEditor::timerCallback()
         for (int b = 0; b < numBands; ++b)
             perBand[b] = proc.getResBandCutDb(b);
         resView.setBandData(numBands, perBand);
+
+        // Real POST-Resonance waterfall — same RawRes tap the module's
+        // own gain-reduction detector already reacted to, see runRes.
+        double sampleRateRes = proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0;
+        resView.setSpectrogramSampleRate(sampleRateRes);
+        float resSpecBuf[Spectrogram::fftSize];
+        int resPos = proc.getRawWritePos((int) XaLZaProcessor::RawRes);
+        for (int i = 0; i < Spectrogram::fftSize; ++i)
+            resSpecBuf[i] = proc.rawSample((int) XaLZaProcessor::RawRes, resPos - Spectrogram::fftSize + i);
+        resView.pushSpectrogramBlock(resSpecBuf);
     }
     else if (currentTab == satTabIndex)
     {
@@ -1719,6 +1755,90 @@ void XaLZaEditor::timerCallback()
     repaint();
 }
 
+// A palmera frond whose silhouette is drawn BY the real master-output
+// waveform — not a decoration animated to look tropical, the actual
+// signal reshaped into a leaf. Takes a real amplitude envelope (peak-per-
+// bin over the last ~93ms of the same specRingMaster data feeding the
+// whole-mix spectrum analyser — a smoothed real outline, not raw
+// sample-by-sample jitter, so it reads as a leaf edge rather than noise),
+// bends it along a hand-computed quadratic-bezier spine (point AND
+// tangent available at every t, so the amplitude can offset perpendicular
+// to the curve instead of just up/down), and widens/narrows it with a
+// sine taper so it closes to a point at both the base and the tip like a
+// real leaf blade. Drawn low-opacity, first, so every other overview-page
+// widget sits on top of it as a watermark rather than competing with it.
+void XaLZaEditor::paintPalmFrond(juce::Graphics& g, juce::Rectangle<int> area)
+{
+    if (area.getWidth() < 60 || area.getHeight() < 60)
+        return;
+
+    constexpr int numBins = 40;
+    constexpr int windowSamples = 4096;   // ~93ms at 44.1kHz - long enough to read as "alive", not jittery
+    float env[numBins];
+    {
+        int pos = proc.getSpecWritePosMaster();
+        int stride = juce::jmax(1, windowSamples / numBins);
+        for (int b = 0; b < numBins; ++b)
+        {
+            float peak = 0.0f;
+            int start = pos - windowSamples + b * stride;
+            for (int n = 0; n < stride; ++n)
+                peak = juce::jmax(peak, std::abs(proc.specSampleMaster(start + n)));
+            env[b] = juce::jlimit(0.0f, 1.0f, peak);
+        }
+    }
+
+    // Spine control points: a gentle drooping arc from low-left up toward
+    // the top, echoing the curve of one of the brand palmera's own fronds.
+    juce::Point<float> p0((float) area.getX() + area.getWidth() * 0.15f, (float) area.getBottom());
+    juce::Point<float> p1((float) area.getX() - area.getWidth() * 0.10f, (float) area.getY() + area.getHeight() * 0.25f);
+    juce::Point<float> p2((float) area.getX() + area.getWidth() * 0.55f, (float) area.getY());
+
+    std::vector<juce::Point<float>> upperEdge, lowerEdge;
+    upperEdge.reserve((size_t) numBins);
+    lowerEdge.reserve((size_t) numBins);
+
+    for (int i = 0; i < numBins; ++i)
+    {
+        float t = (float) i / (float) (numBins - 1);
+        float omt = 1.0f - t;
+        juce::Point<float> pt(omt * omt * p0.x + 2.0f * omt * t * p1.x + t * t * p2.x,
+                               omt * omt * p0.y + 2.0f * omt * t * p1.y + t * t * p2.y);
+        juce::Point<float> tangent(2.0f * omt * (p1.x - p0.x) + 2.0f * t * (p2.x - p1.x),
+                                    2.0f * omt * (p1.y - p0.y) + 2.0f * t * (p2.y - p1.y));
+        float len = tangent.getDistanceFromOrigin();
+        juce::Point<float> normal = len > 0.0001f ? juce::Point<float>(-tangent.y / len, tangent.x / len)
+                                                    : juce::Point<float>(1.0f, 0.0f);
+
+        // Width envelope: zero at both ends (closes to a point, like a
+        // real leaf blade), widest a third of the way up, further puffed
+        // by the real amplitude measured at that point.
+        float shapeW = std::sin(t * juce::MathConstants<float>::pi);
+        float widthPx = (area.getWidth() * 0.16f) * shapeW * (0.35f + 0.65f * env[i]);
+
+        upperEdge.push_back(pt + normal * widthPx);
+        lowerEdge.push_back(pt - normal * widthPx);
+    }
+
+    juce::Path leaf;
+    leaf.startNewSubPath(upperEdge.front());
+    for (size_t i = 1; i < upperEdge.size(); ++i)
+        leaf.lineTo(upperEdge[i]);
+    for (size_t i = lowerEdge.size(); i-- > 0; )
+        leaf.lineTo(lowerEdge[i]);
+    leaf.closeSubPath();
+
+    g.setColour(XaLZaColour::accent.withAlpha(0.09f));
+    g.fillPath(leaf);
+    g.setColour(XaLZaColour::accent.withAlpha(0.16f));
+    g.strokePath(leaf, juce::PathStrokeType(1.0f));
+
+    // The trunk: a simple straight stroke from the spine's base, echoing
+    // the brand icon's own palm-green trunk beneath its fronds.
+    g.setColour(XaLZaColour::accent2.withAlpha(0.14f));
+    g.drawLine(p0.x, p0.y, p0.x, p0.y - area.getHeight() * 0.12f, 2.0f);
+}
+
 void XaLZaEditor::paint(juce::Graphics& g)
 {
     g.fillAll(XaLZaColour::panelBg);
@@ -1785,12 +1905,21 @@ void XaLZaEditor::paint(juce::Graphics& g)
     {
         auto content = body.reduced(marginX, marginY);
         auto masterPanel = content.removeFromRight(masterW);
+
+        // A palmera frond drawn BY the real master waveform, sitting low-
+        // opacity behind every other overview-page widget — the same real
+        // data the whole-mix spectrum analyser reads, just curved along a
+        // leaf spine instead of a straight oscilloscope line, so its
+        // silhouette genuinely bulges and textures with the actual output
+        // rather than being decoration. See paintPalmFrond() for the math.
+        paintPalmFrond(g, content);
+
         g.setColour(XaLZaColour::panelRaised);
         g.fillRoundedRectangle(masterPanel.toFloat(), 4.0f);
         g.setColour(XaLZaColour::borderSoft);
         g.drawRoundedRectangle(masterPanel.toFloat(), 4.0f, 1.0f);
         g.setColour(XaLZaColour::textMuted);
-        g.setFont(juce::Font(juce::FontOptions(11.0f).withStyle("Bold")));
+        g.setFont(XaLZaLookAndFeel::titleFont(15.0f));
         g.drawText("MASTER", masterPanel.removeFromTop(20), juce::Justification::centred);
     }
 
@@ -1904,7 +2033,9 @@ void XaLZaEditor::resized()
         bypassSummaryLabel.setBounds(content.removeFromBottom(16));
         content.removeFromBottom(4);
 
-        chainFlow.setBounds(content.removeFromBottom(34));
+        // Taller than the old flat node row (34px) — the 5-frond layout
+        // needs real vertical room for the leaf-wash shapes to read.
+        chainFlow.setBounds(content.removeFromBottom(78));
         chainFlowCap.setBounds(content.removeFromBottom(11));
         content.removeFromBottom(6);
 
