@@ -2,37 +2,12 @@ Fonts embedded in The XaLZa
 ============================
 
 - Space Grotesk (Regular, SemiBold) — designed by Florian Karsten
-- Bebas Neue (Regular) — designed by Ryoichi Tsunekawa, Dharma Type
-- Space Mono (Regular, Bold) — designed by Colophon Foundry / Google Fonts
-- Dancing Script (Bold/700) — designed by Impallari Type / The Dancing
-  Script Project Authors
+- IBM Plex Mono (Regular, Medium) — designed by IBM / Bold Monday
 
-Bebas Neue, Space Mono, and Dancing Script are the Xazainspain brand's own
-type system (see the brand's GUIA-DE-MARCA.md): Bebas Neue for headline/
-title text and the "XAZA" half of the wordmark, Space Mono for technical
-labels and data readouts (dB, Hz, ms, LUFS throughout the plugin —
-replacing the previous IBM Plex Mono), and Dancing Script Bold for the
-lowercase "inspain" half of the wordmark, per the brand guide's rule that
-it always appears in that exact face/weight, lowercase, never bold-sans.
-
-Dancing Script's canonical source (fonts.google.com/specimen/Dancing+Script,
-and the google/fonts GitHub mirror) ships it only as a variable font, with
-no static per-weight file — the embedded Regular.ttf/Bold.ttf files JUCE's
-Typeface::createSystemTypefaceFor() needs don't exist upstream. The file
-here (DancingScript-Bold.ttf) is a static, single-instance Bold (700)
-extraction of that same upstream variable font, pre-built by the
-Fontsource project's font-building pipeline (github.com/fontsource/
-font-files) — Fontsource exists specifically to instance Google's
-variable fonts into ordinary static per-weight files for exactly this
-kind of embedding use case. It is the same Dancing Script Bold design,
-just packaged the way JUCE can load it, still under the identical OFL
-license as the original.
-
-All four families are licensed under the SIL Open Font License, Version
-1.1 (https://openfontlicense.org). The OFL permits embedding these fonts
-in a software binary (including a commercial VST3 plugin) and
-redistributing them as part of that software, at no cost and without
-additional permission, provided the fonts themselves are not sold on
-their own.
+Both are licensed under the SIL Open Font License, Version 1.1
+(https://openfontlicense.org). The OFL permits embedding these fonts in a
+software binary (including a commercial VST3 plugin) and redistributing
+them as part of that software, at no cost and without additional
+permission, provided the fonts themselves are not sold on their own.
 
 Full license text: https://openfontlicense.org
