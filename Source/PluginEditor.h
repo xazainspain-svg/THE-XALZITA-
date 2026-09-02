@@ -10,19 +10,27 @@
 // properties, oklch() converted to sRGB) so the plugin looks like the
 // same product: --panel, --panel-2, --panel-3, --border, --border-soft,
 // --text-hi, --text, --text-muted, --accent, --accent2.
+// Xazainspain brand palette (see GUIA-DE-MARCA.md): a warm near-black
+// "Noche" ramp for panels instead of neutral gray, Rosa as the primary
+// accent (was a generic orange), Verde palma as the secondary/"healthy"
+// accent (was a generic teal — arguably an even better semantic fit, since
+// green already reads as "good" universally), Crema/Cacao for text instead
+// of flat grays. Danger stays a plain, unbranded red on purpose: a
+// clipping/over indicator needs to read as "wrong" unambiguously, so it's
+// deliberately left outside the brand's own colour language.
 namespace XaLZaColour
 {
-    static const juce::Colour panelBg      { 0xff272829 };  // --panel
-    static const juce::Colour panelRaised  { 0xff313233 };  // --panel-2
-    static const juce::Colour panelControl { 0xff3c3d3e };  // --panel-3
-    static const juce::Colour border       { 0xff474849 };  // --border
-    static const juce::Colour borderSoft   { 0xff3c3d3f };  // --border-soft
-    static const juce::Colour textHi       { 0xffe7e8e8 };  // --text-hi
-    static const juce::Colour textLabel    { 0xffb0b1b2 };  // --text
-    static const juce::Colour textMuted    { 0xff747476 };  // --text-muted
-    static const juce::Colour accent       { 0xffe78a45 };  // --accent (warm orange)
-    static const juce::Colour accent2      { 0xff33a3b4 };  // --accent2 (teal)
-    static const juce::Colour danger       { 0xffc74b47 };  // --danger
+    static const juce::Colour panelBg      { 0xff17131a };  // near "Noche" #100C14, lifted slightly for panel contrast
+    static const juce::Colour panelRaised  { 0xff201a24 };
+    static const juce::Colour panelControl { 0xff2a222e };
+    static const juce::Colour border       { 0xff3f3542 };
+    static const juce::Colour borderSoft   { 0xff342b37 };
+    static const juce::Colour textHi       { 0xfff8f2ea };  // Crema
+    static const juce::Colour textLabel    { 0xffc9b6a4 };  // Cacao
+    static const juce::Colour textMuted    { 0xff8f7f74 };  // Cacao, darkened for muted use
+    static const juce::Colour accent       { 0xffe37f97 };  // Rosa
+    static const juce::Colour accent2      { 0xff4fa06c };  // Verde palma
+    static const juce::Colour danger       { 0xffc74b47 };  // unbranded on purpose - see comment above
 }
 
 /** Rotary knob: thin track, accent- or gray-coloured value arc, a
@@ -2439,61 +2447,182 @@ private:
     std::array<NodeState, kNumSlots> nodes;
 };
 
-/** Chain-order popup content: 12 rows (current processing order, top =
-    first), each with Up/Down buttons that call XaLZaProcessor::moveModule
-    directly — genuinely reorders the DSP chain, not just a display. Meant
-    to be launched via juce::CallOutBox from a title-bar button, so it
-    never has to fight the fixed-pixel module-page layouts for space. */
-class ChainOrderPanel : public juce::Component
+/** Chain-order popup content: 12 rows, real press-and-drag reordering (not
+    just Up/Down stepping — those stay too, as a precise fallback). Drag a
+    row anywhere in the list in one gesture; the other rows animate out of
+    the way live to show exactly where it'll land, and the real DSP chain
+    reorders live too via XaLZaProcessor::moveModuleTo() (real-time-safe,
+    same contract as moveModule()) — so you hear the chain change as you
+    drag, not just once you drop. Each row also carries a small live level
+    bar for that module's real current output, so you can see which stage
+    is "hot" while deciding where to put it. Meant to be launched via
+    juce::CallOutBox from a title-bar button, so it never has to fight the
+    fixed-pixel module-page layouts for space. */
+class ChainOrderPanel : public juce::Component, private juce::Timer
 {
 public:
     explicit ChainOrderPanel(XaLZaProcessor& p) : proc(p)
     {
-        for (int i = 0; i < XaLZaProcessor::kNumSlots; ++i)
+        for (int slotId = 0; slotId < XaLZaProcessor::kNumSlots; ++slotId)
         {
-            auto* row = rows.add(new Row());
-            addAndMakeVisible(row->label);
-            addAndMakeVisible(row->up);
-            addAndMakeVisible(row->down);
-            row->label.setFont(XaLZaLookAndFeel::monoFont(12.5f));
-            row->up.setButtonText(juce::CharPointer_UTF8("\xE2\x96\xB2"));
-            row->down.setButtonText(juce::CharPointer_UTF8("\xE2\x96\xBC"));
+            auto* row = new Row(*this, slotId);
+            rowsBySlot[(size_t) slotId] = row;
+            rowStorage.add(row);
+            addAndMakeVisible(row);
+            row->up.onClick   = [this, slotId] { proc.moveModule(slotId, -1); layoutRows(false); };
+            row->down.onClick = [this, slotId] { proc.moveModule(slotId, 1);  layoutRows(false); };
         }
-        refresh();
-        setSize(200, XaLZaProcessor::kNumSlots * rowH + 8);
+        setSize(220, XaLZaProcessor::kNumSlots * rowH + 8);
+        layoutRows(true);
+        startTimerHz(30);   // drives each row's live mini-meter repaint
     }
 
-    void refresh()
+    // Public so a row's own drag handlers (mouseDown/Drag/Up) can drive
+    // the shared reorder logic without duplicating it per row.
+    void beginDrag(int slotId)
     {
+        draggingSlot = slotId;
+        rowsBySlot[(size_t) slotId]->toFront(false);
+    }
+
+    void updateDrag(int slotId, int panelY)
+    {
+        auto* row = rowsBySlot[(size_t) slotId];
+        int clampedY = juce::jlimit(0, XaLZaProcessor::kNumSlots * rowH - rowH, panelY);
+        row->setTopLeftPosition(row->getX(), clampedY);
+
+        int targetPos = juce::jlimit(0, XaLZaProcessor::kNumSlots - 1,
+                                      (clampedY + rowH / 2) / rowH);
+        if (targetPos != proc.getChainPosition(slotId))
+        {
+            proc.moveModuleTo(slotId, targetPos);   // live audio reorder, right now
+            layoutRows(false);
+        }
+    }
+
+    void endDrag(int slotId)
+    {
+        draggingSlot = -1;
+        layoutRows(false);   // settles the dropped row into its final slot, animated
+        juce::ignoreUnused(slotId);
+    }
+
+    bool isDragging(int slotId) const noexcept { return draggingSlot == slotId; }
+
+private:
+    void timerCallback() override
+    {
+        for (auto* row : rowsBySlot)
+            row->repaint();
+    }
+
+    // Repositions every row (except the one currently being dragged, which
+    // follows the mouse instead) to match the processor's live chain
+    // order, updating labels and eased into place via ComponentAnimator
+    // rather than snapping.
+    void layoutRows(bool immediate)
+    {
+        auto& animator = juce::Desktop::getInstance().getAnimator();
         for (int pos = 0; pos < XaLZaProcessor::kNumSlots; ++pos)
         {
             int slotId = proc.getChainSlotAt(pos);
-            auto* row = rows[pos];
-            row->label.setText(juce::String(pos + 1) + ". " + XaLZaProcessor::slotName(slotId),
-                                juce::dontSendNotification);
-            row->up.onClick = [this, slotId] { proc.moveModule(slotId, -1); refresh(); };
-            row->down.onClick = [this, slotId] { proc.moveModule(slotId, 1); refresh(); };
+            auto* row = rowsBySlot[(size_t) slotId];
+            row->setLabelText(juce::String(pos + 1) + ". " + XaLZaProcessor::slotName(slotId));
             row->up.setEnabled(pos > 0);
             row->down.setEnabled(pos < XaLZaProcessor::kNumSlots - 1);
+
+            if (slotId == draggingSlot)
+                continue;   // this one's under the mouse right now
+
+            auto target = juce::Rectangle<int>(4, 4 + pos * rowH, getWidth() - 8, rowH - 2);
+            if (immediate || !row->isVisible())
+            {
+                row->setBounds(target);
+                row->setVisible(true);
+            }
+            else
+            {
+                animator.animateComponent(row, target, 1.0f, 150, false, 1.0, 0.6);
+            }
         }
     }
 
-private:
-    void resized() override
+    /** One draggable row: a "≡" handle + label on the left (the drag
+        surface), Up/Down buttons on the right (untouched, still call
+        moveModule directly through the owning panel). */
+    struct Row : public juce::Component
     {
-        for (int i = 0; i < rows.size(); ++i)
+        Row(ChainOrderPanel& ownerIn, int slotIdIn) : owner(ownerIn), slotId(slotIdIn)
         {
-            auto area = juce::Rectangle<int>(4, 4 + i * rowH, getWidth() - 8, rowH - 2);
-            rows[i]->down.setBounds(area.removeFromRight(22));
-            rows[i]->up.setBounds(area.removeFromRight(22));
-            rows[i]->label.setBounds(area);
+            label.setFont(XaLZaLookAndFeel::monoFont(12.5f));
+            label.setInterceptsMouseClicks(false, false);   // clicks pass through to the row (drag handle)
+            addAndMakeVisible(label);
+            up.setButtonText(juce::CharPointer_UTF8("\xE2\x96\xB2"));
+            down.setButtonText(juce::CharPointer_UTF8("\xE2\x96\xBC"));
+            addAndMakeVisible(up);
+            addAndMakeVisible(down);
         }
-    }
 
-    struct Row { juce::Label label; juce::TextButton up, down; };
+        void setLabelText(const juce::String& t) { label.setText(t, juce::dontSendNotification); }
+
+        void resized() override
+        {
+            auto area = getLocalBounds();
+            down.setBounds(area.removeFromRight(22));
+            up.setBounds(area.removeFromRight(22));
+            label.setBounds(area.withTrimmedLeft(14));   // leave room for the handle glyph
+        }
+
+        void paint(juce::Graphics& g) override
+        {
+            bool dragging = owner.isDragging(slotId);
+            if (dragging)
+            {
+                juce::DropShadow shadow(juce::Colours::black.withAlpha(0.6f), 8, {});
+                shadow.drawForRectangle(g, getLocalBounds());
+                g.setColour(XaLZaColour::panelControl);
+                g.fillRoundedRectangle(getLocalBounds().toFloat(), 3.0f);
+                g.setColour(XaLZaColour::accent);
+                g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(0.5f), 3.0f, 1.2f);
+            }
+
+            // Drag-handle glyph.
+            g.setColour(dragging ? XaLZaColour::accent : XaLZaColour::textMuted);
+            g.setFont(juce::Font(juce::FontOptions(11.0f)));
+            g.drawText(juce::CharPointer_UTF8("\xE2\x8B\xAE"), juce::Rectangle<int>(0, 0, 14, getHeight()),
+                       juce::Justification::centred);
+
+            // Live mini level bar for this module's real current output —
+            // same tap every other per-module meter in the plugin reads.
+            float dbL = owner.proc.getMeterDbL(XaLZaProcessor::tapForSlot(slotId));
+            float dbR = owner.proc.getMeterDbR(XaLZaProcessor::tapForSlot(slotId));
+            float norm = juce::jlimit(0.0f, 1.0f, (juce::jmax(dbL, dbR) + 60.0f) / 60.0f);
+            auto barArea = getLocalBounds().removeFromBottom(2).toFloat();
+            g.setColour(XaLZaColour::borderSoft);
+            g.fillRect(barArea);
+            g.setColour(dragging ? XaLZaColour::accent : XaLZaColour::accent2);
+            g.fillRect(barArea.withWidth(barArea.getWidth() * norm));
+        }
+
+        void mouseDown(const juce::MouseEvent&) override { owner.beginDrag(slotId); repaint(); }
+        void mouseDrag(const juce::MouseEvent& e) override
+        {
+            auto posInPanel = getParentComponent()->getLocalPoint(this, e.getPosition());
+            owner.updateDrag(slotId, posInPanel.getY() - getHeight() / 2);
+        }
+        void mouseUp(const juce::MouseEvent&) override { owner.endDrag(slotId); repaint(); }
+
+        ChainOrderPanel& owner;
+        int slotId;
+        juce::Label label;
+        juce::TextButton up, down;
+    };
+
     static constexpr int rowH = 22;
     XaLZaProcessor& proc;
-    juce::OwnedArray<Row> rows;
+    std::array<Row*, XaLZaProcessor::kNumSlots> rowsBySlot {};
+    juce::OwnedArray<Row> rowStorage;   // owns the Row*s referenced by rowsBySlot
+    int draggingSlot = -1;
 };
 
 /**

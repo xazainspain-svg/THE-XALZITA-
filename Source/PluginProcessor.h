@@ -114,6 +114,43 @@ public:
         chainOrder[(size_t) newPos].store(slotId, std::memory_order_relaxed);
         chainOrder[(size_t) pos].store(other, std::memory_order_relaxed);
     }
+
+    // Drag-and-drop reorder: moves slotId directly to an arbitrary target
+    // position in one go (a real array move — everything between the old
+    // and new position shifts down/up by one), rather than the single-step
+    // neighbour swap moveModule() above does. Same UI-driven-only,
+    // real-time-safe contract (plain atomic stores) — safe to call on
+    // every intermediate position while a drag is in progress, so the
+    // live chain genuinely follows the drag instead of only updating on
+    // drop.
+    void moveModuleTo(int slotId, int targetPos) noexcept
+    {
+        targetPos = juce::jlimit(0, kNumSlots - 1, targetPos);
+        int pos = getChainPosition(slotId);
+        if (pos == targetPos)
+            return;
+
+        int order[kNumSlots];
+        for (int i = 0; i < kNumSlots; ++i)
+            order[i] = chainOrder[(size_t) i].load(std::memory_order_relaxed);
+
+        // Remove slotId from its current position, then reinsert it at
+        // targetPos, sliding the intervening entries over by one.
+        if (pos < targetPos)
+        {
+            for (int i = pos; i < targetPos; ++i)
+                order[i] = order[i + 1];
+        }
+        else
+        {
+            for (int i = pos; i > targetPos; --i)
+                order[i] = order[i - 1];
+        }
+        order[targetPos] = slotId;
+
+        for (int i = 0; i < kNumSlots; ++i)
+            chainOrder[(size_t) i].store(order[i], std::memory_order_relaxed);
+    }
     // Live "input" meter tap for slotId: the previous module's own output
     // tap at whatever position slotId CURRENTLY sits (or the master input
     // level if it's first) — recomputed from the live chain order rather
