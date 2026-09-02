@@ -18,6 +18,7 @@ XaLZaLookAndFeel::XaLZaLookAndFeel()
     monoRegular = juce::Typeface::createSystemTypefaceFor(BinaryData::SpaceMonoRegular_ttf, BinaryData::SpaceMonoRegular_ttfSize);
     monoBold    = juce::Typeface::createSystemTypefaceFor(BinaryData::SpaceMonoBold_ttf, BinaryData::SpaceMonoBold_ttfSize);
     titleRegular = juce::Typeface::createSystemTypefaceFor(BinaryData::BebasNeueRegular_ttf, BinaryData::BebasNeueRegular_ttfSize);
+    scriptBold  = juce::Typeface::createSystemTypefaceFor(BinaryData::DancingScriptBold_ttf, BinaryData::DancingScriptBold_ttfSize);
 
     setColour(juce::Slider::textBoxTextColourId, XaLZaColour::textLabel);
     setColour(juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
@@ -41,6 +42,8 @@ juce::Typeface::Ptr XaLZaLookAndFeel::getTypefaceForFont(const juce::Font& f)
     const auto& name = f.getTypefaceName();
     if (name.containsIgnoreCase("Bebas Neue"))
         return titleRegular;
+    if (name.containsIgnoreCase("Dancing Script"))
+        return scriptBold;
     if (name.containsIgnoreCase("Space Mono"))
         return f.isBold() ? monoBold : monoRegular;
     return f.isBold() ? sansBold : sansRegular;
@@ -54,6 +57,11 @@ juce::Font XaLZaLookAndFeel::monoFont(float size, bool bold)
 juce::Font XaLZaLookAndFeel::titleFont(float size)
 {
     return juce::Font(juce::FontOptions(size).withName("Bebas Neue"));
+}
+
+juce::Font XaLZaLookAndFeel::scriptFont(float size)
+{
+    return juce::Font(juce::FontOptions(size).withName("Dancing Script").withStyle("Bold"));
 }
 
 juce::Label* XaLZaLookAndFeel::createSliderTextBox(juce::Slider& slider)
@@ -1929,6 +1937,29 @@ void XaLZaEditor::paint(juce::Graphics& g)
     g.fillRect(footer);
     g.setColour(XaLZaColour::borderSoft);
     g.drawLine(0.0f, (float) footer.getY(), (float) baseW, (float) footer.getY(), 1.0f);
+
+    // Brand wordmark, left-aligned: "XAZA" (Bebas Neue, all-caps) glued
+    // straight to "inspain" (Dancing Script Bold, lowercase, rose accent)
+    // with no separator and the same baseline — exactly the lockup rule
+    // in GUIA-DE-MARCA.md ("inspain va siempre en minuscula y en
+    // manuscrita... no hay separador entre XAZA e inspain"), now that a
+    // real static instance of the brand's script face is embedded.
+    {
+        auto brandArea = footer.reduced(14, 0);
+        auto xazaFont = XaLZaLookAndFeel::titleFont(15.0f);
+        auto scriptFontHere = XaLZaLookAndFeel::scriptFont(19.0f);
+        float xazaW = juce::GlyphArrangement::getStringWidth(xazaFont, "XAZA");
+        float scriptW = juce::GlyphArrangement::getStringWidth(scriptFontHere, "inspain");
+
+        auto wordmarkArea = brandArea.removeFromLeft((int) (xazaW + scriptW) + 4);
+        auto xazaArea = wordmarkArea.removeFromLeft((int) xazaW + 2);
+        g.setFont(xazaFont);
+        g.setColour(XaLZaColour::textHi);
+        g.drawText("XAZA", xazaArea, juce::Justification::centredLeft);
+        g.setFont(scriptFontHere);
+        g.setColour(XaLZaColour::accent);
+        g.drawText("inspain", wordmarkArea, juce::Justification::centredLeft);
+    }
 
     float outDb = juce::jmax(proc.getMeterDbL((int) XaLZaProcessor::TapOut), proc.getMeterDbR((int) XaLZaProcessor::TapOut));
     juce::String outText = outDb <= -99.0f ? "OUT  -inf dB" : ("OUT  " + juce::String(outDb, 1) + " dB");

@@ -80,8 +80,16 @@ public:
     // Bebas Neue ships one weight only, so there's no bold variant here.
     static juce::Font titleFont(float size);
 
+    // The brand's script accent (Dancing Script Bold/700) — reserved for
+    // exactly one use: the lowercase "inspain" half of the "XAZA"+
+    // "inspain" wordmark, per GUIA-DE-MARCA.md's own rule ("inspain" is
+    // always this face, always lowercase, never the bold sans). Not a
+    // general-purpose decorative font — using it anywhere else would
+    // dilute the one place the brand guide actually calls for it.
+    static juce::Font scriptFont(float size);
+
 private:
-    juce::Typeface::Ptr sansRegular, sansBold, monoRegular, monoBold, titleRegular;
+    juce::Typeface::Ptr sansRegular, sansBold, monoRegular, monoBold, titleRegular, scriptBold;
 };
 
 /** Stereo LED-segment level meter — matches the mockup's .led-meter /
