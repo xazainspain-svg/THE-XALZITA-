@@ -19,7 +19,6 @@ XaLZaProcessor::XaLZaProcessor()
           // something into it.
           .withInput("Sidechain", juce::AudioChannelSet::stereo(), false)),
       apvts(*this, nullptr, "PARAMS", createXaLZaParameterLayout()),
-      macroTracker(apvts),
       osPreChar(2, 1, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR),
       osSat(2, 1, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR),
       osLimClip(2, 1, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR),
@@ -27,15 +26,17 @@ XaLZaProcessor::XaLZaProcessor()
 {
     for (auto& a : meterDbL) a.store(-100.0f);
     for (auto& a : meterDbR) a.store(-100.0f);
+    for (auto& a : rmsDbL) a.store(-100.0f);
+    for (auto& a : rmsDbR) a.store(-100.0f);
     for (auto& a : grDb) a.store(0.0f);
     for (auto& a : scopePointsL) a.store(0.0f);
     for (auto& a : scopePointsR) a.store(0.0f);
     for (auto& a : specRing) a.store(0.0f);
+    for (auto& a : specRingMaster) a.store(0.0f);
     for (auto& ring : rawRing) for (auto& a : ring) a.store(0.0f);
     for (auto& a : rawWritePos) a.store(0);
     for (auto& a : dblScopeL) a.store(0.0f);
     for (auto& a : dblScopeR) a.store(0.0f);
-    for (auto& a : macroCcMap) a.store(-1);
     for (int i = 0; i < kNumSlots; ++i) chainOrder[(size_t) i].store(i);
     irFormatManager.registerBasicFormats();
 }
@@ -43,18 +44,26 @@ XaLZaProcessor::XaLZaProcessor()
 void XaLZaProcessor::updateMeter(int tap, const juce::AudioBuffer<float>& buf, int numSamples, int numCh)
 {
     float peakL = 0.0f, peakR = 0.0f;
+    double sumSqL = 0.0, sumSqR = 0.0;
     auto* l = buf.getReadPointer(0);
     for (int n = 0; n < numSamples; ++n)
+    {
         peakL = juce::jmax(peakL, std::abs(l[n]));
+        sumSqL += (double) l[n] * (double) l[n];
+    }
     if (numCh > 1)
     {
         auto* r = buf.getReadPointer(1);
         for (int n = 0; n < numSamples; ++n)
+        {
             peakR = juce::jmax(peakR, std::abs(r[n]));
+            sumSqR += (double) r[n] * (double) r[n];
+        }
     }
     else
     {
         peakR = peakL;
+        sumSqR = sumSqL;
     }
 
     float dbL = juce::Decibels::gainToDecibels(peakL, -100.0f);
@@ -68,6 +77,23 @@ void XaLZaProcessor::updateMeter(int tap, const juce::AudioBuffer<float>& buf, i
     };
     smooth(meterDbL[(size_t) tap], dbL);
     smooth(meterDbR[(size_t) tap], dbR);
+
+    // Real RMS: genuine mean-square over this block, not a derived copy
+    // of the peak reading above — converted to dB and integrated
+    // symmetrically (see rmsCoef, set in prepareToPlay) like a real VU
+    // instrument, so it reads "how loud does this actually sound" rather
+    // than chasing the same fast transients the peak ballistics do.
+    float rmsGainL = std::sqrt((float) (sumSqL / juce::jmax(1, numSamples)));
+    float rmsGainR = std::sqrt((float) (sumSqR / juce::jmax(1, numSamples)));
+    float rmsTargetL = juce::Decibels::gainToDecibels(rmsGainL, -100.0f);
+    float rmsTargetR = juce::Decibels::gainToDecibels(rmsGainR, -100.0f);
+    auto smoothRms = [this] (std::atomic<float>& state, float target)
+    {
+        float prev = state.load(std::memory_order_relaxed);
+        state.store(rmsCoef * prev + (1.0f - rmsCoef) * target, std::memory_order_relaxed);
+    };
+    smoothRms(rmsDbL[(size_t) tap], rmsTargetL);
+    smoothRms(rmsDbR[(size_t) tap], rmsTargetR);
 }
 
 void XaLZaProcessor::updateGr(int moduleIdx, float preDb, float postDb)
@@ -304,11 +330,17 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
     meterAttCoef = onePoleCoef(1.0f, sampleRate);
     meterRelCoef = onePoleCoef(130.0f, sampleRate);   // fast, real-time feel — was 400ms
+    // RMS companion reading: symmetric ~300ms integration both directions
+    // (a real VU-style average, not fast-attack/slow-release like the
+    // peak ballistics above), so it settles to "how loud does this
+    // actually sound" rather than chasing the same transients Peak does.
+    rmsCoef = onePoleCoef(300.0f, sampleRate);
 }
 
 void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
+    juce::ignoreUnused(midi);   // no MIDI-driven parameters (see acceptsMidi())
 
     for (int ch = getTotalNumInputChannels(); ch < getTotalNumOutputChannels(); ++ch)
         buffer.clear(ch, 0, buffer.getNumSamples());
@@ -317,39 +349,6 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     const int numCh = juce::jmin(buffer.getNumChannels(), 2);
     if (numCh <= 0 || numSamples <= 0)
         return;
-
-    // ---------------------------------------------------------------
-    // MIDI Learn / CC control for the 12 macro knobs — a CC message either
-    // binds to whichever macro startMidiLearn() last armed (editor-driven,
-    // via a right-click menu on the macro knob), or, once bound, drives
-    // that macro directly. setValueNotifyingHost from the audio thread is
-    // the standard JUCE pattern for MIDI-mapped parameters (APVTS's
-    // attachments marshal the UI-side update to the message thread
-    // internally), so this is safe here.
-    // ---------------------------------------------------------------
-    for (const auto metadata : midi)
-    {
-        auto msg = metadata.getMessage();
-        if (!msg.isController())
-            continue;
-        int cc = msg.getControllerNumber();
-
-        int learnIdx = midiLearnTarget.load(std::memory_order_relaxed);
-        if (learnIdx >= 0 && learnIdx < kNumMacros)
-        {
-            macroCcMap[(size_t) learnIdx].store(cc, std::memory_order_relaxed);
-            midiLearnTarget.store(-1, std::memory_order_relaxed);
-            continue;
-        }
-
-        for (int i = 0; i < kNumMacros; ++i)
-        {
-            if (macroCcMap[(size_t) i].load(std::memory_order_relaxed) != cc)
-                continue;
-            if (auto* param = apvts.getParameter(xalzaMacroIDs()[(size_t) i]))
-                param->setValueNotifyingHost((float) msg.getControllerValue() / 127.0f);
-        }
-    }
 
     // ---------------------------------------------------------------
     // Bypass — real, host-independent dry passthrough. Meters/goniometer
@@ -372,8 +371,6 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         return;
     }
 
-    auto& mt = macroTracker;
-
     // ---------------------------------------------------------------
     // Master In Gain
     // ---------------------------------------------------------------
@@ -391,7 +388,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     bool preBypassed = apvts.getRawParameterValue(XID::PreBypass)->load() > 0.5f;
     if (!preBypassed)
     {
-        float hpfHz = juce::jlimit(20.0f, 500.0f, mt.effectiveByID(XID::PreMacro, XID::PreHPF));
+        float hpfHz = juce::jlimit(20.0f, 500.0f, apvts.getRawParameterValue(XID::PreHPF)->load());
         lastHpfHz.store(hpfHz, std::memory_order_relaxed);
         *preHpf.state = *juce::dsp::IIR::Coefficients<float>::makeHighPass(sr, hpfHz);
         preHpf.process(ctx);
@@ -417,9 +414,9 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         bool padOn = apvts.getRawParameterValue(XID::PrePad)->load() > 0.5f;
         applySmoothedGainDb(prePadGainSmoothed, buffer, padOn ? -20.0f : 0.0f, numSamples);
 
-        applySmoothedGainDb(preGainSmoothed, buffer, mt.effectiveByID(XID::PreMacro, XID::PreGain), numSamples);
+        applySmoothedGainDb(preGainSmoothed, buffer, apvts.getRawParameterValue(XID::PreGain)->load(), numSamples);
 
-        float charAmt = mt.effectiveByID(XID::PreMacro, XID::PreChar) / 100.0f;
+        float charAmt = apvts.getRawParameterValue(XID::PreChar)->load() / 100.0f;
         if (charAmt > 0.0005f)
         {
             float drive = juce::jmap(charAmt, 0.0f, 1.0f, 1.0f, 5.0f);
@@ -454,11 +451,11 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     bool gateBypassed = apvts.getRawParameterValue(XID::GateBypass)->load() > 0.5f;
     if (!gateBypassed)
     {
-        float threshDb = mt.effectiveByID(XID::GateMacro, XID::GateThresh);
-        float rangeDb   = mt.effectiveByID(XID::GateMacro, XID::GateRange);
-        float attackMs  = mt.effectiveByID(XID::GateMacro, XID::GateAttack);
-        float holdMs    = mt.effectiveByID(XID::GateMacro, XID::GateHold);
-        float releaseMs = mt.effectiveByID(XID::GateMacro, XID::GateRelease);
+        float threshDb = apvts.getRawParameterValue(XID::GateThresh)->load();
+        float rangeDb   = apvts.getRawParameterValue(XID::GateRange)->load();
+        float attackMs  = apvts.getRawParameterValue(XID::GateAttack)->load();
+        float holdMs    = apvts.getRawParameterValue(XID::GateHold)->load();
+        float releaseMs = apvts.getRawParameterValue(XID::GateRelease)->load();
 
         int holdSamples = (int) (holdMs * 0.001f * (float) sr);
         float attCoef = onePoleCoef(attackMs, sr);
@@ -559,9 +556,9 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     bool essBypassed = apvts.getRawParameterValue(XID::EssBypass)->load() > 0.5f;
     if (!essBypassed)
     {
-        float threshDb  = mt.effectiveByID(XID::EssMacro, XID::EssThresh);
-        float rangeDb   = mt.effectiveByID(XID::EssMacro, XID::EssRange);   // negative, e.g. -8dB
-        float freqHz    = mt.effectiveByID(XID::EssMacro, XID::EssFreq);
+        float threshDb  = apvts.getRawParameterValue(XID::EssThresh)->load();
+        float rangeDb   = apvts.getRawParameterValue(XID::EssRange)->load();   // negative, e.g. -8dB
+        float freqHz    = apvts.getRawParameterValue(XID::EssFreq)->load();
 
         // Band (mockup's essBandSegs S/T/CH): a real detection-character
         // change, not a relabel — S keeps a narrow, high-Q band right on
@@ -639,12 +636,12 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     bool compBypassed = apvts.getRawParameterValue(XID::CompBypass)->load() > 0.5f;
     if (!compBypassed)
     {
-        float thresh = mt.effectiveByID(XID::CompMacro, XID::CompThresh);
+        float thresh = apvts.getRawParameterValue(XID::CompThresh)->load();
         float ratio  = juce::jmax(1.0f, apvts.getRawParameterValue(XID::CompRatio)->load());
-        float makeup = mt.effectiveByID(XID::CompMacro, XID::CompMakeup);
-        float attackMs = mt.effectiveByID(XID::CompMacro, XID::CompAttack);
-        float releaseMs = mt.effectiveByID(XID::CompMacro, XID::CompRelease);
-        float mixAmt = mt.effectiveByID(XID::CompMacro, XID::CompMix) / 100.0f;
+        float makeup = apvts.getRawParameterValue(XID::CompMakeup)->load();
+        float attackMs = apvts.getRawParameterValue(XID::CompAttack)->load();
+        float releaseMs = apvts.getRawParameterValue(XID::CompRelease)->load();
+        float mixAmt = apvts.getRawParameterValue(XID::CompMix)->load() / 100.0f;
 
         for (int ch = 0; ch < numCh; ++ch)
             dryBuffer.copyFrom(ch, 0, buffer, ch, 0, numSamples);
@@ -695,9 +692,9 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     bool optoBypassed = apvts.getRawParameterValue(XID::OptoBypass)->load() > 0.5f;
     if (!optoBypassed)
     {
-        float reduction = mt.effectiveByID(XID::OptoMacro, XID::OptoReduction) / 100.0f;
-        float gainDb    = mt.effectiveByID(XID::OptoMacro, XID::OptoGain);
-        float mixAmt    = mt.effectiveByID(XID::OptoMacro, XID::OptoMix) / 100.0f;
+        float reduction = apvts.getRawParameterValue(XID::OptoReduction)->load() / 100.0f;
+        float gainDb    = apvts.getRawParameterValue(XID::OptoGain)->load();
+        float mixAmt    = apvts.getRawParameterValue(XID::OptoMix)->load() / 100.0f;
         float threshDb  = juce::jmap(reduction, 0.0f, 1.0f, 0.0f, -30.0f);
 
         for (int ch = 0; ch < numCh; ++ch)
@@ -751,9 +748,9 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     {
     if (apvts.getRawParameterValue(XID::EqBypass)->load() <= 0.5f)
     {
-        float lowDb   = mt.effectiveByID(XID::EqMacro, XID::EqLow);
-        float midDb   = mt.effectiveByID(XID::EqMacro, XID::EqMid);
-        float highDb  = mt.effectiveByID(XID::EqMacro, XID::EqHigh);
+        float lowDb   = apvts.getRawParameterValue(XID::EqLow)->load();
+        float midDb   = apvts.getRawParameterValue(XID::EqMid)->load();
+        float highDb  = apvts.getRawParameterValue(XID::EqHigh)->load();
         float lowHz   = apvts.getRawParameterValue(XID::EqLowFreq)->load();
         float midHz   = apvts.getRawParameterValue(XID::EqMidFreq)->load();
         float highHz  = apvts.getRawParameterValue(XID::EqHighFreq)->load();
@@ -798,12 +795,12 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     bool resBypassed = apvts.getRawParameterValue(XID::ResBypass)->load() > 0.5f;
     if (!resBypassed)
     {
-        float amount     = mt.effectiveByID(XID::ResMacro, XID::ResAmount) / 100.0f;
-        float sharpness  = mt.effectiveByID(XID::ResMacro, XID::ResSharpness) / 100.0f;
-        float notchLimit = mt.effectiveByID(XID::ResMacro, XID::ResNotchLimit);
-        float reactivity = mt.effectiveByID(XID::ResMacro, XID::ResReactivity) / 100.0f;
-        float lowHz      = mt.effectiveByID(XID::ResMacro, XID::ResLow);
-        float highHz     = mt.effectiveByID(XID::ResMacro, XID::ResHigh);
+        float amount     = apvts.getRawParameterValue(XID::ResAmount)->load() / 100.0f;
+        float sharpness  = apvts.getRawParameterValue(XID::ResSharpness)->load() / 100.0f;
+        float notchLimit = apvts.getRawParameterValue(XID::ResNotchLimit)->load();
+        float reactivity = apvts.getRawParameterValue(XID::ResReactivity)->load() / 100.0f;
+        float lowHz      = apvts.getRawParameterValue(XID::ResLow)->load();
+        float highHz     = apvts.getRawParameterValue(XID::ResHigh)->load();
 
         // Style: real Q / detection-bandwidth scaling per band, not a
         // relabel — Delicate narrows both (surgical, less collateral
@@ -899,10 +896,10 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     bool satBypassed = apvts.getRawParameterValue(XID::SatBypass)->load() > 0.5f;
     if (!satBypassed)
     {
-        float drive   = mt.effectiveByID(XID::SatMacro, XID::SatDrive) / 100.0f;
-        float toneDb  = mt.effectiveByID(XID::SatMacro, XID::SatTone);
-        float ceilDb  = mt.effectiveByID(XID::SatMacro, XID::SatCeiling);
-        float mixAmt  = mt.effectiveByID(XID::SatMacro, XID::SatMix) / 100.0f;
+        float drive   = apvts.getRawParameterValue(XID::SatDrive)->load() / 100.0f;
+        float toneDb  = apvts.getRawParameterValue(XID::SatTone)->load();
+        float ceilDb  = apvts.getRawParameterValue(XID::SatCeiling)->load();
+        float mixAmt  = apvts.getRawParameterValue(XID::SatMix)->load() / 100.0f;
 
         *satTone.state = *juce::dsp::IIR::Coefficients<float>::makeHighShelf(sr, 3000.0f, 0.707f, juce::Decibels::decibelsToGain(toneDb));
 
@@ -988,10 +985,10 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     bool dblBypassed = apvts.getRawParameterValue(XID::DblBypass)->load() > 0.5f;
     if (!dblBypassed)
     {
-        float detuneAmt = mt.effectiveByID(XID::DblMacro, XID::DblDetune);
-        float widthPct  = mt.effectiveByID(XID::DblMacro, XID::DblWidth) / 100.0f;
-        float delayMs   = mt.effectiveByID(XID::DblMacro, XID::DblDelay);
-        float mixAmt    = mt.effectiveByID(XID::DblMacro, XID::DblMix) / 100.0f;
+        float detuneAmt = apvts.getRawParameterValue(XID::DblDetune)->load();
+        float widthPct  = apvts.getRawParameterValue(XID::DblWidth)->load() / 100.0f;
+        float delayMs   = apvts.getRawParameterValue(XID::DblDelay)->load();
+        float mixAmt    = apvts.getRawParameterValue(XID::DblMix)->load() / 100.0f;
         int   numVoices = juce::jlimit(2, DblVoiceConfig::kMaxVoices,
                               2 * (int) std::round(apvts.getRawParameterValue(XID::DblVoices)->load() / 2.0f));
 
@@ -1089,12 +1086,12 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     bool revBypassed = apvts.getRawParameterValue(XID::RevBypass)->load() > 0.5f;
     if (!revBypassed)
     {
-        float sizePct    = mt.effectiveByID(XID::RevMacro, XID::RevSize) / 100.0f;
-        float decaySec   = mt.effectiveByID(XID::RevMacro, XID::RevDecay);
-        float preDelayMs = mt.effectiveByID(XID::RevMacro, XID::RevPreDelay);
-        float mixPct     = mt.effectiveByID(XID::RevMacro, XID::RevMix) / 100.0f;
-        float duckPct    = mt.effectiveByID(XID::RevMacro, XID::RevDuck) / 100.0f;
-        float duckRelMs  = mt.effectiveByID(XID::RevMacro, XID::RevDuckRelease);
+        float sizePct    = apvts.getRawParameterValue(XID::RevSize)->load() / 100.0f;
+        float decaySec   = apvts.getRawParameterValue(XID::RevDecay)->load();
+        float preDelayMs = apvts.getRawParameterValue(XID::RevPreDelay)->load();
+        float mixPct     = apvts.getRawParameterValue(XID::RevMix)->load() / 100.0f;
+        float duckPct    = apvts.getRawParameterValue(XID::RevDuck)->load() / 100.0f;
+        float duckRelMs  = apvts.getRawParameterValue(XID::RevDuckRelease)->load();
         // Independent damping trim, centred at 50 = no change from the
         // original Decay-derived formula (so existing sessions/defaults
         // sound identical) — real extra control either side of that.
@@ -1249,12 +1246,12 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         dlyPreDelayL.setDelay(preDelaySamples);
         dlyPreDelayR.setDelay(preDelaySamples);
 
-        float fbPct     = mt.effectiveByID(XID::DlyMacro, XID::DlyFeedback) / 100.0f;
-        float spreadPct = mt.effectiveByID(XID::DlyMacro, XID::DlySpread) / 100.0f;
-        float mixPct    = mt.effectiveByID(XID::DlyMacro, XID::DlyMix) / 100.0f;
-        float duckPct   = mt.effectiveByID(XID::DlyMacro, XID::DlyDuck) / 100.0f;
-        float duckRelMs = mt.effectiveByID(XID::DlyMacro, XID::DlyDuckRelease);
-        float panRateHz = mt.effectiveByID(XID::DlyMacro, XID::DlyPanRate);
+        float fbPct     = apvts.getRawParameterValue(XID::DlyFeedback)->load() / 100.0f;
+        float spreadPct = apvts.getRawParameterValue(XID::DlySpread)->load() / 100.0f;
+        float mixPct    = apvts.getRawParameterValue(XID::DlyMix)->load() / 100.0f;
+        float duckPct   = apvts.getRawParameterValue(XID::DlyDuck)->load() / 100.0f;
+        float duckRelMs = apvts.getRawParameterValue(XID::DlyDuckRelease)->load();
+        float panRateHz = apvts.getRawParameterValue(XID::DlyPanRate)->load();
 
         dlyBuffer.setSize(numCh, numSamples, false, false, true);
 
@@ -1339,10 +1336,10 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     bool limBypassed = apvts.getRawParameterValue(XID::LimBypass)->load() > 0.5f;
     if (!limBypassed)
     {
-        float ceilingDb = mt.effectiveByID(XID::LimMacro, XID::LimCeiling);
-        float inGain    = mt.effectiveByID(XID::LimMacro, XID::LimInputGain);
-        float releaseMs = mt.effectiveByID(XID::LimMacro, XID::LimRelease);
-        float clipAmt   = mt.effectiveByID(XID::LimMacro, XID::LimClip) / 100.0f;
+        float ceilingDb = apvts.getRawParameterValue(XID::LimCeiling)->load();
+        float inGain    = apvts.getRawParameterValue(XID::LimInputGain)->load();
+        float releaseMs = apvts.getRawParameterValue(XID::LimRelease)->load();
+        float clipAmt   = apvts.getRawParameterValue(XID::LimClip)->load() / 100.0f;
 
         applySmoothedGainDb(limInGainSmoothed, buffer, inGain, numSamples);
 
@@ -1456,7 +1453,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     }
 
     // ---------------------------------------------------------------
-    // Stereo Width — mid/side, Master utility control (not macro-linked)
+    // Stereo Width — mid/side, Master utility control
     // ---------------------------------------------------------------
     if (numCh > 1)
     {
@@ -1477,6 +1474,22 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     // ---------------------------------------------------------------
     applySmoothedGainDb(masterOutSmoothed, buffer, apvts.getRawParameterValue(XID::MasterOutGain)->load(), numSamples);
     updateMeter((int) TapOut, buffer, numSamples, numCh);
+
+    // ---------------------------------------------------------------
+    // Master spectrum tap — raw full-rate mono samples of the true final
+    // output (post Master Out Gain, so this is exactly what leaves the
+    // plugin), for the overview page's whole-mix spectrum analyser.
+    // ---------------------------------------------------------------
+    {
+        auto* l = buffer.getReadPointer(0);
+        auto* r = numCh > 1 ? buffer.getReadPointer(1) : l;
+        for (int n = 0; n < numSamples; ++n)
+        {
+            int pos = specWritePosMaster.load(std::memory_order_relaxed);
+            specRingMaster[(size_t) (pos & (kSpecSize - 1))].store(0.5f * (l[n] + r[n]), std::memory_order_relaxed);
+            specWritePosMaster.store(pos + 1, std::memory_order_relaxed);
+        }
+    }
 
     // ---------------------------------------------------------------
     // Real (simplified) ITU-R BS.1770 K-weighted momentary LUFS of the true
@@ -1550,8 +1563,6 @@ void XaLZaProcessor::getStateInformation(juce::MemoryBlock& destData)
     // without touching the parameter schema.
     xml->setAttribute("xalzaEditorW", lastEditorWidth);
     xml->setAttribute("xalzaEditorH", lastEditorHeight);
-    for (int i = 0; i < kNumMacros; ++i)
-        xml->setAttribute("xalzaCc" + juce::String(i), macroCcMap[(size_t) i].load(std::memory_order_relaxed));
     juce::String orderStr;
     for (int i = 0; i < kNumSlots; ++i)
         orderStr << chainOrder[(size_t) i].load(std::memory_order_relaxed) << (i + 1 < kNumSlots ? "," : "");
@@ -1577,12 +1588,6 @@ void XaLZaProcessor::setStateInformation(const void* data, int sizeInBytes)
             // — keep these in sync if that ever changes.
             lastEditorWidth  = juce::jlimit(900, 1800, xml->getIntAttribute("xalzaEditorW", 900));
             lastEditorHeight = juce::jlimit(560, 1120, xml->getIntAttribute("xalzaEditorH", 560));
-        }
-        for (int i = 0; i < kNumMacros; ++i)
-        {
-            auto key = "xalzaCc" + juce::String(i);
-            int cc = xml->hasAttribute(key) ? xml->getIntAttribute(key, -1) : -1;
-            macroCcMap[(size_t) i].store(juce::jlimit(-1, 127, cc), std::memory_order_relaxed);
         }
 
         // Chain order: only accept it if it's genuinely a permutation of

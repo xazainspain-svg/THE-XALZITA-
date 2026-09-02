@@ -11,9 +11,8 @@
       Resonance -> Saturator -> Doubler -> Reverb -> Delay -> Limiter
 
     with Master In/Out gain and Stereo Width around the outside. Every
-    macro-linked parameter is resolved each block via MacroTouchTracker
-    so "last touched wins" behaves identically to the web mockup and the
-    Max for Live device.
+    parameter is a plain, direct APVTS parameter — no macro/intensity
+    indirection layer.
 */
 class XaLZaProcessor : public juce::AudioProcessor
 {
@@ -30,10 +29,9 @@ public:
     bool hasEditor() const override { return true; }
 
     const juce::String getName() const override { return "The XaLZa"; }
-    // MIDI input is accepted purely for macro-knob MIDI Learn/CC control
-    // (see below) — this remains an audio effect (isMidiEffect stays
-    // false), it just optionally also listens for CC messages.
-    bool acceptsMidi() const override { return true; }
+    // No MIDI-driven parameters anymore (MIDI Learn was macro-only and has
+    // been removed) — this is a plain audio effect.
+    bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
     double getTailLengthSeconds() const override { return 3.0; }
@@ -48,7 +46,6 @@ public:
     void setStateInformation(const void* data, int sizeInBytes) override;
 
     juce::AudioProcessorValueTreeState apvts;
-    MacroTouchTracker macroTracker;
 
     // Last-used editor window size, restored on the next editor open (and
     // persisted through save/reload via getStateInformation) so a resize
@@ -67,6 +64,12 @@ public:
 
     float getMeterDbL(int tap) const noexcept { return meterDbL[(size_t) juce::jlimit(0, kNumMeterTaps - 1, tap)].load(std::memory_order_relaxed); }
     float getMeterDbR(int tap) const noexcept { return meterDbR[(size_t) juce::jlimit(0, kNumMeterTaps - 1, tap)].load(std::memory_order_relaxed); }
+
+    // Real RMS (mean-square) companion reading for the same tap — a
+    // genuinely different measurement from the peak ballistics above, not
+    // a derived/smoothed copy of it. See updateMeter().
+    float getRmsDbL(int tap) const noexcept { return rmsDbL[(size_t) juce::jlimit(0, kNumMeterTaps - 1, tap)].load(std::memory_order_relaxed); }
+    float getRmsDbR(int tap) const noexcept { return rmsDbR[(size_t) juce::jlimit(0, kNumMeterTaps - 1, tap)].load(std::memory_order_relaxed); }
 
     // ---- Reorderable chain: which of the 12 modules processBlock() runs
     //      first/second/.../last. Identity order (Pre, Gate, ... Lim, same
@@ -136,6 +139,11 @@ public:
     static constexpr int kSpecSize = 8192; // power of two, comfortably >= UI's FFT window
     float specSample(int i) const noexcept { return specRing[(size_t) (i & (kSpecSize - 1))].load(std::memory_order_relaxed); }
     int   getSpecWritePos() const noexcept { return specWritePos.load(std::memory_order_relaxed); }
+
+    // Same idea, but tapped after Master Out Gain — the true final mix —
+    // for the overview page's whole-plugin spectrum analyser.
+    float specSampleMaster(int i) const noexcept { return specRingMaster[(size_t) (i & (kSpecSize - 1))].load(std::memory_order_relaxed); }
+    int   getSpecWritePosMaster() const noexcept { return specWritePosMaster.load(std::memory_order_relaxed); }
 
     // Generic raw-sample taps for the remaining per-module visualisers
     // (oscilloscopes / harmonic bars). Each is genuinely POST that module's
@@ -211,19 +219,6 @@ public:
     // output, in dBTP.
     float getTruePeakDb() const noexcept { return truePeakDbUI.load(std::memory_order_relaxed); }
 
-    // MIDI Learn for the 12 macro knobs: macroIdx indexes Params.h's
-    // xalzaMacroIDs() (same order the editor's MACROS page shows them in).
-    // startMidiLearn arms macroIdx to bind to the NEXT CC message received
-    // in processBlock; the binding (or -1 = unbound) is read back with
-    // getMacroCc() for the editor's tooltip/menu state, and persists across
-    // save/reload via getStateInformation's extra XML attributes.
-    static constexpr int kNumMacros = 12;
-    int  getMacroCc(int macroIdx) const noexcept { return macroCcMap[(size_t) juce::jlimit(0, kNumMacros - 1, macroIdx)].load(std::memory_order_relaxed); }
-    void startMidiLearn(int macroIdx) noexcept { midiLearnTarget.store(macroIdx, std::memory_order_relaxed); }
-    void cancelMidiLearn() noexcept { midiLearnTarget.store(-1, std::memory_order_relaxed); }
-    void clearMidiLearn(int macroIdx) noexcept { macroCcMap[(size_t) juce::jlimit(0, kNumMacros - 1, macroIdx)].store(-1, std::memory_order_relaxed); }
-    bool isMidiLearning(int macroIdx) const noexcept { return midiLearnTarget.load(std::memory_order_relaxed) == macroIdx; }
-
     juce::String getVersionString() const { return JucePlugin_VersionString; }
 
 private:
@@ -235,6 +230,8 @@ private:
 
     std::array<std::atomic<float>, kSpecSize> specRing;
     std::atomic<int> specWritePos { 0 };
+    std::array<std::atomic<float>, kSpecSize> specRingMaster;
+    std::atomic<int> specWritePosMaster { 0 };
 
     std::array<std::array<std::atomic<float>, kRawSize>, kNumRawTaps> rawRing;
     std::array<std::atomic<int>, kNumRawTaps> rawWritePos;
@@ -248,9 +245,6 @@ private:
 
     std::array<std::atomic<float>, kScopeSize> dblScopeL, dblScopeR;
     std::atomic<int> dblScopeWritePos { 0 };
-
-    std::array<std::atomic<int>, kNumMacros> macroCcMap;   // -1 = unbound
-    std::atomic<int> midiLearnTarget { -1 };                // -1 = not currently learning
 
     std::array<std::atomic<int>, kNumSlots> chainOrder;    // identity order by default
 

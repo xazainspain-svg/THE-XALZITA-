@@ -174,29 +174,27 @@ namespace
     {
         static const std::map<juce::String, juce::String> units = {
             { XID::MasterInGain, " dB" }, { XID::MasterOutGain, " dB" }, { XID::MasterWidth, " %" },
-            { XID::PreGain, " dB" }, { XID::PreChar, " %" }, { XID::PreHPF, " Hz" }, { XID::PreMacro, " %" },
+            { XID::PreGain, " dB" }, { XID::PreChar, " %" }, { XID::PreHPF, " Hz" },
             { XID::GateThresh, " dB" }, { XID::GateRange, " dB" }, { XID::GateAttack, " ms" },
-            { XID::GateHold, " ms" }, { XID::GateRelease, " ms" }, { XID::GateMacro, " %" },
-            { XID::EssThresh, " dB" }, { XID::EssRange, " dB" }, { XID::EssFreq, " Hz" }, { XID::EssMacro, " %" },
+            { XID::GateHold, " ms" }, { XID::GateRelease, " ms" },
+            { XID::EssThresh, " dB" }, { XID::EssRange, " dB" }, { XID::EssFreq, " Hz" },
             { XID::CompThresh, " dB" }, { XID::CompMakeup, " dB" }, { XID::CompAttack, " ms" },
-            { XID::CompRelease, " ms" }, { XID::CompMix, " %" }, { XID::CompRatio, ":1" }, { XID::CompMacro, " %" },
-            { XID::OptoReduction, " %" }, { XID::OptoGain, " dB" }, { XID::OptoMix, " %" }, { XID::OptoMacro, " %" },
-            { XID::EqLow, " dB" }, { XID::EqMid, " dB" }, { XID::EqHigh, " dB" }, { XID::EqMacro, " %" },
+            { XID::CompRelease, " ms" }, { XID::CompMix, " %" }, { XID::CompRatio, ":1" },
+            { XID::OptoReduction, " %" }, { XID::OptoGain, " dB" }, { XID::OptoMix, " %" },
+            { XID::EqLow, " dB" }, { XID::EqMid, " dB" }, { XID::EqHigh, " dB" },
             { XID::EqLowFreq, " Hz" }, { XID::EqMidFreq, " Hz" }, { XID::EqHighFreq, " Hz" },
             { XID::ResAmount, " %" }, { XID::ResSharpness, " %" }, { XID::ResReactivity, " %" },
-            { XID::ResNotchLimit, " dB" }, { XID::ResLow, " Hz" }, { XID::ResHigh, " Hz" }, { XID::ResMacro, " %" },
+            { XID::ResNotchLimit, " dB" }, { XID::ResLow, " Hz" }, { XID::ResHigh, " Hz" },
             { XID::SatDrive, " %" }, { XID::SatTone, " dB" }, { XID::SatCeiling, " dB" }, { XID::SatMix, " %" },
-            { XID::SatMacro, " %" },
             { XID::DblDetune, " %" }, { XID::DblWidth, " %" }, { XID::DblDelay, " ms" }, { XID::DblMix, " %" },
-            { XID::DblMacro, " %" },
             { XID::RevSize, " %" }, { XID::RevDecay, " s" }, { XID::RevPreDelay, " ms" }, { XID::RevMix, " %" },
-            { XID::RevDuck, " %" }, { XID::RevDuckRelease, " ms" }, { XID::RevMacro, " %" },
+            { XID::RevDuck, " %" }, { XID::RevDuckRelease, " ms" },
             { XID::RevWetHpf, " Hz" }, { XID::RevWetLpf, " Hz" },
             { XID::DlyTime, " ms" }, { XID::DlyFeedback, " %" }, { XID::DlySpread, " %" }, { XID::DlyMix, " %" },
-            { XID::DlyDuck, " %" }, { XID::DlyDuckRelease, " ms" }, { XID::DlyPanRate, " Hz" }, { XID::DlyMacro, " %" },
+            { XID::DlyDuck, " %" }, { XID::DlyDuckRelease, " ms" }, { XID::DlyPanRate, " Hz" },
             { XID::DlyFbHpf, " Hz" }, { XID::DlyFbLpf, " Hz" },
             { XID::LimInputGain, " dB" }, { XID::LimCeiling, " dB" }, { XID::LimRelease, " ms" },
-            { XID::LimClip, " %" }, { XID::LimMacro, " %" },
+            { XID::LimClip, " %" },
         };
         auto it = units.find(id);
         return it != units.end() ? it->second : juce::String();
@@ -208,7 +206,6 @@ XaLZaEditor::KnobUI& XaLZaEditor::addKnob(const juce::String& paramID, const juc
 {
     auto k = std::make_unique<KnobUI>();
     k->paramID = paramID;
-    k->macroID = accent ? juce::String() : macroForParam(paramID);   // macro knobs themselves have no "override" state
     k->slider.getProperties().set("accent", accent);
     // Wide enough for the longest real readout ("18000 Hz", "-18.2 dB")
     // at the compact mono font createSliderTextBox below sets — the old
@@ -374,33 +371,16 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     setLookAndFeel(&laf);
 
     // ---- Tab order matches the mockup's own tab strip exactly ----
-    tabNames = { "MACROS", "PRE", "COMP", "OPTO", "EQ", "SAT", "REV", "DLY", "DBL", "RES", "GATE", "ESS", "LIM" };
+    tabNames = { "MASTER", "PRE", "COMP", "OPTO", "EQ", "SAT", "REV", "DLY", "DBL", "RES", "GATE", "ESS", "LIM" };
     pageKnobs.resize(tabNames.size());
     moduleMeterByTab.resize(tabNames.size(), nullptr);
 
-    // ---- Page 0: MACROS overview — one knob per module + Master panel ----
-    // Natural chain order + full module names (matches the mockup's Macros
-    // grid exactly: PREAMP GATE DE-ESSER GLUE COMP OPTO EQ 550 / RESONANCE
-    // SATURATOR DOUBLER REVERB DELAY LIMITER) instead of the old 4x3 grid
-    // of short tab-style codes in an unrelated order. Must stay in lockstep
-    // with Params.h's xalzaMacroIDs() (same order, see its comment).
-    struct MacroDef { juce::String id; juce::String label; };
-    static const std::vector<MacroDef> macroDefs = {
-        { XID::PreMacro,  "PREAMP" },    { XID::GateMacro, "GATE" },     { XID::EssMacro,  "DE-ESSER" },
-        { XID::CompMacro, "GLUE COMP" }, { XID::OptoMacro, "OPTO" },     { XID::EqMacro,   "EQ 550" },
-        { XID::ResMacro,  "RESONANCE" }, { XID::SatMacro,  "SATURATOR" },{ XID::DblMacro,  "DOUBLER" },
-        { XID::RevMacro,  "REVERB" },    { XID::DlyMacro,  "DELAY" },    { XID::LimMacro,  "LIMITER" },
-    };
-    for (auto& md : macroDefs)
-        pageKnobs[0].push_back(&addKnob(md.id, md.label, true));
-
-    // MIDI Learn: pageKnobs[0] now holds exactly the 12 macro knobs, in the
-    // same order as Params.h's xalzaMacroIDs() (both built from macroDefs'
-    // order) — register this editor as a mouse listener on each slider so
-    // mouseDown() can identify which macro a right-click landed on.
-    for (auto* k : pageKnobs[0])
-        k->slider.addMouseListener(this, false);
-
+    // ---- Page 0: overview — Master panel + whole-plugin visualisers ----
+    // The old page used to also host a 12-knob macro grid (one "Intensity"
+    // knob per module); that indirection layer is gone now, so this page
+    // is purely the master controls, meters, goniometer, correlation meter
+    // and signal-chain-flow overview — every module's real parameters live
+    // only on that module's own tab.
     masterKnobs.push_back(&addKnob(XID::MasterInGain, "In Gain", false));
     masterKnobs.push_back(&addKnob(XID::MasterOutGain, "Out Gain", false));
     masterKnobs.push_back(&addKnob(XID::MasterWidth, "Width", false));
@@ -606,6 +586,14 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
         chainFlow.setTabIndices(tabIdxBySlot);
     }
     chainFlow.onNodeClicked = [this] (int tabIdx) { showPage(tabIdx); };
+
+    // Whole-mix spectrum analyser, in the space the old 12-knob macro grid
+    // used to occupy — same real FFT view as the EQ page's, just tapped
+    // after Master Out Gain so it shows the true final output.
+    setupCap(masterSpectrumCap, "MASTER SPECTRUM");
+    addChildComponent(masterSpectrum);
+    addChildComponent(masterSpectrumCap);
+    masterSpectrum.setSampleRate(proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0);
 
     // Footer brand/About control — styled to read as plain label text
     // (no border/fill) but genuinely clickable, showing the real build
@@ -960,42 +948,6 @@ void XaLZaEditor::updateSoloButtonStates()
         mmPtr->soloBtn.setToggleState(activeSoloParamID == mmPtr->bypassParamID, juce::dontSendNotification);
 }
 
-void XaLZaEditor::mouseDown(const juce::MouseEvent& e)
-{
-    if (!e.mods.isRightButtonDown())
-        return;
-
-    for (int i = 0; i < (int) pageKnobs[0].size(); ++i)
-    {
-        if (e.eventComponent != &pageKnobs[0][(size_t) i]->slider)
-            continue;
-
-        int boundCc = proc.getMacroCc(i);
-        juce::PopupMenu menu;
-        menu.addItem(1, boundCc >= 0 ? ("MIDI Learn... (currently CC " + juce::String(boundCc) + ")")
-                                      : "MIDI Learn...");
-        if (boundCc >= 0)
-            menu.addItem(2, "Clear MIDI Learn");
-
-        menu.showMenuAsync(juce::PopupMenu::Options(), [this, i] (int result)
-        {
-            if (result == 1)
-            {
-                proc.startMidiLearn(i);
-                juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::InfoIcon,
-                    "MIDI Learn",
-                    "Move a MIDI CC knob or fader now to bind it to this macro.",
-                    "OK");
-            }
-            else if (result == 2)
-            {
-                proc.clearMidiLearn(i);
-            }
-        });
-        return;
-    }
-}
-
 void XaLZaEditor::showAboutBox()
 {
     juce::String msg;
@@ -1034,15 +986,13 @@ void XaLZaEditor::applyPreset(int presetIndex)
     if (presetIndex < 0 || presetIndex >= (int) presets.size())
         return;
 
-    // Driving each macro parameter (rather than every individual real
-    // parameter underneath it) is enough: MacroTouchTracker always treats
-    // "just touched" as the winner, so this reconfigures the whole chain
-    // through the exact same signal path a manual macro turn would use.
-    for (auto& mp : presets[(size_t) presetIndex].macroPercents)
+    // Each preset just sets a fixed list of real parameters directly to
+    // concrete values (no macro/intensity indirection anymore).
+    for (auto& pv : presets[(size_t) presetIndex].paramValues)
     {
-        if (auto* param = proc.apvts.getParameter(mp.first))
+        if (auto* param = proc.apvts.getParameter(pv.first))
         {
-            float norm = juce::jlimit(0.0f, 1.0f, param->convertTo0to1(mp.second));
+            float norm = juce::jlimit(0.0f, 1.0f, param->convertTo0to1(pv.second));
             param->beginChangeGesture();
             param->setValueNotifyingHost(norm);
             param->endChangeGesture();
@@ -1074,20 +1024,22 @@ void XaLZaEditor::showPage(int index)
         mk->label.setVisible(currentTab == 0);
     }
 
-    bool onMacros = (currentTab == 0);
-    masterMeterIn.setVisible(onMacros);
-    masterMeterOut.setVisible(onMacros);
-    masterCapIn.setVisible(onMacros);
-    masterCapOut.setVisible(onMacros);
-    masterDbIn.setVisible(onMacros);
-    masterDbOut.setVisible(onMacros);
-    goniometer.setVisible(onMacros);
-    goniometerCap.setVisible(onMacros);
-    correlationMeter.setVisible(onMacros);
-    masterLoudnessLabel.setVisible(onMacros);
-    bypassSummaryLabel.setVisible(onMacros);
-    chainFlow.setVisible(onMacros);
-    chainFlowCap.setVisible(onMacros);
+    bool onOverview = (currentTab == 0);
+    masterMeterIn.setVisible(onOverview);
+    masterMeterOut.setVisible(onOverview);
+    masterCapIn.setVisible(onOverview);
+    masterCapOut.setVisible(onOverview);
+    masterDbIn.setVisible(onOverview);
+    masterDbOut.setVisible(onOverview);
+    goniometer.setVisible(onOverview);
+    goniometerCap.setVisible(onOverview);
+    correlationMeter.setVisible(onOverview);
+    masterLoudnessLabel.setVisible(onOverview);
+    bypassSummaryLabel.setVisible(onOverview);
+    chainFlow.setVisible(onOverview);
+    chainFlowCap.setVisible(onOverview);
+    masterSpectrum.setVisible(onOverview);
+    masterSpectrumCap.setVisible(onOverview);
 
     for (auto* mm : moduleMeterByTab)
         if (mm != nullptr)
@@ -1217,8 +1169,10 @@ void XaLZaEditor::timerCallback()
         l.setColour(juce::Label::textColourId, colourForDb(v));
     };
 
-    masterMeterIn.setDb(proc.getMeterDbL((int) XaLZaProcessor::TapIn), proc.getMeterDbR((int) XaLZaProcessor::TapIn));
-    masterMeterOut.setDb(proc.getMeterDbL((int) XaLZaProcessor::TapOut), proc.getMeterDbR((int) XaLZaProcessor::TapOut));
+    masterMeterIn.setDb(proc.getMeterDbL((int) XaLZaProcessor::TapIn), proc.getMeterDbR((int) XaLZaProcessor::TapIn),
+                         proc.getRmsDbL((int) XaLZaProcessor::TapIn), proc.getRmsDbR((int) XaLZaProcessor::TapIn));
+    masterMeterOut.setDb(proc.getMeterDbL((int) XaLZaProcessor::TapOut), proc.getMeterDbR((int) XaLZaProcessor::TapOut),
+                          proc.getRmsDbL((int) XaLZaProcessor::TapOut), proc.getRmsDbR((int) XaLZaProcessor::TapOut));
     updateDbLabel(masterDbIn, masterMeterIn);
     updateDbLabel(masterDbOut, masterMeterOut);
 
@@ -1271,8 +1225,8 @@ void XaLZaEditor::timerCallback()
         int liveTapIn = mm.slotId >= 0 ? proc.getPredecessorTap(mm.slotId) : mm.tapIn;
         float inL = proc.getMeterDbL(liveTapIn), inR = proc.getMeterDbR(liveTapIn);
         float outL = proc.getMeterDbL(mm.tapOut), outR = proc.getMeterDbR(mm.tapOut);
-        mm.meterIn.setDb(inL, inR);
-        mm.meterOut.setDb(outL, outR);
+        mm.meterIn.setDb(inL, inR, proc.getRmsDbL(liveTapIn), proc.getRmsDbR(liveTapIn));
+        mm.meterOut.setDb(outL, outR, proc.getRmsDbL(mm.tapOut), proc.getRmsDbR(mm.tapOut));
         updateDbLabel(mm.dbIn, mm.meterIn);
         updateDbLabel(mm.dbOut, mm.meterOut);
 
@@ -1280,26 +1234,7 @@ void XaLZaEditor::timerCallback()
             mm.grMeter.setGrDb(proc.getGrDb(mm.grIndex));
     }
 
-    // Macro-vs-manual override indicator: only the current page's own
-    // fine-tune knobs need checking. Teal label = the macro is driving
-    // this knob right now; default colour = the manual value is winning.
-    if (currentTab >= 0 && currentTab < (int) pageKnobs.size())
-    {
-        for (auto* k : pageKnobs[(size_t) currentTab])
-        {
-            if (k->macroID.isEmpty())
-                continue;
-            bool winning = proc.macroTracker.isMacroWinning(k->macroID, k->paramID);
-            if (winning != k->lastMacroWinning)
-            {
-                k->lastMacroWinning = winning;
-                k->label.setColour(juce::Label::textColourId,
-                                    winning ? XaLZaColour::accent2 : XaLZaColour::textLabel);
-            }
-        }
-    }
-
-    // Macros-page summary: which modules are bypassed right now, at a glance.
+    // Modules-bypassed summary: which modules are bypassed right now, at a glance.
     if (currentTab == 0)
     {
         static const std::vector<std::pair<juce::String, juce::String>> bypassIds = {
@@ -1336,18 +1271,15 @@ void XaLZaEditor::timerCallback()
             }
         }
 
-        // MIDI Learn state, reflected as each macro knob's tooltip (right-
-        // click shows the actual Learn/Clear menu — this is just the
-        // hover-discoverable summary of current binding state).
-        for (int i = 0; i < (int) pageKnobs[0].size(); ++i)
-        {
-            juce::String tip = proc.isMidiLearning(i)
-                ? "Waiting for a MIDI CC... (right-click to cancel by re-learning)"
-                : (proc.getMacroCc(i) >= 0
-                       ? ("Bound to MIDI CC " + juce::String(proc.getMacroCc(i)) + " - right-click to change")
-                       : juce::String("Right-click for MIDI Learn"));
-            pageKnobs[0][(size_t) i]->slider.setTooltip(tip);
-        }
+        // Whole-mix spectrum: same real FFT view as the EQ page's, tapped
+        // after Master Out Gain so it shows the true final output.
+        double sampleRateMaster = proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0;
+        masterSpectrum.setSampleRate(sampleRateMaster);
+        float masterSpecBuf[SpectrumAnalyzer::fftSize];
+        int masterSpecPos = proc.getSpecWritePosMaster();
+        for (int i = 0; i < SpectrumAnalyzer::fftSize; ++i)
+            masterSpecBuf[i] = proc.specSampleMaster(masterSpecPos - SpectrumAnalyzer::fftSize + i);
+        masterSpectrum.update(masterSpecBuf);
     }
 
     // Only do the expensive per-tab visualisers' work while their page is
@@ -1401,7 +1333,7 @@ void XaLZaEditor::timerCallback()
         // Mirrors runEss's own bandFreq computation exactly (see
         // PluginProcessor.cpp) so the live marker sits at the real
         // detection frequency, not a re-derived approximation.
-        float essFreqHz = proc.macroTracker.effectiveByID(XID::EssMacro, XID::EssFreq);
+        float essFreqHz = proc.apvts.getRawParameterValue(XID::EssFreq)->load();
         int essBandMode = (int) std::round(proc.apvts.getRawParameterValue(XID::EssBand)->load());
         float essBandFreqMult = essBandMode == 0 ? 1.0f : (essBandMode == 2 ? 0.7f : 0.85f);
         float essTargetHz = juce::jlimit(1000.0f, 16000.0f, essFreqHz * essBandFreqMult);
@@ -1414,10 +1346,10 @@ void XaLZaEditor::timerCallback()
         // separately-derived normalized pair like the old dual-line graph.
         compView.push(proc.getGrDb(0));
 
-        compView.setCurve(proc.macroTracker.effectiveByID(XID::CompMacro, XID::CompThresh),
+        compView.setCurve(proc.apvts.getRawParameterValue(XID::CompThresh)->load(),
                            proc.apvts.getRawParameterValue(XID::CompRatio)->load(),
-                           proc.macroTracker.effectiveByID(XID::CompMacro, XID::CompMakeup),
-                           proc.macroTracker.effectiveByID(XID::CompMacro, XID::CompMix) / 100.0f);
+                           proc.apvts.getRawParameterValue(XID::CompMakeup)->load(),
+                           proc.apvts.getRawParameterValue(XID::CompMix)->load() / 100.0f);
     }
     else if (currentTab == optoTabIndex)
     {
@@ -1427,11 +1359,11 @@ void XaLZaEditor::timerCallback()
 
         // Opto's "Reduction" knob maps to an internal threshold at a fixed
         // 4:1 ratio — mirrors the exact mapping processBlock's OPTO block uses.
-        float reduction = proc.macroTracker.effectiveByID(XID::OptoMacro, XID::OptoReduction) / 100.0f;
+        float reduction = proc.apvts.getRawParameterValue(XID::OptoReduction)->load() / 100.0f;
         float optoThreshDb = juce::jmap(reduction, 0.0f, 1.0f, 0.0f, -30.0f);
         optoView.setCurve(optoThreshDb, 4.0f,
-                           proc.macroTracker.effectiveByID(XID::OptoMacro, XID::OptoGain),
-                           proc.macroTracker.effectiveByID(XID::OptoMacro, XID::OptoMix) / 100.0f);
+                           proc.apvts.getRawParameterValue(XID::OptoGain)->load(),
+                           proc.apvts.getRawParameterValue(XID::OptoMix)->load() / 100.0f);
     }
     else if (currentTab == eqTabIndex)
     {
@@ -1443,11 +1375,11 @@ void XaLZaEditor::timerCallback()
             specBuf[i] = proc.specSample(pos - SpectrumAnalyzer::fftSize + i);
         eqSpectrum.update(specBuf);
 
-        eqSpectrum.setEqCurve(proc.macroTracker.effectiveByID(XID::EqMacro, XID::EqLow),
+        eqSpectrum.setEqCurve(proc.apvts.getRawParameterValue(XID::EqLow)->load(),
                                proc.apvts.getRawParameterValue(XID::EqLowFreq)->load(),
-                               proc.macroTracker.effectiveByID(XID::EqMacro, XID::EqMid),
+                               proc.apvts.getRawParameterValue(XID::EqMid)->load(),
                                proc.apvts.getRawParameterValue(XID::EqMidFreq)->load(),
-                               proc.macroTracker.effectiveByID(XID::EqMacro, XID::EqHigh),
+                               proc.apvts.getRawParameterValue(XID::EqHigh)->load(),
                                proc.apvts.getRawParameterValue(XID::EqHighFreq)->load(),
                                sampleRate);
     }
@@ -1469,9 +1401,9 @@ void XaLZaEditor::timerCallback()
         // Transistor/Diode.
         int satCharMode = (int) std::round(proc.apvts.getRawParameterValue(XID::SatChar)->load());
         satView.setCurve(satCharMode,
-                          proc.macroTracker.effectiveByID(XID::SatMacro, XID::SatDrive) / 100.0f,
-                          proc.macroTracker.effectiveByID(XID::SatMacro, XID::SatCeiling),
-                          proc.macroTracker.effectiveByID(XID::SatMacro, XID::SatMix) / 100.0f);
+                          proc.apvts.getRawParameterValue(XID::SatDrive)->load() / 100.0f,
+                          proc.apvts.getRawParameterValue(XID::SatCeiling)->load(),
+                          proc.apvts.getRawParameterValue(XID::SatMix)->load() / 100.0f);
 
         double sampleRateSat = proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0;
         satView.setHarmonicSampleRate(sampleRateSat);
@@ -1640,7 +1572,7 @@ void XaLZaEditor::timerCallback()
         int pos = proc.getRawWritePos((int) XaLZaProcessor::RawLim);
         for (int i = 0; i < WaveformScope::numPoints; ++i)
             buf[i] = proc.rawSample((int) XaLZaProcessor::RawLim, pos - WaveformScope::numPoints + i);
-        float limCeilingDb = proc.macroTracker.effectiveByID(XID::LimMacro, XID::LimCeiling);
+        float limCeilingDb = proc.apvts.getRawParameterValue(XID::LimCeiling)->load();
         limView.update(buf, proc.getLufs(), proc.getTruePeakDb(), limCeilingDb);
 
         // Spectrogram: a genuine FFT of the same post-limiter tap above,
@@ -1750,7 +1682,7 @@ void XaLZaEditor::paint(juce::Graphics& g)
         g.fillRect(rail.getX(), b.getY(), 3, b.getHeight());
     }
 
-    // Master mini-panel background (only meaningful on the Macros page, but
+    // Master mini-panel background (only meaningful on the overview page, but
     // harmless to paint always since its knobs are hidden on other pages)
     if (currentTab == 0)
     {
@@ -1879,20 +1811,10 @@ void XaLZaEditor::resized()
         chainFlowCap.setBounds(content.removeFromBottom(11));
         content.removeFromBottom(6);
 
-        // 6 columns x 2 rows, matching the mockup's Macros grid (was 4x3 of
-        // short tab-style codes in an unrelated order — see macroDefs).
-        const int cols = 6;
-        int cellW = content.getWidth() / cols;
-        int rowH = macroLabelH + macroKnobH + 10;
-        for (int i = 0; i < (int) pageKnobs[0].size(); ++i)
-        {
-            int col = i % cols, row = i / cols;
-            auto cell = content.withTrimmedTop(row * rowH).withHeight(rowH)
-                                .withTrimmedLeft(col * cellW).withWidth(cellW);
-            auto lbl = cell.removeFromTop(macroLabelH);
-            pageKnobs[0][(size_t) i]->label.setBounds(lbl);
-            pageKnobs[0][(size_t) i]->slider.setBounds(cell.withSizeKeepingCentre(macroKnobW, macroKnobH));
-        }
+        // Whole-mix spectrum analyser fills the space the old 12-knob macro
+        // grid used to occupy.
+        masterSpectrumCap.setBounds(content.removeFromTop(macroLabelH));
+        masterSpectrum.setBounds(content.reduced(0, 2));
     }
     else
     {

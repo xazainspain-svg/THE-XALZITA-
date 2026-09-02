@@ -80,16 +80,25 @@ private:
 class LedMeter : public juce::Component
 {
 public:
-    void setDb(float dbL, float dbR)
+    // rmsDbL/rmsDbR: the processor's real mean-square (RMS) reading for
+    // this same tap — a genuinely different measurement from the peak
+    // ballistics above (see XaLZaProcessor::updateMeter), not a derived
+    // or smoothed copy of the peak value. Drawn as a thin marker line
+    // across the LED column, the same "Peak + RMS together" pairing the
+    // iZotope Insight Levels reference this whole meters pass was built
+    // from shows.
+    void setDb(float dbL, float dbR, float rmsDbL, float rmsDbR)
     {
         updateChannel(dbL, heldL, holdFramesLeftL, clipLatchFramesLeftL);
         updateChannel(dbR, heldR, holdFramesLeftR, clipLatchFramesLeftR);
 
         if (std::abs(dbL - lastDbL) > 0.05f || std::abs(dbR - lastDbR) > 0.05f
-            || std::abs(heldL - lastHeldL) > 0.05f || std::abs(heldR - lastHeldR) > 0.05f)
+            || std::abs(heldL - lastHeldL) > 0.05f || std::abs(heldR - lastHeldR) > 0.05f
+            || std::abs(rmsDbL - lastRmsL) > 0.05f || std::abs(rmsDbR - lastRmsR) > 0.05f)
         {
             lastDbL = dbL; lastDbR = dbR;
             lastHeldL = heldL; lastHeldR = heldR;
+            lastRmsL = rmsDbL; lastRmsR = rmsDbR;
             repaint();
         }
     }
@@ -135,14 +144,15 @@ private:
         float colW = (full.getWidth() - gap) * 0.5f;
         auto colL = full.removeFromLeft(colW);
         full.removeFromLeft(gap);
-        drawColumn(g, colL, lastDbL, lastHeldL, clipLatchFramesLeftL > 0);
-        drawColumn(g, full, lastDbR, lastHeldR, clipLatchFramesLeftR > 0);
+        drawColumn(g, colL, lastDbL, lastHeldL, clipLatchFramesLeftL > 0, lastRmsL);
+        drawColumn(g, full, lastDbR, lastHeldR, clipLatchFramesLeftR > 0, lastRmsR);
     }
 
-    static void drawColumn(juce::Graphics& g, juce::Rectangle<float> col, float db, float heldDb, bool clipped)
+    static void drawColumn(juce::Graphics& g, juce::Rectangle<float> col, float db, float heldDb, bool clipped, float rmsDb)
     {
         constexpr int numSeg = 12;
         constexpr float minDb = -50.0f, maxDb = 0.0f;
+        auto colFull = col;   // the loop below consumes `col` bottom-up; keep the original bounds for the RMS line
         float t = juce::jlimit(0.0f, 1.0f, (db - minDb) / (maxDb - minDb));
         int lit = (int) std::round(t * (float) numSeg);
         float tHeld = juce::jlimit(0.0f, 1.0f, (heldDb - minDb) / (maxDb - minDb));
@@ -173,11 +183,24 @@ private:
             g.setColour(c);
             g.fillRect(seg);
         }
+
+        // RMS marker: a thin line across the column at the real mean-
+        // square level — the "how loud does this actually sound" reading
+        // sitting underneath the peak segments' "what's the instantaneous
+        // maximum" one, the same Peak+RMS pairing Insight's Levels panel
+        // shows. Drawn last so it's never hidden behind a lit segment.
+        float tRms = juce::jlimit(0.0f, 1.0f, (rmsDb - minDb) / (maxDb - minDb));
+        float rmsY = colFull.getBottom() - tRms * colFull.getHeight();
+        // Teal, not the peak-hold marker's white — a thin line reads as a
+        // distinct "average level" indicator rather than a second peak cap.
+        g.setColour(XaLZaColour::accent2.withAlpha(0.95f));
+        g.fillRect(juce::Rectangle<float>(colFull.getX(), rmsY - 0.6f, colFull.getWidth(), 1.2f));
     }
 
     float lastDbL = -100.0f, lastDbR = -100.0f;
     float heldL = -100.0f, heldR = -100.0f;
     float lastHeldL = -100.0f, lastHeldR = -100.0f;
+    float lastRmsL = -100.0f, lastRmsR = -100.0f;
     int holdFramesLeftL = 0, holdFramesLeftR = 0;
     int clipLatchFramesLeftL = 0, clipLatchFramesLeftR = 0;
 };
@@ -2473,12 +2496,13 @@ private:
 };
 
 /**
-    Editor layout mirrors the web mockup: a narrow vertical tab rail on
-    the left (MACROS + the 12 modules, in the mockup's own tab order),
-    and a content area on the right that shows either the Macros
-    overview (12 macro knobs + a Master mini-panel) or the selected
-    module's fine-tune knobs — one page visible at a time, same as the
-    mockup's single-panel-per-tab layout.
+    Editor layout: a narrow vertical tab rail on the left (an overview tab
+    + the 12 modules, in the mockup's own tab order), and a content area on
+    the right that shows either the overview page (Master gain/width,
+    meters, goniometer, correlation meter, signal-chain flow and the
+    whole-mix spectrum analyser) or the selected module's own fine-tune
+    knobs — one page visible at a time, same as the mockup's
+    single-panel-per-tab layout.
 */
 class XaLZaEditor : public juce::AudioProcessorEditor,
                      private juce::Timer
@@ -2497,8 +2521,7 @@ private:
         juce::Slider slider { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::TextBoxBelow };
         juce::Label label;
         std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
-        juce::String paramID, macroID;   // macroID empty = not macro-linked (no override indicator)
-        bool lastMacroWinning = false;   // last-known state, so we only repaint on an actual change
+        juce::String paramID;
     };
 
     // A module's fine-tune page gets its own IN/OUT LED meters (tapping the
@@ -2544,12 +2567,6 @@ private:
     void layoutModuleMeter(ModuleMeterUI& mm, juce::Rectangle<int> area);
     void timerCallback() override;
 
-    // MIDI Learn: right-click any of the 12 MACROS-page knobs for a small
-    // popup menu (Learn / Clear). mouseDown identifies which knob was
-    // clicked by comparing against pageKnobs[0] (the macro knobs, in
-    // Params.h's xalzaMacroIDs() order) and shows the menu on the matching
-    // index.
-    void mouseDown(const juce::MouseEvent&) override;
     juce::TooltipWindow tooltipWindow { this, 500 };
 
     // Resizable/scalable window: all real layout below is computed once
@@ -2571,10 +2588,9 @@ private:
     static constexpr int marginY    = 12;
     static constexpr int masterW    = 190;
 
+    // Left over from the removed macro-knob grid; still used as the cap
+    // label height above the overview page's master-spectrum analyser.
     static constexpr int macroLabelH = 15;
-    static constexpr int macroKnobW  = 58;
-    static constexpr int macroKnobH  = 76;
-    static constexpr int macroCellW  = 108;
 
     static constexpr int fineLabelH = 14;
     static constexpr int fineKnobW  = 60;
@@ -2594,13 +2610,13 @@ private:
     std::vector<std::unique_ptr<KnobUI>> knobs;
     std::vector<juce::String> tabNames;
     std::vector<std::vector<KnobUI*>> pageKnobs;   // one entry per tab
-    std::vector<KnobUI*> masterKnobs;              // shown on the Macros page only
+    std::vector<KnobUI*> masterKnobs;              // shown on the overview page only
     std::vector<std::unique_ptr<juce::TextButton>> tabButtons;
     std::vector<std::unique_ptr<ModuleMeterUI>> moduleMeterStorage;
     std::vector<ModuleMeterUI*> moduleMeterByTab;  // one slot per tab, nullptr for MACROS
     int currentTab = 0;
 
-    // Master mini-panel visualisers (shown on the Macros page only)
+    // Master mini-panel visualisers (shown on the overview page only)
     LedMeter masterMeterIn, masterMeterOut;
     juce::Label masterCapIn, masterCapOut;
     // Held-peak dB readouts under the master bars — every per-module meter
@@ -2801,17 +2817,24 @@ private:
     juce::String activeSoloParamID;
     std::map<juce::String, bool> savedBypassStates;
 
-    // Macros-page summary of which modules are currently bypassed, so
-    // there's one place to see the whole chain's on/off state at a glance
-    // instead of having to visit every page.
+    // Overview page (tab 0) summary of which modules are currently
+    // bypassed, so there's one place to see the whole chain's on/off state
+    // at a glance instead of having to visit every page.
     juce::Label bypassSummaryLabel;
 
-    // Macros-page signal-chain flow strip — whole-plugin overview of all
-    // 12 modules in their real live order, each glowing with its own
+    // Overview page's signal-chain flow strip — whole-plugin overview of
+    // all 12 modules in their real live order, each glowing with its own
     // real output level; click a node to jump to that page. See
     // SignalChainFlowView's own comment for what's genuinely measured.
     SignalChainFlowView chainFlow;
     juce::Label chainFlowCap;
+
+    // Overview page's whole-mix spectrum analyser — the same real FFT view
+    // used on the EQ page, but tapped after Master Out Gain so it shows
+    // exactly what leaves the plugin, in the space the old 12-knob macro
+    // grid used to occupy.
+    SpectrumAnalyzer masterSpectrum;
+    juce::Label masterSpectrumCap;
 
     // Footer brand line, now a real clickable control (was static painted
     // text) — shows the actual build version and opens a small About box
