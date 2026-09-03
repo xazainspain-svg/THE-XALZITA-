@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <cstring>
 #include <map>
 #include <vector>
@@ -120,9 +121,12 @@ private:
     gets near 0 dBFS, instead of only flashing for the one frame it
     actually happened) — neither existed before; the meter used to be
     just the raw fast-attack/slow-release body with nothing held. */
-class LedMeter : public juce::Component
+class LedMeter : public juce::Component, private juce::Timer
 {
 public:
+    LedMeter() { startTimerHz(20); }
+    ~LedMeter() override { stopTimer(); }
+
     // Which module family this instance belongs to — gives each family's
     // pages their own lit-segment colour identity (the body/near-top
     // tiers only) instead of every one of the 17 module pages showing the
@@ -144,10 +148,18 @@ public:
     // from shows.
     void setDb(float dbL, float dbR, float rmsDbL, float rmsDbR)
     {
-        updateChannel(dbL, heldL, holdFramesLeftL, clipLatchFramesLeftL);
-        updateChannel(dbR, heldR, holdFramesLeftR, clipLatchFramesLeftR);
+        updateChannel(dbL, heldL, holdFramesLeftL, clipLatchFramesLeftL, flashFramesLeftL, sparksL);
+        updateChannel(dbR, heldR, holdFramesLeftR, clipLatchFramesLeftR, flashFramesLeftR, sparksR);
 
-        if (std::abs(dbL - lastDbL) > 0.05f || std::abs(dbR - lastDbR) > 0.05f
+        // Flash pulses and spark bursts need to keep animating frame to
+        // frame even when the underlying dB readings barely move, so they
+        // count as "changed" too — not just the raw level/held/RMS deltas
+        // the original threshold check was built for.
+        bool animating = flashFramesLeftL > 0 || flashFramesLeftR > 0
+                        || anySparkAlive(sparksL) || anySparkAlive(sparksR);
+
+        if (animating
+            || std::abs(dbL - lastDbL) > 0.05f || std::abs(dbR - lastDbR) > 0.05f
             || std::abs(heldL - lastHeldL) > 0.05f || std::abs(heldR - lastHeldR) > 0.05f
             || std::abs(rmsDbL - lastRmsL) > 0.05f || std::abs(rmsDbR - lastRmsR) > 0.05f)
         {
@@ -165,13 +177,53 @@ public:
     float getHeldDbR() const noexcept { return heldR; }
 
 private:
-    static void updateChannel(float db, float& held, int& holdFramesLeft, int& clipFramesLeft)
+    // A short-lived shower of streaks fired the instant a channel newly
+    // clips — an edge-triggered, one-shot event marker (like a hardware
+    // overload lamp flickering on impact), not a looping decoration.
+    struct Spark { float angle = 0.0f; int life = 0; };
+    static constexpr int numSparksPerBurst = 5;
+    static constexpr int sparkLifeFrames   = 14;
+    static constexpr int flashHoldFrames   = 10;   // quick bright flash, distinct from the ~0.67s peak-hold plateau
+
+    static bool anySparkAlive(const std::array<Spark, numSparksPerBurst>& sparks)
+    {
+        for (auto& s : sparks)
+            if (s.life > 0) return true;
+        return false;
+    }
+
+    // Fast deterministic PRNG (xorshift32) for spark angle/timing only —
+    // cosmetic jitter, never touches audio, so a tiny non-cryptographic
+    // generator is the right tool rather than pulling in <random>.
+    juce::uint32 sparkRngState = 0x9E3779B9u;
+    float nextRand01()
+    {
+        sparkRngState ^= sparkRngState << 13;
+        sparkRngState ^= sparkRngState >> 17;
+        sparkRngState ^= sparkRngState << 5;
+        return (float) (sparkRngState & 0xFFFFFFu) / (float) 0xFFFFFFu;
+    }
+
+    void triggerSparkBurst(std::array<Spark, numSparksPerBurst>& sparks)
+    {
+        for (auto& s : sparks)
+        {
+            // JUCE's Point::getPointOnCircumference measures angle
+            // clockwise from straight up, so 0 ± spread is an upward cone.
+            s.angle = (nextRand01() - 0.5f) * 1.7f;
+            s.life  = sparkLifeFrames;
+        }
+    }
+
+    void updateChannel(float db, float& held, int& holdFramesLeft, int& clipFramesLeft,
+                        int& flashFramesLeft, std::array<Spark, numSparksPerBurst>& sparks)
     {
         constexpr float clipThresholdDb = -0.3f;
         constexpr int   holdFrames      = 20;   // ~0.67s at the editor's 30Hz Timer — shorter plateau before it starts falling
         constexpr float decayDbPerFrame = 2.4f; // ~72 dB/s fall-off once the hold expires — fast peak-hold release
         constexpr int   clipLatchFrames = 90;   // ~3s — long enough to actually read the clip
 
+        bool newPeak = db > held + 0.01f;
         if (db >= held)
         {
             held = db;
@@ -186,10 +238,38 @@ private:
             held = juce::jmax(db, held - decayDbPerFrame);
         }
 
+        // Peak-flash: a brief glow-bloom boost the instant a genuinely NEW
+        // high is reached (not just "still lit") — driven by the same
+        // `held` comparison already computed above, not a separate guess.
+        if (newPeak)
+            flashFramesLeft = flashHoldFrames;
+        else if (flashFramesLeft > 0)
+            --flashFramesLeft;
+
+        bool wasClipped = clipFramesLeft > 0;
         if (held >= clipThresholdDb)
             clipFramesLeft = clipLatchFrames;
         else if (clipFramesLeft > 0)
             --clipFramesLeft;
+
+        // Fire a spark burst only on the rising edge into a clip, never
+        // continuously while clipped — an event, not a state.
+        if (!wasClipped && clipFramesLeft > 0)
+            triggerSparkBurst(sparks);
+
+        for (auto& s : sparks)
+            if (s.life > 0) --s.life;
+    }
+
+    void timerCallback() override
+    {
+        // Idle "breathing" glow keeps animating even when the channel
+        // sits silent and setDb() stops repainting on its own (nothing in
+        // the real reading is changing) — a small living cue that the
+        // plugin is active, not frozen, the way a powered-on hardware
+        // unit's standby lamp gently pulses rather than sitting dead-still.
+        if (lastDbL < -45.0f || lastDbR < -45.0f)
+            repaint();
     }
 
     void paint(juce::Graphics& g) override
@@ -199,8 +279,12 @@ private:
         float colW = (full.getWidth() - gap) * 0.5f;
         auto colL = full.removeFromLeft(colW);
         full.removeFromLeft(gap);
-        drawColumn(g, colL, lastDbL, lastHeldL, clipLatchFramesLeftL > 0, lastRmsL, family);
-        drawColumn(g, full, lastDbR, lastHeldR, clipLatchFramesLeftR > 0, lastRmsR, family);
+
+        double nowMs = juce::Time::getMillisecondCounterHiRes();
+        drawColumn(g, colL, lastDbL, lastHeldL, clipLatchFramesLeftL > 0, lastRmsL, family,
+                   flashFramesLeftL, sparksL, nowMs);
+        drawColumn(g, full, lastDbR, lastHeldR, clipLatchFramesLeftR > 0, lastRmsR, family,
+                   flashFramesLeftR, sparksR, nowMs);
     }
 
     // Body/near-top tier colours per module family — the clip-warning red
@@ -221,13 +305,47 @@ private:
         }
     }
 
-    static void drawColumn(juce::Graphics& g, juce::Rectangle<float> col, float db, float heldDb, bool clipped, float rmsDb, Family family)
+    // A single LED cap drawn with a soft top highlight (lit) or bottom
+    // shade (unlit) instead of a flat rectangle — a small tactile bevel
+    // that reads as a physical convex cap, the way real LED ladder meters
+    // on hardware units are actually moulded.
+    static void drawBeveledSegment(juce::Graphics& g, juce::Rectangle<float> r, juce::Colour c, bool lit)
+    {
+        g.setColour(c);
+        g.fillRect(r);
+        if (r.getHeight() < 2.0f)
+            return;
+        if (lit)
+        {
+            auto hi = r.removeFromTop(juce::jmax(1.0f, r.getHeight() * 0.28f));
+            g.setColour(juce::Colours::white.withAlpha(0.16f));
+            g.fillRect(hi);
+        }
+        else
+        {
+            auto sh = r.removeFromBottom(juce::jmax(1.0f, r.getHeight() * 0.32f));
+            g.setColour(juce::Colours::black.withAlpha(0.12f));
+            g.fillRect(sh);
+        }
+    }
+
+    static void drawColumn(juce::Graphics& g, juce::Rectangle<float> col, float db, float heldDb,
+                            bool clipped, float rmsDb, Family family, int flashFramesLeft,
+                            const std::array<Spark, numSparksPerBurst>& sparks, double nowMs)
     {
         constexpr int numSeg = 12;
         constexpr float minDb = -50.0f, maxDb = 0.0f;
         auto colFull = col;   // the loop below consumes `col` bottom-up; keep the original bounds for the RMS line
         float t = juce::jlimit(0.0f, 1.0f, (db - minDb) / (maxDb - minDb));
-        int lit = (int) std::round(t * (float) numSeg);
+        // Sub-segment fractional fill — the topmost active segment shows a
+        // partial vertical fill proportional to how far between two LED
+        // steps the real level actually sits, instead of only ever
+        // snapping to whole segments. Same 12-LED ladder identity, finer
+        // real resolution underneath it.
+        float exact = t * (float) numSeg;
+        int litFull = juce::jlimit(0, numSeg, (int) exact);
+        float partial = exact - (float) litFull;
+
         float tHeld = juce::jlimit(0.0f, 1.0f, (heldDb - minDb) / (maxDb - minDb));
         int peakSeg = juce::jlimit(0, numSeg - 1, (int) std::round(tHeld * (float) numSeg) - 1);
         float segH = col.getHeight() / (float) numSeg;
@@ -235,24 +353,40 @@ private:
         juce::Colour bodyC, hotC;
         familyColours(family, bodyC, hotC);
 
-        // Soft glow "bloom" behind the live signal edge — driven by `lit`,
-        // the exact same real value the crisp segments below are drawn
-        // from (not a decorative animation), so a hot signal genuinely
-        // glows brighter/higher instead of just lighting one more block.
-        // Drawn first so the LED segments paint cleanly on top of it.
-        if (lit > 0)
+        auto tierColour = [&] (int idx) -> juce::Colour
         {
-            int topIdx = juce::jlimit(0, numSeg - 1, lit - 1);
-            juce::Colour glowC = topIdx >= numSeg - 2 ? XaLZaColour::danger
-                                : topIdx >= numSeg - 4 ? hotC
-                                                        : bodyC;
+            if (idx >= numSeg - 2) return XaLZaColour::danger;
+            if (idx >= numSeg - 4) return hotC;
+            return bodyC;
+        };
+
+        // Idle breathing glow — gated by the real signal being genuinely
+        // near-silent, so it never fights the live glow bloom below.
+        if (db < -45.0f)
+        {
+            float phase = std::sin((float) (nowMs * 0.0016)) * 0.5f + 0.5f;
+            g.setColour(bodyC.withAlpha(0.05f + 0.05f * phase));
+            g.fillRoundedRectangle(colFull.reduced(1.0f), 2.0f);
+        }
+
+        // Glow bloom behind the live signal edge — driven by the same
+        // `litFull`/`partial` the crisp segments below are drawn from, and
+        // briefly boosted for a few frames right after a genuinely new
+        // peak lands (flashFramesLeft) — a real "just hit a new high"
+        // flash, not a constant halo. Drawn first so the LED segments
+        // paint cleanly on top of it.
+        if (litFull > 0 || partial > 0.02f)
+        {
+            int topIdx = juce::jlimit(0, numSeg - 1, partial > 0.02f ? litFull : litFull - 1);
+            juce::Colour glowC = tierColour(topIdx);
             float segY = colFull.getBottom() - segH * (float) (topIdx + 1);
             auto glowRect = juce::Rectangle<float>(colFull.getX() - 2.0f, segY - segH * 0.6f,
                                                      colFull.getWidth() + 4.0f, segH * 2.2f);
+            float flashBoost = flashFramesLeft > 0 ? (float) flashFramesLeft / (float) flashHoldFrames : 0.0f;
             for (int i = 3; i >= 1; --i)
             {
                 auto ring = glowRect.expanded((float) i * 2.2f, (float) i * 1.4f);
-                g.setColour(glowC.withAlpha(0.045f * (float) (4 - i)));
+                g.setColour(glowC.withAlpha((0.045f + 0.09f * flashBoost) * (float) (4 - i)));
                 g.fillRoundedRectangle(ring, 2.0f);
             }
         }
@@ -260,33 +394,41 @@ private:
         for (int i = 0; i < numSeg; ++i)
         {
             auto seg = col.removeFromBottom(segH).reduced(0.5f, 0.7f);
-            bool on = i < lit;
+            bool fullyOn = i < litFull;
             bool isPeak = (i == peakSeg);
             bool isClipSeg = clipped && i == numSeg - 1;
-            juce::Colour c = XaLZaColour::panelControl;
-            if (on || isPeak || isClipSeg)
-            {
-                if (isClipSeg)             c = XaLZaColour::danger;
-                else if (i >= numSeg - 2)  c = XaLZaColour::danger;
-                else if (i >= numSeg - 4)  c = hotC;
-                else                       c = bodyC;
-            }
+
+            juce::Colour onColour = tierColour(i);
+            if (isClipSeg) onColour = XaLZaColour::danger;
             // The peak-hold marker itself always reads as a bright,
             // distinct highlight (not just "whatever colour that segment
             // would be") so it's legible as a held marker and not
             // mistaken for the continuously-lit body — matches the
             // white peak cap sitting on Insight's grey level bars.
-            if (isPeak && !isClipSeg)
-                c = XaLZaColour::textHi;
-            g.setColour(c);
-            g.fillRect(seg);
+            if (isPeak && !isClipSeg) onColour = XaLZaColour::textHi;
+
+            if (fullyOn || isPeak || isClipSeg)
+            {
+                drawBeveledSegment(g, seg, onColour, true);
+            }
+            else if (i == litFull && partial > 0.02f)
+            {
+                auto litPart = seg.removeFromBottom(seg.getHeight() * partial);
+                drawBeveledSegment(g, seg, XaLZaColour::panelControl, false);
+                drawBeveledSegment(g, litPart, tierColour(i), true);
+            }
+            else
+            {
+                drawBeveledSegment(g, seg, XaLZaColour::panelControl, false);
+            }
         }
 
         // RMS marker: a thin line across the column at the real mean-
         // square level — the "how loud does this actually sound" reading
         // sitting underneath the peak segments' "what's the instantaneous
         // maximum" one, the same Peak+RMS pairing Insight's Levels panel
-        // shows. Drawn last so it's never hidden behind a lit segment.
+        // shows. Drawn last (before the spark burst) so it's never hidden
+        // behind a lit segment.
         float tRms = juce::jlimit(0.0f, 1.0f, (rmsDb - minDb) / (maxDb - minDb));
         float rmsY = colFull.getBottom() - tRms * colFull.getHeight();
         // This family's own body colour, not the peak-hold marker's white —
@@ -294,6 +436,18 @@ private:
         // than a second peak cap, and now doubles as a family accent.
         g.setColour(bodyC.withAlpha(0.95f));
         g.fillRect(juce::Rectangle<float>(colFull.getX(), rmsY - 0.6f, colFull.getWidth(), 1.2f));
+
+        // Clip spark burst — drawn last, on top of everything.
+        for (auto& s : sparks)
+        {
+            if (s.life <= 0) continue;
+            float lifeT = (float) s.life / (float) sparkLifeFrames;
+            float dist = (1.0f - lifeT) * segH * 3.2f;
+            juce::Point<float> origin(colFull.getCentreX(), colFull.getY());
+            juce::Point<float> tip = origin.getPointOnCircumference(dist, s.angle);
+            g.setColour(XaLZaColour::danger.withAlpha(lifeT * 0.85f));
+            g.drawLine({ origin, tip }, juce::jmax(0.6f, 1.4f * lifeT));
+        }
     }
 
     float lastDbL = -100.0f, lastDbR = -100.0f;
@@ -302,6 +456,8 @@ private:
     float lastRmsL = -100.0f, lastRmsR = -100.0f;
     int holdFramesLeftL = 0, holdFramesLeftR = 0;
     int clipLatchFramesLeftL = 0, clipLatchFramesLeftR = 0;
+    int flashFramesLeftL = 0, flashFramesLeftR = 0;
+    std::array<Spark, numSparksPerBurst> sparksL, sparksR;
     Family family = Family::Dynamics;
 };
 
@@ -316,9 +472,29 @@ public:
     void setGrDb(float db)
     {
         db = juce::jlimit(0.0f, 24.0f, db);
-        if (std::abs(db - lastDb) > 0.05f)
+
+        // Peak-hold caret: the deepest reduction reached recently, held
+        // briefly then slowly releasing — the same "instant + held max"
+        // pairing LedMeter's own peak segment gives, now on the GR bar
+        // too, from a genuine running max of setGrDb()'s own real input.
+        if (db > heldDb)
+        {
+            heldDb = db;
+            holdFramesLeft = 45;   // ~1.5s at 30Hz before the caret starts creeping back
+        }
+        else if (holdFramesLeft > 0)
+        {
+            --holdFramesLeft;
+        }
+        else
+        {
+            heldDb = juce::jmax(db, heldDb - 0.35f);   // slow release, ~10.5dB/s
+        }
+
+        if (std::abs(db - lastDb) > 0.05f || std::abs(heldDb - lastHeldDb) > 0.05f)
         {
             lastDb = db;
+            lastHeldDb = heldDb;
             repaint();
         }
     }
@@ -331,14 +507,40 @@ private:
         g.fillRect(b);
 
         constexpr float maxDb = 24.0f;
+        auto bar = b.reduced(1.0f);
         float t = juce::jlimit(0.0f, 1.0f, lastDb / maxDb);
         if (t > 0.0f)
         {
-            auto fill = b.reduced(1.0f);
-            fill = fill.removeFromLeft(fill.getWidth() * t);
-            juce::Colour c = lastDb >= 12.0f ? XaLZaColour::danger : XaLZaColour::accent;
-            g.setColour(c.withAlpha(0.85f));
+            // Capture the bar's own left edge BEFORE removeFromLeft below
+            // mutates `bar` down to the leftover (unfilled) portion — the
+            // gradient's x1 must anchor at the bar's true start, not at
+            // wherever the fill happens to end.
+            float barX = bar.getX();
+            auto fill = bar.removeFromLeft(bar.getWidth() * t);
+            // Gradient fill instead of a flat tint — reads as a genuine
+            // intensity ramp toward the danger zone rather than a single
+            // colour that just swaps at a threshold.
+            juce::ColourGradient grad(XaLZaColour::accent2, barX, 0.0f,
+                                       XaLZaColour::danger, b.getRight(), 0.0f, false);
+            grad.addColour(0.55, XaLZaColour::accent);
+            g.setGradientFill(grad);
             g.fillRect(fill);
+        }
+
+        // Tick marks at 6/12/18dB — a genuine scale reference so a reading
+        // can be judged at a glance, not just read as raw digits.
+        g.setColour(XaLZaColour::panelBg.withAlpha(0.55f));
+        for (float mark : { 6.0f, 12.0f, 18.0f })
+        {
+            float x = b.getX() + 1.0f + (mark / maxDb) * (b.getWidth() - 2.0f);
+            g.drawLine(x, b.getY() + 1.0f, x, b.getBottom() - 1.0f, 1.0f);
+        }
+
+        if (lastHeldDb > 0.3f)
+        {
+            float capX = b.getX() + 1.0f + juce::jlimit(0.0f, 1.0f, lastHeldDb / maxDb) * (b.getWidth() - 2.0f);
+            g.setColour(XaLZaColour::textHi);
+            g.fillRect(juce::Rectangle<float>(capX - 0.9f, b.getY(), 1.8f, b.getHeight()));
         }
 
         g.setColour(XaLZaColour::borderSoft);
@@ -350,6 +552,8 @@ private:
     }
 
     float lastDb = 0.0f;
+    float heldDb = 0.0f, lastHeldDb = 0.0f;
+    int holdFramesLeft = 0;
 };
 
 /** A row of flat TextButtons standing in for one continuous parameter —
@@ -523,7 +727,15 @@ private:
 class CorrelationMeterView : public juce::Component
 {
 public:
-    void setCorrelation(float c) { corr = juce::jlimit(-1.0f, 1.0f, c); repaint(); }
+    void setCorrelation(float c)
+    {
+        corr = juce::jlimit(-1.0f, 1.0f, c);
+        history[(size_t) historyPos] = corr;
+        historyPos = (historyPos + 1) % (int) history.size();
+        if (historyCount < (int) history.size())
+            ++historyCount;
+        repaint();
+    }
 
 private:
     void paint(juce::Graphics& g) override
@@ -536,6 +748,20 @@ private:
 
         auto bar = full.reduced(3.0f, 3.0f);
         float midX = bar.getCentreX();
+
+        // Phosphor-style trail of recent readings, drawn UNDER the live
+        // marker — a fading history of where the correlation has actually
+        // been sitting, built from setCorrelation()'s own real values, the
+        // same "persistence" cue a scope display gives.
+        for (int i = 0; i < historyCount; ++i)
+        {
+            int idx = (historyPos - 1 - i + (int) history.size() * 4) % (int) history.size();
+            float age = historyCount > 1 ? (float) i / (float) (historyCount - 1) : 0.0f;
+            float hx = midX + history[(size_t) idx] * bar.getWidth() * 0.5f;
+            auto hc = history[(size_t) idx] >= 0.0f ? XaLZaColour::accent2 : XaLZaColour::danger;
+            g.setColour(hc.withAlpha(juce::jmax(0.0f, 0.22f * (1.0f - age))));
+            g.fillRect(juce::Rectangle<float>(hx - 0.7f, bar.getY(), 1.4f, bar.getHeight()));
+        }
 
         auto fillC = corr >= 0.0f ? XaLZaColour::accent2 : XaLZaColour::danger;
         float x = midX + corr * bar.getWidth() * 0.5f;
@@ -558,6 +784,8 @@ private:
     }
 
     float corr = 0.0f;
+    std::array<float, 24> history {};
+    int historyPos = 0, historyCount = 0;
 };
 
 /** Analog-style VU gauge (semicircular arc, ticks, needle) — matches the
@@ -579,11 +807,52 @@ public:
         constexpr float tauRelease = 0.035f;
         constexpr float dt  = 1.0f / 30.0f;
         float coef = std::exp(-dt / (target >= smoothed ? tauAttack : tauRelease));
+        float prevSmoothed = smoothed;
         smoothed = coef * smoothed + (1.0f - coef) * target;
+
+        // Needle "flick": a quick decaying spring-wobble layered purely on
+        // top of the real ballistics above whenever the level jumps up
+        // hard — a physical-feeling overshoot accent that never touches
+        // `smoothed` itself, so the actual tracked level stays accurate.
+        float jump = smoothed - prevSmoothed;
+        if (jump > 0.02f)
+        {
+            wobbleAmp = juce::jmin(0.16f, wobbleAmp + jump * 1.6f);
+            wobblePhase = 0.0f;
+        }
+        if (wobbleAmp > 0.0005f)
+        {
+            wobblePhase += wobbleOmega * dt;
+            wobbleAmp *= 0.82f;
+        }
+        else
+        {
+            wobbleAmp = 0.0f;
+        }
+
+        // Peak-hold caret on the arc scale — the loudest reading recently
+        // reached, releasing slowly, the same "instant + held max" pairing
+        // LedMeter's peak segment and GrMeter's caret already give.
+        if (target > heldT)
+        {
+            heldT = target;
+            holdFramesLeft = 40;
+        }
+        else if (holdFramesLeft > 0)
+        {
+            --holdFramesLeft;
+        }
+        else
+        {
+            heldT = juce::jmax(target, heldT - 0.012f);
+        }
+
         repaint();
     }
 
 private:
+    static constexpr float wobbleOmega = juce::MathConstants<float>::twoPi * 9.0f;   // ~9Hz needle flutter
+
     void paint(juce::Graphics& g) override
     {
         auto b = getLocalBounds().toFloat();
@@ -591,6 +860,19 @@ private:
         juce::Point<float> pivot(b.getCentreX(), b.getBottom() - 10.0f);
 
         constexpr float startAngle = -2.05f, endAngle = 2.05f;
+
+        // Warm lamp backlight behind the dial — brightens with the real
+        // signal instead of sitting at one fixed intensity, like the
+        // incandescent bulb behind a real VU gauge's scale.
+        {
+            float glowR = radius * (0.85f + 0.35f * smoothed);
+            juce::ColourGradient lamp(XaLZaColour::accent.withAlpha(0.10f + 0.16f * smoothed),
+                                       pivot.x, pivot.y - radius * 0.35f,
+                                       XaLZaColour::accent.withAlpha(0.0f),
+                                       pivot.x, pivot.y - radius, true);
+            g.setGradientFill(lamp);
+            g.fillEllipse(pivot.x - glowR, pivot.y - radius * 0.35f - glowR, glowR * 2.0f, glowR * 2.0f);
+        }
 
         juce::Path arc;
         arc.addCentredArc(pivot.x, pivot.y, radius, radius, 0.0f, startAngle, endAngle, true);
@@ -613,12 +895,38 @@ private:
             g.drawLine({ p1, p2 }, 1.2f);
         }
 
-        float angle = startAngle + smoothed * (endAngle - startAngle);
+        // Peak-hold caret — a short bright tick riding the arc at the
+        // recent loudest reading, independent of where the live needle is
+        // right now.
+        if (heldT > 0.01f)
+        {
+            float ha = startAngle + heldT * (endAngle - startAngle);
+            juce::Point<float> hp1(pivot.x + std::sin(ha) * radius * 0.90f, pivot.y - std::cos(ha) * radius * 0.90f);
+            juce::Point<float> hp2(pivot.x + std::sin(ha) * radius * 1.06f, pivot.y - std::cos(ha) * radius * 1.06f);
+            g.setColour(XaLZaColour::textHi);
+            g.drawLine({ hp1, hp2 }, 1.8f);
+        }
+
+        float wobble = wobbleAmp * std::sin(wobblePhase);
+        float angle = startAngle + juce::jlimit(-0.05f, 1.05f, smoothed + wobble) * (endAngle - startAngle);
+
+        // Drop shadow first, then a metallic light-to-dark gradient needle
+        // on top — reads as a real machined pointer catching light rather
+        // than a flat coloured bar.
         juce::Path needle;
         needle.addRectangle(-1.1f, -radius * 0.9f, 2.2f, radius * 0.9f);
         needle.applyTransform(juce::AffineTransform::rotation(angle).translated(pivot));
-        g.setColour(XaLZaColour::accent);
+        {
+            auto shadow = needle;
+            shadow.applyTransform(juce::AffineTransform::translation(0.9f, 1.1f));
+            g.setColour(juce::Colours::black.withAlpha(0.28f));
+            g.fillPath(shadow);
+        }
+        juce::ColourGradient needleGrad(XaLZaColour::accent.brighter(0.55f), pivot.x - radius * 0.4f, pivot.y - radius * 0.4f,
+                                         XaLZaColour::accent.darker(0.35f), pivot.x + radius * 0.4f, pivot.y + radius * 0.2f, false);
+        g.setGradientFill(needleGrad);
         g.fillPath(needle);
+
         g.setColour(XaLZaColour::panelControl);
         g.fillEllipse(pivot.x - 5.0f, pivot.y - 5.0f, 10.0f, 10.0f);
         g.setColour(XaLZaColour::accent);
@@ -627,6 +935,9 @@ private:
 
     static constexpr float minDb = -40.0f, maxDb = 3.0f;
     float smoothed = 0.0f;
+    float wobbleAmp = 0.0f, wobblePhase = 0.0f;
+    float heldT = 0.0f;
+    int holdFramesLeft = 0;
 };
 
 /** Classic analog-style Gain-Reduction gauge — the needle meter every real
@@ -663,11 +974,52 @@ public:
         // real Attack/Release parameters instead of fixed constants.
         constexpr float dt  = 1.0f / 30.0f;
         float coef = std::exp(-dt / (target >= smoothed ? tauAttack : tauRelease));
+        float prevSmoothed = smoothed;
         smoothed = coef * smoothed + (1.0f - coef) * target;
+
+        // Needle "flick": a quick decaying spring-wobble layered purely on
+        // top of the real ballistics above whenever reduction deepens
+        // hard — purely additive, so it never distorts `smoothed`, which
+        // is still exactly what the "GR -x dB" text below reads from.
+        float jump = smoothed - prevSmoothed;
+        if (jump > 0.02f)
+        {
+            wobbleAmp = juce::jmin(0.16f, wobbleAmp + jump * 1.6f);
+            wobblePhase = 0.0f;
+        }
+        if (wobbleAmp > 0.0005f)
+        {
+            wobblePhase += wobbleOmega * dt;
+            wobbleAmp *= 0.82f;
+        }
+        else
+        {
+            wobbleAmp = 0.0f;
+        }
+
+        // Peak-hold caret — the deepest reduction reached recently,
+        // releasing slowly, the same pairing VUMeter/LedMeter/GrMeter all
+        // now share.
+        if (target > heldT)
+        {
+            heldT = target;
+            holdFramesLeft = 40;
+        }
+        else if (holdFramesLeft > 0)
+        {
+            --holdFramesLeft;
+        }
+        else
+        {
+            heldT = juce::jmax(target, heldT - 0.012f);
+        }
+
         repaint();
     }
 
 private:
+    static constexpr float wobbleOmega = juce::MathConstants<float>::twoPi * 9.0f;   // ~9Hz needle flutter
+
     void paint(juce::Graphics& g) override
     {
         auto full = getLocalBounds().toFloat();
@@ -678,6 +1030,18 @@ private:
         juce::Point<float> pivot(b.getCentreX(), b.getBottom() - 10.0f);
 
         constexpr float startAngle = -2.05f, endAngle = 2.05f;
+
+        // Warm lamp backlight, brighter the deeper the real reduction —
+        // same living-instrument cue as VUMeter's own backlight.
+        {
+            float glowR = radius * (0.85f + 0.35f * smoothed);
+            juce::ColourGradient lamp(XaLZaColour::accent.withAlpha(0.10f + 0.16f * smoothed),
+                                       pivot.x, pivot.y - radius * 0.35f,
+                                       XaLZaColour::accent.withAlpha(0.0f),
+                                       pivot.x, pivot.y - radius, true);
+            g.setGradientFill(lamp);
+            g.fillEllipse(pivot.x - glowR, pivot.y - radius * 0.35f - glowR, glowR * 2.0f, glowR * 2.0f);
+        }
 
         juce::Path arc;
         arc.addCentredArc(pivot.x, pivot.y, radius, radius, 0.0f, startAngle, endAngle, true);
@@ -704,14 +1068,38 @@ private:
             g.drawLine({ p1, p2 }, 1.2f);
         }
 
+        // Peak-hold caret — rides the arc at the deepest reduction
+        // recently reached, on the same "toward the red end" side the
+        // live needle swings.
+        if (heldT > 0.01f)
+        {
+            float ha = endAngle - heldT * (endAngle - startAngle);
+            juce::Point<float> hp1(pivot.x + std::sin(ha) * radius * 0.90f, pivot.y - std::cos(ha) * radius * 0.90f);
+            juce::Point<float> hp2(pivot.x + std::sin(ha) * radius * 1.06f, pivot.y - std::cos(ha) * radius * 1.06f);
+            g.setColour(XaLZaColour::textHi);
+            g.drawLine({ hp1, hp2 }, 1.8f);
+        }
+
         // Needle rests at endAngle (0dB, right) and swings toward
-        // startAngle (max reduction, left) as smoothed increases.
-        float angle = endAngle - smoothed * (endAngle - startAngle);
+        // startAngle (max reduction, left) as smoothed increases, plus the
+        // decaying flick wobble computed in pushGrDb().
+        float wobble = wobbleAmp * std::sin(wobblePhase);
+        float angle = endAngle - juce::jlimit(-0.05f, 1.05f, smoothed + wobble) * (endAngle - startAngle);
+
         juce::Path needle;
         needle.addRectangle(-1.1f, -radius * 0.9f, 2.2f, radius * 0.9f);
         needle.applyTransform(juce::AffineTransform::rotation(angle).translated(pivot));
-        g.setColour(XaLZaColour::accent);
+        {
+            auto shadow = needle;
+            shadow.applyTransform(juce::AffineTransform::translation(0.9f, 1.1f));
+            g.setColour(juce::Colours::black.withAlpha(0.28f));
+            g.fillPath(shadow);
+        }
+        juce::ColourGradient needleGrad(XaLZaColour::accent.brighter(0.55f), pivot.x - radius * 0.4f, pivot.y - radius * 0.4f,
+                                         XaLZaColour::accent.darker(0.35f), pivot.x + radius * 0.4f, pivot.y + radius * 0.2f, false);
+        g.setGradientFill(needleGrad);
         g.fillPath(needle);
+
         g.setColour(XaLZaColour::panelControl);
         g.fillEllipse(pivot.x - 5.0f, pivot.y - 5.0f, 10.0f, 10.0f);
         g.setColour(XaLZaColour::accent);
@@ -725,6 +1113,9 @@ private:
     static constexpr float maxDb = 24.0f;
     float smoothed = 0.0f;
     float tauAttack = 0.09f, tauRelease = 0.025f;   // original fixed defaults until setBallisticsMs() is called
+    float wobbleAmp = 0.0f, wobblePhase = 0.0f;
+    float heldT = 0.0f;
+    int holdFramesLeft = 0;
 };
 
 /** Opto's page-defining visual: a glowing "photocell" orb — the way every
@@ -766,12 +1157,34 @@ private:
         auto cx = b.getCentreX(), cy = b.getCentreY();
         float maxR = juce::jmin(b.getWidth(), b.getHeight()) * 0.42f;
 
+        // Filament micro-flicker — a real electro-optical cell's light
+        // never sits perfectly steady, it has a faint organic shimmer.
+        // Built from three incommensurate sine rates (no shared period, so
+        // it never visibly loops) rather than true noise, kept subtle at
+        // rest and a little more present under load — Opto's own signature
+        // texture, since this glow orb is that module's page-defining
+        // visual.
+        double nowMs = juce::Time::getMillisecondCounterHiRes();
+        float flicker = 1.0f
+            + 0.045f * std::sin((float) (nowMs * 0.0119))
+            + 0.030f * std::sin((float) (nowMs * 0.0271 + 1.7f))
+            + 0.020f * std::sin((float) (nowMs * 0.0533 + 0.4f));
+        flicker = 1.0f + (flicker - 1.0f) * (0.3f + 0.7f * smoothed);
+
         // Brighter AND slightly larger as reduction increases — a real
         // photocell glows harder under more light (the sidechain signal
         // driving it), which is exactly what's pulling the gain down.
         float glowT = smoothed;
-        float r = maxR * (0.55f + 0.45f * glowT);
+        float r = maxR * (0.55f + 0.45f * glowT) * flicker;
         juce::Colour core = XaLZaColour::accent2.interpolatedWith(XaLZaColour::accent, glowT);
+
+        // A slow standby halo, always faintly present — the cell reads as
+        // a genuinely powered, living component even when GR sits at 0,
+        // instead of the glow disappearing outright.
+        float standbyPhase = std::sin((float) (nowMs * 0.0012)) * 0.5f + 0.5f;
+        float standbyR = maxR * (1.35f + 0.12f * standbyPhase);
+        g.setColour(core.withAlpha(0.02f + 0.02f * standbyPhase));
+        g.fillEllipse(cx - standbyR, cy - standbyR, standbyR * 2.0f, standbyR * 2.0f);
 
         for (int i = 4; i >= 1; --i)
         {
@@ -779,7 +1192,7 @@ private:
             g.setColour(core.withAlpha(0.05f * glowT + 0.02f));
             g.fillEllipse(cx - ringR, cy - ringR, ringR * 2.0f, ringR * 2.0f);
         }
-        g.setColour(core.withAlpha(0.85f));
+        g.setColour(core.withAlpha(0.85f * juce::jlimit(0.6f, 1.15f, flicker)));
         g.fillEllipse(cx - r, cy - r, r * 2.0f, r * 2.0f);
         g.setColour(XaLZaColour::panelBg.withAlpha(0.4f));
         g.fillEllipse(cx - r * 0.35f, cy - r * 0.35f, r * 0.7f, r * 0.7f);
