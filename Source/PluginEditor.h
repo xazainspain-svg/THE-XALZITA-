@@ -32,6 +32,23 @@ namespace XaLZaColour
     static const juce::Colour accent       { 0xffe37f97 };  // Rosa
     static const juce::Colour accent2      { 0xff4fa06c };  // Verde palma
     static const juce::Colour danger       { 0xffc74b47 };  // unbranded on purpose - see comment above
+
+    // Module-family accents (LedMeter families, Exciter's spectrum, Opto's
+    // knee curve, Spring Reverb's comb cluster). Each is Rosa, Verde palma
+    // or Cacao itself, hue-rotated and re-saturated — NOT a fresh generic
+    // categorical pick. An earlier pass here reached straight for stock
+    // amber/teal/violet/copper, which is exactly the generic instinct the
+    // brand guide already rejected once (see above: accent2 "was a generic
+    // teal" before Verde palma replaced it) — reusing that same teal here
+    // for a different purpose would have quietly re-introduced it.
+    static const juce::Colour famToneBody      { 0xffbf8956 };  // Cacao's own ~29° hue, pushed more vivid
+    static const juce::Colour famToneHot       { 0xffeb9c52 };
+    static const juce::Colour famSpatialBody   { 0xff63a695 };  // Verde palma shifted cooler, toward aqua
+    static const juce::Colour famSpatialHot    { 0xff69d1b7 };
+    static const juce::Colour famPitchBody     { 0xffb36b95 };  // Rosa shifted toward violet
+    static const juce::Colour famPitchHot      { 0xffe070b2 };
+    static const juce::Colour famCharacterBody { 0xffa66042 };  // Cacao/Rosa blend, deeper and redder
+    static const juce::Colour famCharacterHot  { 0xffd1743f };
 }
 
 /** Rotary knob: thin track, accent- or gray-coloured value arc, a
@@ -195,12 +212,12 @@ private:
     {
         switch (f)
         {
-            case Family::Tone:      body = juce::Colour(0xffd9a441); hot = juce::Colour(0xffe8c265); break; // amber/gold — PRE, EQ, RES, SAT, EXC
-            case Family::Spatial:   body = juce::Colour(0xff3fa9b5); hot = juce::Colour(0xff6fd0da); break; // teal/cyan — REV, SPR, DLY, DBL
-            case Family::Pitch:     body = juce::Colour(0xff9b6bd6); hot = juce::Colour(0xffc79bf0); break; // violet — TUNE, ESS
-            case Family::Character: body = juce::Colour(0xffb5652f); hot = juce::Colour(0xffd88a4d); break; // copper — TAPE
+            case Family::Tone:      body = XaLZaColour::famToneBody;      hot = XaLZaColour::famToneHot;      break; // PRE, EQ, RES, SAT, EXC
+            case Family::Spatial:   body = XaLZaColour::famSpatialBody;   hot = XaLZaColour::famSpatialHot;   break; // REV, SPR, DLY, DBL
+            case Family::Pitch:     body = XaLZaColour::famPitchBody;     hot = XaLZaColour::famPitchHot;     break; // TUNE, ESS
+            case Family::Character: body = XaLZaColour::famCharacterBody; hot = XaLZaColour::famCharacterHot; break; // TAPE
             case Family::Dynamics:
-            default:                body = XaLZaColour::accent2;    hot = XaLZaColour::accent;    break; // original palette — GATE, TRS, COMP, OPTO, LIM
+            default:                body = XaLZaColour::accent2;          hot = XaLZaColour::accent;          break; // Verde palma/Rosa — GATE, TRS, COMP, OPTO, LIM
         }
     }
 
@@ -622,15 +639,28 @@ private:
 class GrNeedleMeter : public juce::Component
 {
 public:
+    // Ties the needle's own attack/release SPEED to the module's real
+    // Attack/Release knobs (in ms) — a genuine physical link, not a static
+    // marker: turning Release slower makes the needle visibly recover
+    // slower, exactly like a real hardware GR meter driven by the same
+    // detector the compressor itself uses. Clamped to a range that stays
+    // legible at the editor's 30Hz refresh (an instant sub-ms attack would
+    // otherwise just look like flicker). Optional — a caller that never
+    // calls this keeps the original fixed, snappy ballistics.
+    void setBallisticsMs(float attackMs, float releaseMs)
+    {
+        tauAttack  = juce::jlimit(0.01f, 0.5f, attackMs * 0.001f);
+        tauRelease = juce::jlimit(0.01f, 1.2f, releaseMs * 0.001f);
+    }
+
     void pushGrDb(float grDb)
     {
         float target = juce::jlimit(0.0f, 1.0f, grDb / maxDb);
-        // Asymmetric ballistics, same idea as VUMeter above: the needle
-        // still swings INTO reduction at the original snappy rate, but
-        // recovers back toward 0dB (falling GR) much faster — GR needles
-        // should visibly snap back the instant the compressor lets go.
-        constexpr float tauAttack  = 0.09f;   // grDb rising = more reduction
-        constexpr float tauRelease = 0.025f;  // grDb falling = recovering
+        // Asymmetric ballistics: the needle swings INTO reduction at
+        // tauAttack and recovers back toward 0dB at tauRelease — real
+        // hardware GR meters behave the same way, and with
+        // setBallisticsMs() above these two now track the module's own
+        // real Attack/Release parameters instead of fixed constants.
         constexpr float dt  = 1.0f / 30.0f;
         float coef = std::exp(-dt / (target >= smoothed ? tauAttack : tauRelease));
         smoothed = coef * smoothed + (1.0f - coef) * target;
@@ -694,6 +724,7 @@ private:
 
     static constexpr float maxDb = 24.0f;
     float smoothed = 0.0f;
+    float tauAttack = 0.09f, tauRelease = 0.025f;   // original fixed defaults until setBallisticsMs() is called
 };
 
 /** Opto's page-defining visual: a glowing "photocell" orb — the way every
@@ -1173,7 +1204,9 @@ private:
         {
             float h = bars[i] * b.getHeight();
             juce::Rectangle<float> barRect(b.getX() + (float) i * barW, b.getBottom() - h, barW * 0.78f, h);
-            juce::Colour c = juce::Colour(0xffb5652f).interpolatedWith(juce::Colour(0xffffe0a3), bars[i]);
+            // Brand's own Tone-family hues (same as EXC's LedMeter and
+            // Opto's knee curve) — not a standalone copper/gold pick.
+            juce::Colour c = XaLZaColour::famToneBody.interpolatedWith(XaLZaColour::famToneHot, bars[i]);
             g.setColour(c.withAlpha(0.85f));
             g.fillRect(barRect);
 
@@ -1182,7 +1215,7 @@ private:
             // is genuinely hot, not decorative.
             if (bars[i] > 0.55f)
             {
-                g.setColour(juce::Colour(0xffffe0a3).withAlpha(juce::jlimit(0.0f, 1.0f, (bars[i] - 0.55f) * 2.2f)));
+                g.setColour(XaLZaColour::famToneHot.withAlpha(juce::jlimit(0.0f, 1.0f, (bars[i] - 0.55f) * 2.2f)));
                 g.fillRect(barRect.getX(), barRect.getY() - 3.0f, barRect.getWidth(), 2.0f);
             }
         }
@@ -1195,7 +1228,7 @@ private:
         dash.startNewSubPath(mx, b.getY()); dash.lineTo(mx, b.getBottom());
         juce::Path dashed;
         juce::PathStrokeType(1.2f).createDashedStroke(dashed, dash, dashLens, 2);
-        g.setColour(juce::Colour(0xffffe0a3).withAlpha(0.7f));
+        g.setColour(XaLZaColour::famToneHot.withAlpha(0.7f));
         g.strokePath(dashed, juce::PathStrokeType(1.2f));
     }
 
@@ -1712,6 +1745,9 @@ public:
     {
         curve.setCurve(threshDb, ratio, makeupDb, mixAmt);
     }
+    // Ties the needle's real attack/release speed to Comp's own Attack/
+    // Release knobs — see GrNeedleMeter::setBallisticsMs.
+    void setBallisticsMs(float attackMs, float releaseMs) { grMeter.setBallisticsMs(attackMs, releaseMs); }
 
 private:
     void resized() override
@@ -1727,13 +1763,122 @@ private:
     TransferCurveView curve;
 };
 
+/** Opto's own transfer curve — the exact same real threshold/ratio/
+    makeup/mix data TransferCurveView draws for Comp above, but rendered
+    with a genuinely different curve SHAPE and palette so Opto reads as
+    its own instrument, not Comp re-skinned. Real optical cells (LA-2A
+    and friends) are known for a smooth, gradual gain-reduction onset —
+    not the sharp corner a solid-state VCA/digital compressor like Comp
+    has — so this draws a real quadratic soft-knee blend across a 6dB
+    window around threshold instead of Comp's hard corner, with a warm
+    amber glow-stroke matching OptoGlowView's photocell colour beside it. */
+class OptoKneeView : public juce::Component
+{
+public:
+    static constexpr int numPts = 96;
+    static constexpr float rangeDb = 60.0f;
+    static constexpr float kneeWidthDb = 6.0f;
+
+    void setCurve(float threshDb, float ratio, float makeupDb, float mixAmt)
+    {
+        float makeupLin = juce::Decibels::decibelsToGain(makeupDb);
+        float below = threshDb - kneeWidthDb * 0.5f;
+        float above = threshDb + kneeWidthDb * 0.5f;
+        for (int i = 0; i <= numPts; ++i)
+        {
+            float xDb = -rangeDb + rangeDb * (float) i / (float) numPts;
+            float yDbWet;
+            if (xDb <= below)
+            {
+                yDbWet = xDb;
+            }
+            else if (xDb >= above)
+            {
+                yDbWet = threshDb + (xDb - threshDb) / juce::jmax(1.0f, ratio);
+            }
+            else
+            {
+                // Standard soft-knee quadratic: smoothly blends the 1:1
+                // slope below the knee into the 1/ratio slope above it.
+                float delta = xDb - below;
+                yDbWet = xDb + (1.0f / juce::jmax(1.0f, ratio) - 1.0f) * (delta * delta) / (2.0f * kneeWidthDb);
+            }
+            float dryLin = juce::Decibels::decibelsToGain(xDb);
+            float wetLin = juce::Decibels::decibelsToGain(yDbWet) * makeupLin;
+            float outLin = dryLin + (wetLin - dryLin) * mixAmt;
+            curveDb[i] = juce::Decibels::gainToDecibels(outLin, -100.0f);
+        }
+        threshDbCache = threshDb;
+        repaint();
+    }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(b);
+        g.setColour(XaLZaColour::borderSoft);
+        for (int i = 1; i < 4; ++i)
+        {
+            float x = b.getX() + b.getWidth() * (float) i / 4.0f;
+            float y = b.getY() + b.getHeight() * (float) i / 4.0f;
+            g.drawLine(x, b.getY(), x, b.getBottom(), 0.5f);
+            g.drawLine(b.getX(), y, b.getRight(), y, 0.5f);
+        }
+        g.setColour(XaLZaColour::border);
+        g.drawRect(b, 1.0f);
+
+        auto mapPt = [&] (float xDb, float yDb)
+        {
+            float tx = juce::jlimit(0.0f, 1.0f, (xDb + rangeDb) / rangeDb);
+            float ty = juce::jlimit(0.0f, 1.0f, (yDb + rangeDb) / rangeDb);
+            return juce::Point<float>(b.getX() + tx * b.getWidth(), b.getBottom() - ty * b.getHeight());
+        };
+
+        g.setColour(XaLZaColour::textMuted.withAlpha(0.4f));
+        auto p0 = mapPt(-rangeDb, -rangeDb), p1 = mapPt(0.0f, 0.0f);
+        g.drawLine(p0.x, p0.y, p1.x, p1.y, 1.0f);
+
+        // Wide, soft knee-width band instead of Comp's single crisp
+        // threshold line — visually communicates "gradual onset" at a
+        // glance, before the curve shape itself even registers.
+        float loX = mapPt(threshDbCache - kneeWidthDb * 0.5f, 0.0f).x;
+        float hiX = mapPt(threshDbCache + kneeWidthDb * 0.5f, 0.0f).x;
+        g.setColour(XaLZaColour::famToneBody.withAlpha(0.14f));
+        g.fillRect(juce::Rectangle<float>(loX, b.getY(), juce::jmax(1.0f, hiX - loX), b.getHeight()));
+
+        juce::Path curve;
+        for (int i = 0; i <= numPts; ++i)
+        {
+            float xDb = -rangeDb + rangeDb * (float) i / (float) numPts;
+            auto pt = mapPt(xDb, curveDb[i]);
+            if (i == 0) curve.startNewSubPath(pt); else curve.lineTo(pt);
+        }
+        // Soft glow stroke behind the crisp line, in the brand's own
+        // Cacao-derived Tone hue — echoes OptoGlowView's photocell warmth
+        // instead of Comp's flat accent, without reaching for a stock amber.
+        g.setColour(XaLZaColour::famToneBody.withAlpha(0.25f));
+        g.strokePath(curve, juce::PathStrokeType(5.0f));
+        g.setColour(XaLZaColour::famToneHot);
+        g.strokePath(curve, juce::PathStrokeType(2.0f));
+
+        g.setColour(XaLZaColour::textMuted);
+        g.setFont(juce::Font(juce::FontOptions(8.5f)));
+        g.drawText("IN dB / OUT dB (soft knee)", b.reduced(3.0f), juce::Justification::topLeft);
+    }
+
+    float curveDb[numPts + 1] = {};
+    float threshDbCache = -rangeDb;
+};
+
 /** Composite Opto page view: the glowing photocell orb (see OptoGlowView
-    above) plus the analytic transfer curve (Opto's "Reduction" knob maps
-    to an internal threshold at a fixed 4:1 ratio — see processBlock's
-    OPTO block). Used to be a plain oscilloscope trace, the same shape
-    six other module pages already show — the glow orb is what actually
-    makes this page read as "an optical compressor" rather than yet
-    another scope. */
+    above) plus its own soft-knee transfer curve (see OptoKneeView —
+    Opto's "Reduction" knob maps to an internal threshold at a fixed 4:1
+    ratio, see processBlock's OPTO block). Used to be a plain oscilloscope
+    trace, the same shape six other module pages already show — the glow
+    orb plus the soft-knee curve is what actually makes this page read as
+    "an optical compressor" rather than Comp with a different colour. */
 class OptoView : public juce::Component
 {
 public:
@@ -1756,7 +1901,7 @@ private:
     }
 
     OptoGlowView glow;
-    TransferCurveView curve;
+    OptoKneeView curve;
 };
 
 /** Scrolling vocal pitch contour — the closest thing a rack-style vocal
@@ -2894,10 +3039,16 @@ private:
             g.setColour(XaLZaColour::borderSoft);
             g.drawRect(barArea, 1.0f);
 
-            // Hue rotates continuously with each spring's own LFO phase —
-            // a real per-comb "shimmer" cue, not a static accent colour.
+            // Colour breathes with each spring's own LFO phase — a real
+            // per-comb "shimmer" cue, not a static accent colour. Fades
+            // between this module's own Spatial-family duo (see
+            // XaLZaColour::famSpatialBody/Hot) rather than sweeping a full
+            // rainbow, so six springs shimmering together still reads as
+            // one instrument's own palette, not a disco effect.
             float huePos = ph[i] - std::floor(ph[i]);
-            g.setColour(juce::Colour::fromHSV(huePos, 0.55f, 0.95f, 1.0f).withAlpha(0.5f + 0.5f * norm));
+            float mixT = 1.0f - std::abs(2.0f * huePos - 1.0f);   // triangle wave, 0..1..0 per LFO cycle
+            g.setColour(XaLZaColour::famSpatialBody.interpolatedWith(XaLZaColour::famSpatialHot, mixT)
+                            .withAlpha(0.5f + 0.5f * norm));
             g.fillRect(bar);
 
             g.setColour(XaLZaColour::textMuted);

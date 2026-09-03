@@ -1627,6 +1627,13 @@ void XaLZaEditor::timerCallback()
                            proc.apvts.getRawParameterValue(XID::CompRatio)->load(),
                            proc.apvts.getRawParameterValue(XID::CompMakeup)->load(),
                            proc.apvts.getRawParameterValue(XID::CompMix)->load() / 100.0f);
+
+        // Real physical link: the needle's own attack/release speed now
+        // tracks Comp's actual Attack/Release knobs — see
+        // GrNeedleMeter::setBallisticsMs. Attack/Release had no visual
+        // representation anywhere on this page before.
+        compView.setBallisticsMs(proc.apvts.getRawParameterValue(XID::CompAttack)->load(),
+                                  proc.apvts.getRawParameterValue(XID::CompRelease)->load());
     }
     else if (currentTab == optoTabIndex)
     {
