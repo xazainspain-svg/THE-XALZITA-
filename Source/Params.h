@@ -10,7 +10,17 @@
 // Doubler, Reverb, Delay, Limiter), same names/ranges/defaults as the
 // mockup's PARAM_META table and its "Flat" / "Warm Lead Vocal" presets,
 // plus three real-time modules added afterward: Auto-Tune (Tune*),
-// Transient Shaper (Trs*) and Exciter (Exc*) — 15 modules total.
+// Transient Shaper (Trs*) and Exciter (Exc*), plus two more analog-character
+// modules added after that: Spring Reverb (Spr*, a second, physically
+// distinct damped-comb-bank reverb sitting right after the main Reverb) and
+// Tape Bus (Tape*, a final tape-machine saturation/wow-flutter stage at the
+// very end of the chain) — 17 modules total. That same analog-character
+// round also added a few params to EXISTING modules rather than new slots:
+// PreIron (transformer saturation in the Preamp), CompSag/OptoSag (PSU sag
+// in Glue Comp/Opto) and MasterDriftAmt (a subtle master-bus "vintage
+// drift" wander). All of the above default to 0 = fully transparent, so a
+// fresh instance and every old session are bit-identical to before they
+// existed.
 // ---------------------------------------------------------------------------
 namespace XID
 {
@@ -18,6 +28,12 @@ namespace XID
     static const juce::String MasterOutGain = "MasterOutGain";
     static const juce::String MasterWidth   = "MasterWidth";
     static const juce::String MasterBypass  = "MasterBypass";
+    // "Vintage Drift" — a slow, bounded, smoothed random wander (gain,
+    // width and a very slight pitch/time wobble) applied at the very end
+    // of the chain, emulating the barely-perceptible instability of a
+    // real analog console/tape signal path over time. See
+    // XaLZaProcessor's master-stage drift block. 0 = fully transparent.
+    static const juce::String MasterDriftAmt = "MasterDriftAmt";
 
     // Per-module bypass — real DSP-level dry passthrough for that one stage
     // only (everything else in the chain keeps processing normally), so any
@@ -35,8 +51,10 @@ namespace XID
     static const juce::String ExcBypass  = "ExcBypass";
     static const juce::String DblBypass  = "DblBypass";
     static const juce::String RevBypass  = "RevBypass";
+    static const juce::String SprBypass  = "SprBypass";
     static const juce::String DlyBypass  = "DlyBypass";
     static const juce::String LimBypass  = "LimBypass";
+    static const juce::String TapeBypass = "TapeBypass";
 
     // "Listen" / key-cue modes — audition exactly what a detector is
     // reacting to instead of the plugin's normal output.
@@ -56,6 +74,12 @@ namespace XID
     static const juce::String PrePhase     = "PrePhase";
     static const juce::String PrePhantom   = "PrePhantom";
     static const juce::String PreImpedance = "PreImpedance";
+    // Transformer/"iron" saturation on the low band only (one-pole ~300Hz
+    // split, extra tanh drive on the low band, recombined with the
+    // untouched high band) — physically-motivated low-frequency-biased
+    // saturation, distinct from PreChar. See XaLZaProcessor::runPre /
+    // ironProcess. 0 = fully transparent (bit-identical to before).
+    static const juce::String PreIron = "PreIron";
 
     static const juce::String GateThresh  = "GateThresh";
     static const juce::String GateRange   = "GateRange";
@@ -80,11 +104,20 @@ namespace XID
     static const juce::String CompRelease = "CompRelease";
     static const juce::String CompMix     = "CompMix";
     static const juce::String CompRatio   = "CompRatio";
+    // PSU "sag" emulation — a rail-voltage state that dips under heavy
+    // gain reduction (fast down / slow up, asymmetric) and adds its own
+    // extra gain reduction on top of the compressor's own ratio/release,
+    // the classic vintage "breathing" console/power-supply character. See
+    // XaLZaProcessor::runComp / sagProcess. 0 = fully transparent.
+    static const juce::String CompSag = "CompSag";
 
     static const juce::String OptoReduction = "OptoReduction";
     static const juce::String OptoGain      = "OptoGain";
     static const juce::String OptoMix       = "OptoMix";
     static const juce::String OptoMode      = "OptoMode";
+    // Same PSU sag emulation as CompSag, applied independently to the Opto
+    // stage's own gain reduction. See XaLZaProcessor::runOpto / sagProcess.
+    static const juce::String OptoSag = "OptoSag";
 
     static const juce::String EqLow   = "EqLow";
     static const juce::String EqMid   = "EqMid";
@@ -142,6 +175,17 @@ namespace XID
     static const juce::String RevWidth         = "RevWidth";
     static const juce::String RevFreeze        = "RevFreeze";
 
+    // Spring Reverb — a second, physically distinct reverb: a bank of
+    // short, damped, independently-LFO-modulated comb filters (mimicking
+    // discrete physical spring lengths and their characteristic dispersive
+    // "chirp"/pitch-sweep on transients), NOT the juce::dsp::Reverb engine
+    // above. Sits right after the main Reverb in the default chain order.
+    // See XaLZaProcessor::runSpr. Mix defaults to 0 = fully transparent.
+    static const juce::String SprDecay = "SprDecay";
+    static const juce::String SprTone  = "SprTone";   // damping (brightness of the tail)
+    static const juce::String SprTwang = "SprTwang";  // per-comb LFO modulation depth ("chirp" amount)
+    static const juce::String SprMix   = "SprMix";
+
     // Real-time Auto-Tune — a genuine pitch detector (autocorrelation) +
     // pitch shifter (granular, see XaLZaProcessor::GranularPitchShifter),
     // not a cosmetic knob. Key/Scale pick the target note set; Retune is
@@ -185,6 +229,18 @@ namespace XID
     static const juce::String LimCeiling   = "LimCeiling";
     static const juce::String LimRelease   = "LimRelease";
     static const juce::String LimClip      = "LimClip";
+
+    // Tape Bus — the final stage of the chain (after the Limiter): a tape-
+    // machine-style bus saturator (transformer-style low-biased tanh drive,
+    // same normalized-by-drive/no-overshoot design as PreIron) combined
+    // with real wow & flutter (a small modulated delay line, summed slow +
+    // fast sine LFOs) for a "printed to tape" master-bus character. See
+    // XaLZaProcessor::runTape. Drive/Wow/Mix default to 0 = fully
+    // transparent.
+    static const juce::String TapeDrive = "TapeDrive";
+    static const juce::String TapeWow   = "TapeWow";
+    static const juce::String TapeTone  = "TapeTone";
+    static const juce::String TapeMix   = "TapeMix";
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +291,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     add(XID::MasterInGain, "Master In Gain", -24.0f, 24.0f, 0.0f);
     add(XID::MasterOutGain, "Master Out Gain", -24.0f, 24.0f, 0.0f);
     add(XID::MasterWidth, "Stereo Width", 0.0f, 200.0f, 100.0f);
+    add(XID::MasterDriftAmt, "Vintage Drift", 0.0f, 100.0f, 0.0f);
     p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{ XID::MasterBypass, uid++ }, "Bypass", false));
 
     auto addBypass = [&](const juce::String& id, const juce::String& name)
@@ -254,8 +311,10 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     addBypass(XID::ExcBypass,  "Exciter Bypass");
     addBypass(XID::DblBypass,  "Doubler Bypass");
     addBypass(XID::RevBypass,  "Reverb Bypass");
+    addBypass(XID::SprBypass,  "Spring Reverb Bypass");
     addBypass(XID::DlyBypass,  "Delay Bypass");
     addBypass(XID::LimBypass,  "Limiter Bypass");
+    addBypass(XID::TapeBypass, "Tape Bus Bypass");
     addBypass(XID::GateListen, "Gate Listen");
     addBypass(XID::EssListen,  "De-esser Listen");
     addBypass(XID::GateScEnable, "Gate External Sidechain");
@@ -276,6 +335,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     // high-shelf, matching how a dynamic mic's top end actually shifts a
     // little with different preamp input-impedance loading.
     add(XID::PreImpedance, "Pre Impedance", 300.0f, 2400.0f, 1200.0f);
+    add(XID::PreIron, "Pre Iron", 0.0f, 100.0f, 0.0f);
 
     add(XID::GateThresh, "Gate Threshold", -70.0f, -10.0f, -50.0f);
     add(XID::GateRange, "Gate Range", -80.0f, 0.0f, -60.0f);
@@ -308,10 +368,12 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     add(XID::CompRelease, "Comp Release", 20.0f, 1000.0f, 250.0f);
     add(XID::CompMix, "Comp Mix", 0.0f, 100.0f, 0.0f);
     add(XID::CompRatio, "Comp Ratio", 1.0f, 50.0f, 4.0f);
+    add(XID::CompSag, "Comp Sag", 0.0f, 100.0f, 0.0f);
 
     add(XID::OptoReduction, "Opto Reduction", 0.0f, 100.0f, 0.0f);
     add(XID::OptoGain, "Opto Gain", -6.0f, 18.0f, 0.0f);
     add(XID::OptoMix, "Opto Mix", 0.0f, 100.0f, 0.0f);
+    add(XID::OptoSag, "Opto Sag", 0.0f, 100.0f, 0.0f);
 
     add(XID::EqLow, "EQ Low", -12.0f, 12.0f, 0.0f);
     add(XID::EqMid, "EQ Mid", -12.0f, 12.0f, 0.0f);
@@ -377,6 +439,12 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     // signal. Defaults to 100 = no change from prior behaviour.
     add(XID::RevWidth, "Rev Width", 0.0f, 200.0f, 100.0f);
 
+    add(XID::SprDecay, "Spring Decay", 0.0f, 100.0f, 50.0f);
+    add(XID::SprTone, "Spring Tone", 0.0f, 100.0f, 50.0f);
+    add(XID::SprTwang, "Spring Twang", 0.0f, 100.0f, 30.0f);
+    // Defaults to 0 = fully transparent (no wet signal added) until turned up.
+    add(XID::SprMix, "Spring Mix", 0.0f, 100.0f, 0.0f);
+
     add(XID::DlyTime, "Dly Time", 20.0f, 1000.0f, 250.0f);
     add(XID::DlyFeedback, "Dly Feedback", 0.0f, 90.0f, 38.0f);
     add(XID::DlySpread, "Dly Spread", 0.0f, 100.0f, 64.0f);
@@ -395,6 +463,13 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     add(XID::LimCeiling, "Lim Ceiling", -6.0f, 0.0f, -0.3f);
     add(XID::LimRelease, "Lim Release", 10.0f, 500.0f, 80.0f);
     add(XID::LimClip, "Lim Clip", 0.0f, 100.0f, 0.0f);
+
+    // Both Drive and Wow default to 0 = bit-identical passthrough (see
+    // runTape) until turned up.
+    add(XID::TapeDrive, "Tape Drive", 0.0f, 100.0f, 0.0f);
+    add(XID::TapeWow, "Tape Wow & Flutter", 0.0f, 100.0f, 0.0f);
+    add(XID::TapeTone, "Tape Tone", 0.0f, 100.0f, 50.0f);
+    add(XID::TapeMix, "Tape Mix", 0.0f, 100.0f, 0.0f);
 
     return {p.begin(), p.end()};
 }

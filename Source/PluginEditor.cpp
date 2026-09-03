@@ -322,7 +322,8 @@ XaLZaEditor::KnobUI& XaLZaEditor::addKnob(const juce::String& paramID, const juc
 }
 
 XaLZaEditor::ModuleMeterUI& XaLZaEditor::addModuleMeter(const juce::String& tab, int tapIn, int tapOut, int grIndex,
-                                                          const juce::String& bypassParamID)
+                                                          const juce::String& bypassParamID, int auxSource,
+                                                          LedMeter::Family family)
 {
     auto it = std::find(tabNames.begin(), tabNames.end(), tab);
     jassert(it != tabNames.end());
@@ -331,12 +332,15 @@ XaLZaEditor::ModuleMeterUI& XaLZaEditor::addModuleMeter(const juce::String& tab,
     auto mm = std::make_unique<ModuleMeterUI>();
     mm->tapIn = tapIn;
     mm->tapOut = tapOut;
+    mm->meterIn.setFamily(family);
+    mm->meterOut.setFamily(family);
     // tapOut is always TapPre + slotId (see the MeterTap/ModuleSlot comment
     // in PluginProcessor.h — the two enums are deliberately in the same
-    // Pre..Lim order), so this derives cleanly without a 13th constructor
-    // argument at every one of the 12 call sites below.
+    // Pre..Tape order), so this derives cleanly without an extra
+    // constructor argument at every one of the 17 call sites below.
     mm->slotId = tapOut - (int) XaLZaProcessor::TapPre;
     mm->grIndex = grIndex;
+    mm->auxSource = auxSource;
 
     mm->bypassParamID = bypassParamID;
 
@@ -374,6 +378,7 @@ XaLZaEditor::ModuleMeterUI& XaLZaEditor::addModuleMeter(const juce::String& tab,
     mm->dbOut.setFont(XaLZaLookAndFeel::monoFont(9.0f));
 
     addChildComponent(mm->grMeter);
+    addChildComponent(mm->auxMeter);
 
     addChildComponent(mm->meterIn);
     addChildComponent(mm->meterOut);
@@ -390,7 +395,7 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     setLookAndFeel(&laf);
 
     // ---- Tab order matches the mockup's own tab strip exactly ----
-    tabNames = { "MASTER", "PRE", "TUNE", "COMP", "OPTO", "EQ", "SAT", "REV", "DLY", "DBL", "RES", "GATE", "ESS", "LIM", "TRS", "EXC" };
+    tabNames = { "MASTER", "PRE", "TUNE", "COMP", "OPTO", "EQ", "SAT", "REV", "DLY", "DBL", "RES", "GATE", "ESS", "LIM", "TRS", "EXC", "SPR", "TAPE" };
     pageKnobs.resize(tabNames.size());
     moduleMeterByTab.resize(tabNames.size(), nullptr);
 
@@ -403,6 +408,7 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     masterKnobs.push_back(&addKnob(XID::MasterInGain, "In Gain", false));
     masterKnobs.push_back(&addKnob(XID::MasterOutGain, "Out Gain", false));
     masterKnobs.push_back(&addKnob(XID::MasterWidth, "Width", false));
+    masterKnobs.push_back(&addKnob(XID::MasterDriftAmt, "Drift", false));
 
     // ---- One page per module, fine-tune knobs only (macro lives on page 0) ----
     auto addPage = [this](const juce::String& tab, std::initializer_list<std::pair<juce::String, juce::String>> params)
@@ -414,7 +420,7 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
             pageKnobs[idx].push_back(&addKnob(pr.first, pr.second, false));
     };
 
-    addPage("PRE",  { { XID::PreGain, "Gain" }, { XID::PreChar, "Char" }, { XID::PreHPF, "HPF" } });
+    addPage("PRE",  { { XID::PreGain, "Gain" }, { XID::PreChar, "Char" }, { XID::PreHPF, "HPF" }, { XID::PreIron, "Iron" } });
     // Pad/Phase/Phantom toggles + Impedance seg-group — matches the
     // mockup's Preamp "INPUT" box and IMPEDANCE seg-group.
     for (auto* b : { &prePadBtn, &prePhaseBtn, &prePhantomBtn })
@@ -487,7 +493,7 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
         proc.apvts, XID::TuneFormant, tuneFormantBtn);
 
     addPage("COMP", { { XID::CompThresh, "Thresh" }, { XID::CompMakeup, "Makeup" }, { XID::CompAttack, "Attack" },
-                       { XID::CompRelease, "Release" }, { XID::CompMix, "Mix" } });
+                       { XID::CompRelease, "Release" }, { XID::CompMix, "Mix" }, { XID::CompSag, "Sag" } });
     // Ratio is a seg-group of fixed presets (matches the mockup's
     // compRatioSegs), not a fine-tune knob — laid out in the COMP page's
     // title row instead of the knob row (see resized()).
@@ -495,7 +501,7 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
         std::vector<SegButtonGroup::Option>{ { "2:1", 2.0f }, { "4:1", 4.0f }, { "8:1", 8.0f },
                                                { "20:1", 20.0f }, { "Limit", 50.0f } });
     addChildComponent(*compRatioSeg);
-    addPage("OPTO", { { XID::OptoReduction, "Reduction" }, { XID::OptoGain, "Gain" }, { XID::OptoMix, "Mix" } });
+    addPage("OPTO", { { XID::OptoReduction, "Reduction" }, { XID::OptoGain, "Gain" }, { XID::OptoMix, "Mix" }, { XID::OptoSag, "Sag" } });
     // Mode is a real seg-group (matches the mockup's optoModeSegs) — snaps
     // the boolean OptoMode param, which processBlock reads to pick 4:1 vs
     // 20:1 ratio (see runOpto).
@@ -591,23 +597,31 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     addChildComponent(*essBandSeg);
     addPage("TRS",  { { XID::TrsAttack, "Attack" }, { XID::TrsSustain, "Sustain" } });
     addPage("LIM",  { { XID::LimInputGain, "InGain" }, { XID::LimCeiling, "Ceiling" }, { XID::LimRelease, "Release" }, { XID::LimClip, "Clip" } });
+    // Spring Reverb — a second, physically distinct reverb (damped comb
+    // bank), sits right after the main Reverb in the default chain order.
+    addPage("SPR",  { { XID::SprDecay, "Decay" }, { XID::SprTone, "Tone" }, { XID::SprTwang, "Twang" }, { XID::SprMix, "Mix" } });
+    // Tape Bus — the final stage of the chain, after the Limiter.
+    addPage("TAPE", { { XID::TapeDrive, "Drive" }, { XID::TapeWow, "Wow" }, { XID::TapeTone, "Tone" }, { XID::TapeMix, "Mix" } });
 
     // ---- Per-module IN/OUT meters + GR readouts, tapping the real serial chain ----
-    addModuleMeter("PRE",  (int) XaLZaProcessor::TapIn,   (int) XaLZaProcessor::TapPre,  -1, XID::PreBypass);
-    addModuleMeter("GATE", (int) XaLZaProcessor::TapPre,  (int) XaLZaProcessor::TapGate, -1, XID::GateBypass);
-    addModuleMeter("TUNE", (int) XaLZaProcessor::TapGate, (int) XaLZaProcessor::TapTune, -1, XID::TuneBypass);
-    addModuleMeter("ESS",  (int) XaLZaProcessor::TapTune, (int) XaLZaProcessor::TapEss,  -1, XID::EssBypass);
-    addModuleMeter("TRS",  (int) XaLZaProcessor::TapEss,  (int) XaLZaProcessor::TapTrs,  -1, XID::TrsBypass);
-    addModuleMeter("COMP", (int) XaLZaProcessor::TapTrs,  (int) XaLZaProcessor::TapComp,  0, XID::CompBypass);
-    addModuleMeter("OPTO", (int) XaLZaProcessor::TapComp, (int) XaLZaProcessor::TapOpto,  1, XID::OptoBypass);
-    addModuleMeter("EQ",   (int) XaLZaProcessor::TapOpto, (int) XaLZaProcessor::TapEq,   -1, XID::EqBypass);
-    addModuleMeter("RES",  (int) XaLZaProcessor::TapEq,   (int) XaLZaProcessor::TapRes,  -1, XID::ResBypass);
-    addModuleMeter("SAT",  (int) XaLZaProcessor::TapRes,  (int) XaLZaProcessor::TapSat,  -1, XID::SatBypass);
-    addModuleMeter("EXC",  (int) XaLZaProcessor::TapSat,  (int) XaLZaProcessor::TapExc,  -1, XID::ExcBypass);
-    addModuleMeter("DBL",  (int) XaLZaProcessor::TapExc,  (int) XaLZaProcessor::TapDbl,  -1, XID::DblBypass);
-    addModuleMeter("REV",  (int) XaLZaProcessor::TapDbl,  (int) XaLZaProcessor::TapRev,  -1, XID::RevBypass);
-    addModuleMeter("DLY",  (int) XaLZaProcessor::TapRev,  (int) XaLZaProcessor::TapDly,  -1, XID::DlyBypass);
-    addModuleMeter("LIM",  (int) XaLZaProcessor::TapDly,  (int) XaLZaProcessor::TapLim,   2, XID::LimBypass);
+    using Fam = LedMeter::Family;
+    addModuleMeter("PRE",  (int) XaLZaProcessor::TapIn,   (int) XaLZaProcessor::TapPre,  -1, XID::PreBypass, 2, Fam::Tone);
+    addModuleMeter("GATE", (int) XaLZaProcessor::TapPre,  (int) XaLZaProcessor::TapGate, -1, XID::GateBypass, -1, Fam::Dynamics);
+    addModuleMeter("TUNE", (int) XaLZaProcessor::TapGate, (int) XaLZaProcessor::TapTune, -1, XID::TuneBypass, -1, Fam::Pitch);
+    addModuleMeter("ESS",  (int) XaLZaProcessor::TapTune, (int) XaLZaProcessor::TapEss,  -1, XID::EssBypass, -1, Fam::Pitch);
+    addModuleMeter("TRS",  (int) XaLZaProcessor::TapEss,  (int) XaLZaProcessor::TapTrs,  -1, XID::TrsBypass, -1, Fam::Dynamics);
+    addModuleMeter("COMP", (int) XaLZaProcessor::TapTrs,  (int) XaLZaProcessor::TapComp,  0, XID::CompBypass, 0, Fam::Dynamics);
+    addModuleMeter("OPTO", (int) XaLZaProcessor::TapComp, (int) XaLZaProcessor::TapOpto,  1, XID::OptoBypass, 1, Fam::Dynamics);
+    addModuleMeter("EQ",   (int) XaLZaProcessor::TapOpto, (int) XaLZaProcessor::TapEq,   -1, XID::EqBypass, -1, Fam::Tone);
+    addModuleMeter("RES",  (int) XaLZaProcessor::TapEq,   (int) XaLZaProcessor::TapRes,  -1, XID::ResBypass, -1, Fam::Tone);
+    addModuleMeter("SAT",  (int) XaLZaProcessor::TapRes,  (int) XaLZaProcessor::TapSat,  -1, XID::SatBypass, -1, Fam::Tone);
+    addModuleMeter("EXC",  (int) XaLZaProcessor::TapSat,  (int) XaLZaProcessor::TapExc,  -1, XID::ExcBypass, -1, Fam::Tone);
+    addModuleMeter("DBL",  (int) XaLZaProcessor::TapExc,  (int) XaLZaProcessor::TapDbl,  -1, XID::DblBypass, -1, Fam::Spatial);
+    addModuleMeter("REV",  (int) XaLZaProcessor::TapDbl,  (int) XaLZaProcessor::TapRev,  -1, XID::RevBypass, -1, Fam::Spatial);
+    addModuleMeter("SPR",  (int) XaLZaProcessor::TapRev,  (int) XaLZaProcessor::TapSpr,  -1, XID::SprBypass, -1, Fam::Spatial);
+    addModuleMeter("DLY",  (int) XaLZaProcessor::TapSpr,  (int) XaLZaProcessor::TapDly,  -1, XID::DlyBypass, -1, Fam::Spatial);
+    addModuleMeter("LIM",  (int) XaLZaProcessor::TapDly,  (int) XaLZaProcessor::TapLim,   2, XID::LimBypass, -1, Fam::Dynamics);
+    addModuleMeter("TAPE", (int) XaLZaProcessor::TapLim,  (int) XaLZaProcessor::TapTape, -1, XID::TapeBypass, 3, Fam::Character);
 
     // ---- Master mini-panel visualisers: real In/Out meters + a stereo goniometer ----
     auto setupCap = [this] (juce::Label& l, const juce::String& text)
@@ -655,13 +669,8 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     setupCap(chainFlowCap, "SIGNAL CHAIN (CLICK TO JUMP)");
     addChildComponent(chainFlow);
     addChildComponent(chainFlowCap);
-    {
-        const int tabIdxBySlot[XaLZaProcessor::kNumSlots] = {
-            preTabIndex, gateTabIndex, tuneTabIndex, essTabIndex, trsTabIndex, compTabIndex, optoTabIndex, eqTabIndex,
-            resTabIndex, satTabIndex, excTabIndex, dblTabIndex, revTabIndex, dlyTabIndex, limTabIndex
-        };
-        chainFlow.setTabIndices(tabIdxBySlot);
-    }
+    // chainFlow.setTabIndices() itself is set up further below, AFTER
+    // resolveTab() has run — see the comment there for why.
     chainFlow.onNodeClicked = [this] (int tabIdx) { showPage(tabIdx); };
 
     // Whole-mix spectrum analyser, in the space the old 12-knob macro grid
@@ -754,6 +763,10 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     setupVizLabel(revDecayTitle,      "SPECTRAL DECAY HEATMAP + IMPULSE RESPONSE");
     setupVizLabel(dlyScopeTitle,      "PING-PONG BOUNCE + TAP TIMELINE (POST-DELAY)");
     setupVizLabel(limViewTitle,       "BRICKWALL OUTPUT + SPECTROGRAM");
+    setupVizLabel(sprViewTitle,       "SPRING TANK — PER-COMB LEVEL + PHASE (6 SPRINGS)");
+    setupVizLabel(tapeViewTitle,      "POST-TAPE WAVEFORM + IRON GR / WOW-FLUTTER HISTORY");
+    setupVizLabel(trsViewTitle,       "TRANSIENT DETECTOR + APPLIED GAIN");
+    setupVizLabel(excViewTitle,       "ADDED HARMONICS SPECTRUM (PRE-MIX)");
     addChildComponent(preView);
     addChildComponent(tuneView);
     addChildComponent(gateView);
@@ -799,8 +812,13 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
 
     addChildComponent(dlyView);
     addChildComponent(limView);
+    addChildComponent(sprView);
+    addChildComponent(tapeView);
+    addChildComponent(trsView);
+    addChildComponent(excView);
     eqSpectrum.setSampleRate(proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0);
     essView.setSampleRate(proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0);
+    excView.setSampleRate(proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0);
 
     gateListenBtn.setClickingTogglesState(true);
     essListenBtn.setClickingTogglesState(true);
@@ -858,6 +876,26 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     revTabIndex  = resolveTab("REV",  revTabIndex);
     dlyTabIndex  = resolveTab("DLY",  dlyTabIndex);
     limTabIndex  = resolveTab("LIM",  limTabIndex);
+    sprTabIndex  = resolveTab("SPR",  sprTabIndex);
+    tapeTabIndex = resolveTab("TAPE", tapeTabIndex);
+
+    // Built here, AFTER resolveTab() above, not at chainFlow's own
+    // addChildComponent() site earlier in the constructor: the *TabIndex
+    // members' hardcoded header defaults are only fallback guesses for
+    // when a name lookup fails, and most of them don't actually match
+    // tabNames' real declared order (tabNames' order is cosmetic tab-bar
+    // order, unrelated to those defaults) — building this snapshot before
+    // resolveTab() corrects the members baked stale/wrong tab indices
+    // into the signal-chain-flow strip for most modules, so clicking a
+    // node jumped to the wrong page. Real fix: build it from the
+    // corrected values, not the fallback guesses.
+    {
+        const int tabIdxBySlot[XaLZaProcessor::kNumSlots] = {
+            preTabIndex, gateTabIndex, tuneTabIndex, essTabIndex, trsTabIndex, compTabIndex, optoTabIndex, eqTabIndex,
+            resTabIndex, satTabIndex, excTabIndex, dblTabIndex, revTabIndex, sprTabIndex, dlyTabIndex, limTabIndex, tapeTabIndex
+        };
+        chainFlow.setTabIndices(tabIdxBySlot);
+    }
 
     bigViz = {
         { preTabIndex,  &preView,          &preVuTitle },
@@ -873,6 +911,10 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
         { revTabIndex,  &revView,          &revDecayTitle },
         { dlyTabIndex,  &dlyView,          &dlyScopeTitle },
         { limTabIndex,  &limView,          &limViewTitle },
+        { sprTabIndex,  &sprView,          &sprViewTitle },
+        { tapeTabIndex, &tapeView,         &tapeViewTitle },
+        { trsTabIndex,  &trsView,          &trsViewTitle },
+        { excTabIndex,  &excView,          &excViewTitle },
     };
 
     // ---- Factory preset picker (title bar) — drives the 12 macro knobs ----
@@ -891,7 +933,7 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     };
     addAndMakeVisible(presetBox);
 
-    chainOrderBtn.setTooltip("Reorder the 15-module signal chain");
+    chainOrderBtn.setTooltip("Reorder the 17-module signal chain");
     chainOrderBtn.onClick = [this]
     {
         auto panel = std::make_unique<ChainOrderPanel>(proc);
@@ -1041,9 +1083,9 @@ void XaLZaEditor::loadImpulseResponseFile()
 
 void XaLZaEditor::toggleSolo(const juce::String& bypassParamID)
 {
-    static const std::array<juce::String, 15> allBypass = {
+    static const std::array<juce::String, 17> allBypass = {
         XID::PreBypass, XID::GateBypass, XID::TuneBypass, XID::EssBypass, XID::TrsBypass, XID::CompBypass, XID::OptoBypass, XID::EqBypass,
-        XID::ResBypass, XID::SatBypass, XID::ExcBypass, XID::DblBypass, XID::RevBypass, XID::DlyBypass, XID::LimBypass,
+        XID::ResBypass, XID::SatBypass, XID::ExcBypass, XID::DblBypass, XID::RevBypass, XID::SprBypass, XID::DlyBypass, XID::LimBypass, XID::TapeBypass,
     };
 
     if (activeSoloParamID == bypassParamID)
@@ -1083,10 +1125,10 @@ void XaLZaEditor::showAboutBox()
 {
     juce::String msg;
     msg << "The XaLZa v" << proc.getVersionString() << "\n\n"
-        << "15-module vocal chain (Windows VST3):\n"
+        << "17-module vocal chain (Windows VST3):\n"
         << "Preamp - Gate - Auto-Tune - De-esser - Transient Shaper - Glue Comp -\n"
         << "Opto - EQ 550 - Resonance - Saturator - Exciter - Doubler - Reverb -\n"
-        << "Delay - Limiter\n\n"
+        << "Spring Reverb - Delay - Limiter - Tape Bus\n\n"
         << "Built with JUCE " << juce::String(JUCE_MAJOR_VERSION) << "."
         << juce::String(JUCE_MINOR_VERSION) << "." << juce::String(JUCE_BUILDNUMBER) << ".\n"
         << "macOS/AU is intentionally not built yet.";
@@ -1310,10 +1352,27 @@ void XaLZaEditor::layoutModuleMeter(ModuleMeterUI& mm, juce::Rectangle<int> area
     layBlock(inBlock, mm.capIn, mm.meterIn, mm.dbIn);
     layBlock(outBlock, mm.capOut, mm.meterOut, mm.dbOut);
 
-    if (mm.grIndex >= 0)
+    // GR and the new aux readout (Sag/Iron dB) share one 20px row, side by
+    // side, when a module has both — keeps the total block height
+    // unchanged (still fits moduleMeterH) instead of growing taller.
+    if (mm.grIndex >= 0 || mm.auxSource >= 0)
     {
-        auto grArea = area.removeFromTop(20).withWidth(totalW).withRight(area.getRight());
-        mm.grMeter.setBounds(grArea);
+        auto readoutRow = area.removeFromTop(20).withWidth(totalW).withRight(area.getRight());
+        if (mm.grIndex >= 0 && mm.auxSource >= 0)
+        {
+            auto grArea = readoutRow.removeFromLeft((totalW - 4) / 2);
+            readoutRow.removeFromLeft(4);
+            mm.grMeter.setBounds(grArea);
+            mm.auxMeter.setBounds(readoutRow);
+        }
+        else if (mm.grIndex >= 0)
+        {
+            mm.grMeter.setBounds(readoutRow);
+        }
+        else
+        {
+            mm.auxMeter.setBounds(readoutRow);
+        }
     }
 }
 
@@ -1410,20 +1469,35 @@ void XaLZaEditor::timerCallback()
 
         if (mm.grIndex >= 0)
             mm.grMeter.setGrDb(proc.getGrDb(mm.grIndex));
+
+        if (mm.auxSource >= 0)
+        {
+            float auxDb = 0.0f;
+            switch (mm.auxSource)
+            {
+                case 0: auxDb = proc.getCompSagDb(); break;
+                case 1: auxDb = proc.getOptoSagDb(); break;
+                case 2: auxDb = proc.getPreIronGrDb(); break;
+                case 3: auxDb = proc.getTapeIronGrDb(); break;
+                default: break;
+            }
+            mm.auxMeter.setGrDb(auxDb);
+        }
     }
 
     // Modules-bypassed summary: which modules are bypassed right now, at a glance.
     if (currentTab == 0)
     {
         // Order matches XaLZaProcessor::ModuleSlot exactly (Pre, Gate, Tune,
-        // Ess, Trs, Comp, Opto, Eq, Res, Sat, Exc, Dbl, Rev, Dly, Lim) —
-        // indexed directly by slot id below, not just used for the summary
-        // text.
+        // Ess, Trs, Comp, Opto, Eq, Res, Sat, Exc, Dbl, Rev, Spr, Dly, Lim,
+        // Tape) — indexed directly by slot id below, not just used for the
+        // summary text.
         static const std::vector<std::pair<juce::String, juce::String>> bypassIds = {
             { XID::PreBypass, "PRE" }, { XID::GateBypass, "GATE" }, { XID::TuneBypass, "TUNE" }, { XID::EssBypass, "ESS" },
             { XID::TrsBypass, "TRS" }, { XID::CompBypass, "COMP" }, { XID::OptoBypass, "OPTO" }, { XID::EqBypass, "EQ" },
             { XID::ResBypass, "RES" }, { XID::SatBypass, "SAT" }, { XID::ExcBypass, "EXC" }, { XID::DblBypass, "DBL" },
-            { XID::RevBypass, "REV" }, { XID::DlyBypass, "DLY" }, { XID::LimBypass, "LIM" },
+            { XID::RevBypass, "REV" }, { XID::SprBypass, "SPR" }, { XID::DlyBypass, "DLY" }, { XID::LimBypass, "LIM" },
+            { XID::TapeBypass, "TAPE" },
         };
         juce::StringArray bypassed;
         for (auto& bp : bypassIds)
@@ -1811,6 +1885,54 @@ void XaLZaEditor::timerCallback()
             specBufLim[i] = proc.rawSample((int) XaLZaProcessor::RawLim, pos - Spectrogram::fftSize + i);
         limView.pushSpectrogramBlock(specBufLim);
     }
+    else if (currentTab == sprTabIndex)
+    {
+        // Real per-comb tank level + LFO phase, straight off the live DSP
+        // state — see XaLZaProcessor::sprCombLevelUI/sprCombPhaseUI and
+        // runSpr's telemetry snapshot.
+        float lvl[XaLZaProcessor::kNumSprCombsUI];
+        float ph[XaLZaProcessor::kNumSprCombsUI];
+        for (int i = 0; i < XaLZaProcessor::kNumSprCombsUI; ++i)
+        {
+            lvl[i] = proc.getSprCombLevel(i);
+            ph[i]  = proc.getSprCombPhase(i);
+        }
+        sprView.setData(lvl, ph, XaLZaProcessor::kNumSprCombsUI);
+    }
+    else if (currentTab == tapeTabIndex)
+    {
+        float buf[WaveformScope::numPoints];
+        int pos = proc.getRawWritePos((int) XaLZaProcessor::RawTape);
+        for (int i = 0; i < WaveformScope::numPoints; ++i)
+            buf[i] = proc.rawSample((int) XaLZaProcessor::RawTape, pos - WaveformScope::numPoints + i);
+        tapeView.setWaveform(buf);
+        tapeView.pushTelemetry(proc.getTapeIronGrDb(), proc.getTapeWowDeviationMs());
+    }
+    else if (currentTab == trsTabIndex)
+    {
+        // Real detector reading (fast/slow envelope ratio, dB) normalised
+        // to [-1, 1] against the same capDb runTrs itself clips to, plus
+        // the real resulting applied gain (dB) normalised against the
+        // ±12dB max either knob can reach — see runTrs.
+        constexpr float capDb = 18.0f, gainCapDb = 12.0f;
+        float envNorm  = juce::jlimit(-1.0f, 1.0f, proc.getTrsEnvDiffDb() / capDb);
+        float gainNorm = juce::jlimit(-1.0f, 1.0f, proc.getTrsGainDb() / gainCapDb);
+        trsView.push(envNorm, gainNorm);
+    }
+    else if (currentTab == excTabIndex)
+    {
+        // Real FFT of the exciter's OWN synthesized harmonic content
+        // (RawExc — post-drive, pre-mix), not the module's final output.
+        float buf[ExciterHarmonicsView::fftSize];
+        int pos = proc.getRawWritePos((int) XaLZaProcessor::RawExc);
+        for (int i = 0; i < ExciterHarmonicsView::fftSize; ++i)
+            buf[i] = proc.rawSample((int) XaLZaProcessor::RawExc, pos - ExciterHarmonicsView::fftSize + i);
+        excView.update(buf);
+
+        float cutoffHz = juce::jmap(proc.apvts.getRawParameterValue(XID::ExcTone)->load(),
+                                     0.0f, 100.0f, 1500.0f, 6000.0f);
+        excView.setToneHz(cutoffHz);
+    }
 
     if (currentTab == 0)
     {
@@ -2083,7 +2205,7 @@ void XaLZaEditor::resized()
 
     auto rail = full.removeFromLeft(railW);
     // Row height shrinks to fit however many tabs there are instead of a
-    // fixed 34px — with 16 tabs (15 modules + MASTER) that fixed height
+    // fixed 34px — with 18 tabs (17 modules + MASTER) that fixed height
     // ran past the rail's actual available height and pushed the last
     // couple of tab buttons below the visible canvas, invisible and
     // unclickable at every zoom level (there's no scroll/clip viewport

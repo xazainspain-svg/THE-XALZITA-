@@ -8,6 +8,86 @@ namespace
         return std::exp(-1.0f / (0.001f * juce::jmax(0.01f, timeMs) * (float) sr));
     }
 
+    // Defense-in-depth safety ceiling used by ironSaturateSample() below:
+    // fully transparent below `knee`, smoothly (tanh) approaches `ceiling`
+    // above it. Output-only, never fed back into any filter/recursive
+    // state — same pattern as the Auto-Tune formant stage's own safety clip.
+    inline float softCeil(float v, float knee = 0.98f, float ceiling = 1.15f) noexcept
+    {
+        float av = std::abs(v);
+        if (av <= knee)
+            return v;
+        float span = ceiling - knee;
+        float shaped = knee + span * std::tanh((av - knee) / span);
+        return (v < 0.0f ? -shaped : shaped);
+    }
+
+    // "Iron" — transformer-style low-biased saturation, shared by the
+    // Preamp's PreIron and Tape Bus's TapeDrive (see both modules' doc
+    // comments in PluginProcessor.h). `lp` is the caller's persistent
+    // one-pole low-band state (one per channel), updated in place.
+    //
+    // Offline-verified (Python) before being written here: the FIRST design
+    // tried normalized the drive curve by tanh(driveMultiplier) (calibrating
+    // "full saturation" at an assumed low-band amplitude of exactly 1.0) —
+    // a sweep across amplitude/frequency/drive settings found that gave up
+    // to +0.62 of overshoot above the input's own amplitude (because tanh
+    // saturates so fast at these drive multipliers that even a moderate
+    // low-band level already sits on the flat top of the curve, dragging
+    // the output up toward ~1.0 almost regardless of input level — a hidden
+    // "auto-gain toward 0dBFS" bug, not subtle character). Fixed by
+    // normalizing by the drive multiplier itself instead (unity small-
+    // signal slope, tanh(z)/z <= 1 for all z>=0), which guarantees the low
+    // band can only ever be SATURATED/compressed by this stage, never
+    // boosted above its own instantaneous amplitude — also more physically
+    // correct for a real transformer/tape core, where incremental
+    // permeability drops as flux approaches saturation (compression, not
+    // gain). A softCeil() safety margin is kept on top as defense-in-depth.
+    inline float ironSaturateSample(float x, float& lp, float amt01, float lpCoef) noexcept
+    {
+        lp = lpCoef * lp + (1.0f - lpCoef) * x;
+        float hi = x - lp;
+        if (amt01 <= 0.0005f)
+            return x;
+        float drive = 0.1f + amt01 * 2.9f;
+        float wet = std::tanh(lp * drive) / drive;
+        float out = softCeil(wet + hi);
+        return x + (out - x) * amt01;
+    }
+
+    // PSU "sag" emulation — shared by Glue Comp's CompSag and Opto's
+    // OptoSag (see XaLZaProcessor::SagState in PluginProcessor.h). Tracks a
+    // "rail" state that dips under heavy gain reduction (derived from how
+    // much quieter the module's wet output is than its dry input) and adds
+    // its own extra gain reduction on top of the module's own ratio/
+    // release — fast down / much slower up, the classic vintage console/
+    // power-supply "breathing" character. Offline-verified (Python):
+    // transparent at amt=0 (bit-exact), bounded, and shows a genuine slow-
+    // recovery signature after a loud hit (rail still measurably below 1.0
+    // 100ms after a burst ends).
+    // Returns the extra gain multiplier for THIS sample and advances the
+    // state by one sample — call exactly once per sample index (with a
+    // stereo-LINKED dryAbs/wetAbs, e.g. max(|L|,|R|)), never once per
+    // channel, or L/R would desync the state's own time base.
+    inline float sagComputeGain(XaLZaProcessor::SagState& s, float dryAbs, float wetAbs,
+                                 float amt01, double sr, float sagDepthMaxDb = 6.0f) noexcept
+    {
+        if (amt01 <= 0.0005f)
+            return 1.0f;
+        float envDryC = onePoleCoef(5.0f, sr);
+        float envWetC = onePoleCoef(5.0f, sr);
+        float railDownC = onePoleCoef(20.0f, sr);
+        float railUpC = onePoleCoef(250.0f, sr);
+        s.envDry = envDryC * s.envDry + (1.0f - envDryC) * dryAbs;
+        s.envWet = envWetC * s.envWet + (1.0f - envWetC) * wetAbs;
+        float loadDb = juce::jmax(0.0f, 20.0f * std::log10((s.envDry + 1.0e-9f) / (s.envWet + 1.0e-9f)));
+        float railTarget = 1.0f - amt01 * juce::jmin(1.0f, loadDb / 24.0f);
+        float c = (railTarget < s.rail) ? railDownC : railUpC;
+        s.rail = c * s.rail + (1.0f - c) * railTarget;
+        float extraRedDb = (1.0f - s.rail) * sagDepthMaxDb;
+        return std::pow(10.0f, -extraRedDb / 20.0f);
+    }
+
     // Auto-Tune: nearest MIDI note (as a float, but always an exact integer
     // semitone) to midiNote that belongs to the given Key/Scale. Chromatic
     // (scaleIdx==2) accepts every semitone. Brute-force scan of a +-14
@@ -467,6 +547,8 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     revWetHpf.prepare(spec);
     revWetLpf.prepare(spec);
     revConvolution.prepare(spec);
+    tapeToneFilter.prepare(spec);
+    tapeToneFilter.reset();
 
     essDetectL.prepare(spec);
     essDetectR.prepare(spec);
@@ -500,6 +582,15 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     limRingSize = (int) juce::nextPowerOfTwo(limLookaheadSamples + samplesPerBlock + 64);
     limRingMask = limRingSize - 1;
     limLookaheadRing.setSize(2, limRingSize, false, true, true);
+    // juce::AudioBuffer::setSize() is a complete no-op (content included)
+    // whenever the requested size already matches the current size — real
+    // for any host that re-issues prepareToPlay with an unchanged sample
+    // rate/block size (transport stop/start, freeze/unfreeze, and more).
+    // limRingWritePos resets to 0 regardless, so without this explicit
+    // clear() the look-ahead read logic would read back several
+    // milliseconds of a PREVIOUS session's stale audio out of a ring that
+    // was silently never actually cleared.
+    limLookaheadRing.clear();
     limRingWritePos = 0;
     limGainSmoothed = 1.0f;
 
@@ -507,6 +598,7 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     gateLaRingSize = (int) juce::nextPowerOfTwo(gateLaSamples + samplesPerBlock + 64);
     gateLaRingMask = gateLaRingSize - 1;
     gateLaRing.setSize(2, gateLaRingSize, false, true, true);
+    gateLaRing.clear();   // see limLookaheadRing's comment above — same issue, same fix
     gateLaWritePos = 0;
     gateLaWasEnabled = false;
 
@@ -562,6 +654,24 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     revDiffuserL.reset();
     revDiffuserR.reset();
 
+    // Spring Reverb — 6 damped, independently-LFO-modulated combs per
+    // channel (see DampedModComb). Own max-delay margin already accounted
+    // for inside DampedModComb::prepare().
+    for (int i = 0; i < kNumSprCombs; ++i)
+    {
+        sprCombL[(size_t) i].prepare(monoSpec, sprDelayMs[i], sprLfoHz[i], 0.4f);
+        sprCombR[(size_t) i].prepare(monoSpec, sprDelayMs[i], sprLfoHz[i], 0.4f);
+        sprCombLevelUI[(size_t) i].store(0.0f, std::memory_order_relaxed);
+        sprCombPhaseUI[(size_t) i].store(0.0f, std::memory_order_relaxed);
+    }
+    tapeWowDeviationMsUI.store(0.0f, std::memory_order_relaxed);
+    tapeIronGrDbUI.store(0.0f, std::memory_order_relaxed);
+    preIronGrDbUI.store(0.0f, std::memory_order_relaxed);
+    compSagDbUI.store(0.0f, std::memory_order_relaxed);
+    optoSagDbUI.store(0.0f, std::memory_order_relaxed);
+    trsEnvDiffDbUI.store(0.0f, std::memory_order_relaxed);
+    trsGainDbUI.store(0.0f, std::memory_order_relaxed);
+
     tuneShifterL.prepare(sampleRate);
     tuneShifterR.prepare(sampleRate);
     tuneShifterL.reset();
@@ -600,11 +710,42 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     dlyFbLpfL.prepare(monoSpec); dlyFbLpfR.prepare(monoSpec);
     dlyFbHpfL.reset(); dlyFbHpfR.reset(); dlyFbLpfL.reset(); dlyFbLpfR.reset();
 
+    // Tape Bus wow/flutter — small modulated delay, up to ~3.6ms peak (see
+    // runTape: centerMs=3.0, depthMs up to 1.2 at wowAmt=1).
+    tapeWowL.prepare(monoSpec);
+    tapeWowR.prepare(monoSpec);
+    tapeWowL.setMaximumDelayInSamples((int) (0.008 * sampleRate));
+    tapeWowR.setMaximumDelayInSamples((int) (0.008 * sampleRate));
+    tapeWowL.reset();
+    tapeWowR.reset();
+    tapeWowPhase = 0.0f;
+    tapeFlutterPhase = 0.0f;
+    tapeIronLpL = 0.0f;
+    tapeIronLpR = 0.0f;
+
+    // Master Vintage Drift — very shallow modulated delay (see the
+    // master-stage drift block: centerMs=2.0, depthMs up to 0.15).
+    driftDelayL.prepare(monoSpec);
+    driftDelayR.prepare(monoSpec);
+    driftDelayL.setMaximumDelayInSamples((int) (0.006 * sampleRate));
+    driftDelayR.setMaximumDelayInSamples((int) (0.006 * sampleRate));
+    driftDelayL.reset();
+    driftDelayR.reset();
+    driftPhase1 = 0.0f;
+    driftPhase2 = 0.0f;
+    driftGainWalk = 0.0f;
+
+    preIronLpL = 0.0f;
+    preIronLpR = 0.0f;
+    compSagState.reset();
+    optoSagState.reset();
+
     dryBuffer.setSize(2, samplesPerBlock, false, false, true);
     revBuffer.setSize(2, samplesPerBlock, false, false, true);
     revConvBuffer.setSize(2, samplesPerBlock, false, false, true);
     dlyBuffer.setSize(2, samplesPerBlock, false, false, true);
     dblBuffer.setSize(2, samplesPerBlock, false, false, true);
+    excHarmBuffer.setSize(2, samplesPerBlock, false, false, true);
 
     gateEnv = 0.0f;
     gateGain = 1.0f;
@@ -726,6 +867,46 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             }
             osPreChar.processSamplesDown(sub);
         }
+
+        // "Iron" — transformer-style low-biased saturation, see
+        // ironSaturateSample()'s doc comment above. Distinct from Character
+        // above: this only drives the low band, and can only ever saturate/
+        // compress it (never boost above the input's own amplitude).
+        float ironAmt = apvts.getRawParameterValue(XID::PreIron)->load() / 100.0f;
+        if (ironAmt > 0.0005f)
+        {
+            float ironCoef = std::exp(-2.0f * juce::MathConstants<float>::pi * 300.0f / (float) sr);
+            auto* l = buffer.getWritePointer(0);
+            auto* r = numCh > 1 ? buffer.getWritePointer(1) : l;
+            float maxGrDb = 0.0f;
+            for (int n = 0; n < numSamples; ++n)
+            {
+                float inAbs = std::abs(l[n]);
+                l[n] = ironSaturateSample(l[n], preIronLpL, ironAmt, ironCoef);
+                float outAbs = std::abs(l[n]);
+                if (numCh > 1)
+                {
+                    float inAbsR = std::abs(r[n]);
+                    r[n] = ironSaturateSample(r[n], preIronLpR, ironAmt, ironCoef);
+                    inAbs = juce::jmax(inAbs, inAbsR);
+                    outAbs = juce::jmax(outAbs, std::abs(r[n]));
+                }
+                if (inAbs > 1.0e-6f && outAbs < inAbs)
+                {
+                    float grDb = 20.0f * std::log10(juce::jmax(outAbs, 1.0e-9f) / inAbs);
+                    maxGrDb = juce::jmin(maxGrDb, grDb);
+                }
+            }
+            preIronGrDbUI.store(-maxGrDb, std::memory_order_relaxed);
+        }
+        else
+        {
+            preIronGrDbUI.store(0.0f, std::memory_order_relaxed);
+        }
+    }
+    else
+    {
+        preIronGrDbUI.store(0.0f, std::memory_order_relaxed);
     }
     updateMeter((int) TapPre, buffer, numSamples, numCh);
     pushRaw((int) RawPre, buffer, numSamples, numCh);
@@ -1026,6 +1207,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
 
             auto* l = buffer.getWritePointer(0);
             auto* r = numCh > 1 ? buffer.getWritePointer(1) : l;
+            float lastDiffDb = 0.0f;
             for (int n = 0; n < numSamples; ++n)
             {
                 float linked = numCh > 1 ? juce::jmax(std::abs(l[n]), std::abs(r[n])) : std::abs(l[n]);
@@ -1040,8 +1222,25 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
 
                 l[n] *= trsGainSmoothed;
                 if (numCh > 1) r[n] *= trsGainSmoothed;
+                lastDiffDb = juce::jlimit(-capDb, capDb, diffDb);
             }
+            // Real telemetry snapshot for TransientDetectorView — the exact
+            // detector reading and the resulting applied gain, both from the
+            // last sample of this block (the fast/slow envelopes are already
+            // smoothed, so one sample per ~10ms block is representative).
+            trsEnvDiffDbUI.store(lastDiffDb, std::memory_order_relaxed);
+            trsGainDbUI.store(juce::Decibels::gainToDecibels(trsGainSmoothed, -24.0f), std::memory_order_relaxed);
         }
+        else
+        {
+            trsEnvDiffDbUI.store(0.0f, std::memory_order_relaxed);
+            trsGainDbUI.store(0.0f, std::memory_order_relaxed);
+        }
+    }
+    else
+    {
+        trsEnvDiffDbUI.store(0.0f, std::memory_order_relaxed);
+        trsGainDbUI.store(0.0f, std::memory_order_relaxed);
     }
     updateMeter((int) TapTrs, buffer, numSamples, numCh);
     };
@@ -1085,6 +1284,33 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             updateGr(0, juce::Decibels::gainToDecibels(inPk, -100.0f), juce::Decibels::gainToDecibels(outPk, -100.0f));
         }
 
+        // PSU sag — extra gain reduction on top of the compressor's own
+        // ratio/release, driven by how much it's already reducing gain
+        // right now. See sagProcessSample()'s doc comment above.
+        float compSagAmt = apvts.getRawParameterValue(XID::CompSag)->load() / 100.0f;
+        if (compSagAmt > 0.0005f)
+        {
+            float minGain = 1.0f;
+            for (int n = 0; n < numSamples; ++n)
+            {
+                float dryAbs = 0.0f, wetAbs = 0.0f;
+                for (int ch = 0; ch < numCh; ++ch)
+                {
+                    dryAbs = juce::jmax(dryAbs, std::abs(dryBuffer.getReadPointer(ch)[n]));
+                    wetAbs = juce::jmax(wetAbs, std::abs(buffer.getReadPointer(ch)[n]));
+                }
+                float gain = sagComputeGain(compSagState, dryAbs, wetAbs, compSagAmt, sr);
+                minGain = juce::jmin(minGain, gain);
+                for (int ch = 0; ch < numCh; ++ch)
+                    buffer.getWritePointer(ch)[n] *= gain;
+            }
+            compSagDbUI.store(-20.0f * std::log10(juce::jmax(minGain, 1.0e-6f)), std::memory_order_relaxed);
+        }
+        else
+        {
+            compSagDbUI.store(0.0f, std::memory_order_relaxed);
+        }
+
         applySmoothedGainDb(compMakeupSmoothed, buffer, makeup, numSamples);
 
         for (int ch = 0; ch < numCh; ++ch)
@@ -1098,6 +1324,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     else
     {
         updateGr(0, 0.0f, 0.0f);
+        compSagDbUI.store(0.0f, std::memory_order_relaxed);
     }
     updateMeter((int) TapComp, buffer, numSamples, numCh);
     };
@@ -1141,6 +1368,32 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             updateGr(1, juce::Decibels::gainToDecibels(inPk, -100.0f), juce::Decibels::gainToDecibels(outPk, -100.0f));
         }
 
+        // PSU sag — same emulation as Comp's, tracked independently for
+        // Opto's own gain reduction. See sagComputeGain()'s doc comment.
+        float optoSagAmt = apvts.getRawParameterValue(XID::OptoSag)->load() / 100.0f;
+        if (optoSagAmt > 0.0005f)
+        {
+            float minGain = 1.0f;
+            for (int n = 0; n < numSamples; ++n)
+            {
+                float dryAbs = 0.0f, wetAbs = 0.0f;
+                for (int ch = 0; ch < numCh; ++ch)
+                {
+                    dryAbs = juce::jmax(dryAbs, std::abs(dryBuffer.getReadPointer(ch)[n]));
+                    wetAbs = juce::jmax(wetAbs, std::abs(buffer.getReadPointer(ch)[n]));
+                }
+                float gain = sagComputeGain(optoSagState, dryAbs, wetAbs, optoSagAmt, sr);
+                minGain = juce::jmin(minGain, gain);
+                for (int ch = 0; ch < numCh; ++ch)
+                    buffer.getWritePointer(ch)[n] *= gain;
+            }
+            optoSagDbUI.store(-20.0f * std::log10(juce::jmax(minGain, 1.0e-6f)), std::memory_order_relaxed);
+        }
+        else
+        {
+            optoSagDbUI.store(0.0f, std::memory_order_relaxed);
+        }
+
         applySmoothedGainDb(optoGainSmoothed, buffer, gainDb, numSamples);
 
         for (int ch = 0; ch < numCh; ++ch)
@@ -1154,6 +1407,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     else
     {
         updateGr(1, 0.0f, 0.0f);
+        optoSagDbUI.store(0.0f, std::memory_order_relaxed);
     }
     updateMeter((int) TapOpto, buffer, numSamples, numCh);
     pushRaw((int) RawOpto, buffer, numSamples, numCh);
@@ -1413,6 +1667,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     auto runExc = [&]()
     {
     bool excBypassed = apvts.getRawParameterValue(XID::ExcBypass)->load() > 0.5f;
+    excHarmBuffer.setSize(numCh, numSamples, false, false, true);
     if (!excBypassed)
     {
         float drivePct = apvts.getRawParameterValue(XID::ExcDrive)->load();
@@ -1435,6 +1690,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             {
                 auto* wet = buffer.getWritePointer(ch);
                 auto* dry = dryBuffer.getReadPointer(ch);
+                auto* harmOut = excHarmBuffer.getWritePointer(ch);
                 for (int n = 0; n < numSamples; ++n)
                 {
                     float hi = wet[n];
@@ -1444,12 +1700,25 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
                         float driven = driveAmt * hi + 0.15f * driveAmt * hi * hi;
                         harm = std::tanh(driven) / driveAmt;
                     }
+                    // The exciter's own synthesized shimmer content, PRE
+                    // dry/wet mix — real telemetry for ExciterHarmonicsView,
+                    // not a copy of the final module output. See RawExc.
+                    harmOut[n] = harm;
                     wet[n] = dry[n] + mixAmt * harm;
                 }
             }
         }
+        else
+        {
+            excHarmBuffer.clear();
+        }
+    }
+    else
+    {
+        excHarmBuffer.clear();
     }
     updateMeter((int) TapExc, buffer, numSamples, numCh);
+    pushRaw((int) RawExc, excHarmBuffer, numSamples, numCh);
     };
 
     // ---------------------------------------------------------------
@@ -1719,6 +1988,94 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     };
 
     // ---------------------------------------------------------------
+    // 10b) SPRING REVERB — bank of short, damped, independently-modulated
+    // comb filters (see XaLZaProcessor::DampedModComb). A second, distinct
+    // reverb character from the main Reverb above; sits right after it in
+    // the default chain order.
+    // ---------------------------------------------------------------
+    auto runSpr = [&]()
+    {
+    bool sprBypassed = apvts.getRawParameterValue(XID::SprBypass)->load() > 0.5f;
+    if (!sprBypassed)
+    {
+        float decayPct = apvts.getRawParameterValue(XID::SprDecay)->load() / 100.0f;
+        float tonePct  = apvts.getRawParameterValue(XID::SprTone)->load() / 100.0f;
+        float twangPct = apvts.getRawParameterValue(XID::SprTwang)->load() / 100.0f;
+        float mixPct   = apvts.getRawParameterValue(XID::SprMix)->load() / 100.0f;
+
+        // Feedback capped well under 1.0 (never above 0.998) for
+        // guaranteed stability at every Decay setting — see the
+        // DampedModComb / spring_bank offline verification.
+        float feedback  = juce::jlimit(0.0f, 0.998f, 0.75f + decayPct * 0.248f);
+        // Higher Tone = brighter/less-damped tail (lower dampCoef weights
+        // the incoming sample more each pass); lower Tone = darker.
+        float dampCoef  = juce::jmap(tonePct, 0.0f, 1.0f, 0.6f, 0.05f);
+        float lfoDepthMs = 0.05f + twangPct * 0.35f;
+        for (int i = 0; i < kNumSprCombs; ++i)
+        {
+            sprCombL[(size_t) i].lfoDepthMs = lfoDepthMs;
+            sprCombR[(size_t) i].lfoDepthMs = lfoDepthMs;
+        }
+
+        // Keeps the comb bank's own state continuously "warm" regardless
+        // of Mix (same convention as Reverb above), so turning Mix up
+        // later doesn't start from a cold/silent tank — only the final
+        // summation into buffer is skipped for CPU when Mix is ~0.
+        dryBuffer.setSize(numCh, numSamples, false, false, true);
+        auto* inL  = buffer.getReadPointer(0);
+        auto* inR  = numCh > 1 ? buffer.getReadPointer(1) : inL;
+        auto* outL = dryBuffer.getWritePointer(0);
+        auto* outR = numCh > 1 ? dryBuffer.getWritePointer(1) : outL;
+        for (int n = 0; n < numSamples; ++n)
+        {
+            float accL = 0.0f, accR = 0.0f;
+            for (int i = 0; i < kNumSprCombs; ++i)
+            {
+                accL += sprCombL[(size_t) i].processSample(inL[n], feedback, dampCoef, sr);
+                if (numCh > 1)
+                    accR += sprCombR[(size_t) i].processSample(inR[n], feedback, dampCoef, sr);
+            }
+            outL[n] = accL / (float) kNumSprCombs;
+            if (numCh > 1)
+                outR[n] = accR / (float) kNumSprCombs;
+        }
+
+        if (mixPct > 0.0005f)
+        {
+            for (int ch = 0; ch < numCh; ++ch)
+            {
+                auto* dst = buffer.getWritePointer(ch);
+                auto* wet = dryBuffer.getReadPointer(ch);
+                for (int n = 0; n < numSamples; ++n)
+                    dst[n] += wet[n] * mixPct;
+            }
+        }
+
+        // Real per-comb telemetry for the Spring Reverb visualizer — a
+        // snapshot of each comb's current damped-tank level and LFO phase,
+        // taken straight from the live DSP state (not a decorative fake).
+        for (int i = 0; i < kNumSprCombs; ++i)
+        {
+            float lvl = std::abs(sprCombL[(size_t) i].damp);
+            if (numCh > 1)
+                lvl = juce::jmax(lvl, std::abs(sprCombR[(size_t) i].damp));
+            sprCombLevelUI[(size_t) i].store(lvl, std::memory_order_relaxed);
+            float ph = sprCombL[(size_t) i].lfoPhase / (2.0f * juce::MathConstants<float>::pi);
+            sprCombPhaseUI[(size_t) i].store(ph, std::memory_order_relaxed);
+        }
+    }
+    else
+    {
+        for (int i = 0; i < kNumSprCombs; ++i)
+        {
+            sprCombLevelUI[(size_t) i].store(0.0f, std::memory_order_relaxed);
+            sprCombPhaseUI[(size_t) i].store(0.0f, std::memory_order_relaxed);
+        }
+    }
+    updateMeter((int) TapSpr, buffer, numSamples, numCh);
+    };
+
+    // ---------------------------------------------------------------
     // 11) DELAY — ping-pong, spread, duck, auto-pan LFO on the wet signal
     // ---------------------------------------------------------------
     auto runDly = [&]()
@@ -1977,18 +2334,145 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     };
 
     // ---------------------------------------------------------------
-    // Run the 15 modules above in the user's current chain order (identity
+    // 13) TAPE BUS — the final stage: transformer-style low-biased
+    // saturation (reusing ironSaturateSample(), see PreIron) plus real
+    // wow & flutter (a small modulated delay line, summed slow + fast sine
+    // LFOs, the SAME primitive Vintage Drift reuses below at a much
+    // slower/shallower setting), and a simple post tone-shaping filter —
+    // a genuine dry/wet CROSSFADE (like Saturator/Character), not an
+    // additive spice layer, since this represents printing the whole mix
+    // through a tape machine.
+    // ---------------------------------------------------------------
+    auto runTape = [&]()
+    {
+    bool tapeBypassed = apvts.getRawParameterValue(XID::TapeBypass)->load() > 0.5f;
+    if (!tapeBypassed)
+    {
+        float driveAmt = apvts.getRawParameterValue(XID::TapeDrive)->load() / 100.0f;
+        float wowAmt   = apvts.getRawParameterValue(XID::TapeWow)->load() / 100.0f;
+        float tonePct  = apvts.getRawParameterValue(XID::TapeTone)->load() / 100.0f;
+        float mixAmt   = apvts.getRawParameterValue(XID::TapeMix)->load() / 100.0f;
+
+        if (mixAmt > 0.0005f)
+        {
+            for (int ch = 0; ch < numCh; ++ch)
+                dryBuffer.copyFrom(ch, 0, buffer, ch, 0, numSamples);
+
+            if (driveAmt > 0.0005f)
+            {
+                float ironCoef = std::exp(-2.0f * juce::MathConstants<float>::pi * 300.0f / (float) sr);
+                auto* l = buffer.getWritePointer(0);
+                auto* r = numCh > 1 ? buffer.getWritePointer(1) : l;
+                float maxGrDb = 0.0f;
+                for (int n = 0; n < numSamples; ++n)
+                {
+                    float inAbs = std::abs(l[n]);
+                    l[n] = ironSaturateSample(l[n], tapeIronLpL, driveAmt, ironCoef);
+                    float outAbs = std::abs(l[n]);
+                    if (numCh > 1)
+                    {
+                        float inAbsR = std::abs(r[n]);
+                        r[n] = ironSaturateSample(r[n], tapeIronLpR, driveAmt, ironCoef);
+                        inAbs = juce::jmax(inAbs, inAbsR);
+                        outAbs = juce::jmax(outAbs, std::abs(r[n]));
+                    }
+                    if (inAbs > 1.0e-6f && outAbs < inAbs)
+                    {
+                        float grDb = 20.0f * std::log10(juce::jmax(outAbs, 1.0e-9f) / inAbs);
+                        maxGrDb = juce::jmin(maxGrDb, grDb);
+                    }
+                }
+                tapeIronGrDbUI.store(-maxGrDb, std::memory_order_relaxed);
+            }
+            else
+            {
+                tapeIronGrDbUI.store(0.0f, std::memory_order_relaxed);
+            }
+
+            if (wowAmt > 0.0005f)
+            {
+                // Small (few-ms) modulated delay line — a genuine pitch/
+                // time instability, not an audible echo. Offline-verified
+                // (Python): delay range stays safely within the prepared
+                // buffer at wowAmt=1 (max), finite/bounded throughout.
+                float centerMs = 3.0f;
+                float depthMs  = wowAmt * 1.2f;
+                float wowW     = 2.0f * juce::MathConstants<float>::pi * 0.6f / (float) sr;
+                float flutterW = 2.0f * juce::MathConstants<float>::pi * 6.5f / (float) sr;
+                auto* l = buffer.getWritePointer(0);
+                auto* r = numCh > 1 ? buffer.getWritePointer(1) : l;
+                float maxDevMs = 0.0f;
+                for (int n = 0; n < numSamples; ++n)
+                {
+                    tapeWowPhase += wowW;
+                    if (tapeWowPhase > juce::MathConstants<float>::twoPi) tapeWowPhase -= juce::MathConstants<float>::twoPi;
+                    tapeFlutterPhase += flutterW;
+                    if (tapeFlutterPhase > juce::MathConstants<float>::twoPi) tapeFlutterPhase -= juce::MathConstants<float>::twoPi;
+                    float lfo = 0.5f * std::sin(tapeWowPhase) + 0.5f * std::sin(tapeFlutterPhase);
+                    float devMs = depthMs * lfo * 0.5f;
+                    maxDevMs = juce::jmax(maxDevMs, std::abs(devMs));
+                    float delaySamples = (centerMs + devMs) * 0.001f * (float) sr;
+
+                    tapeWowL.setDelay(delaySamples);
+                    tapeWowL.pushSample(0, l[n]);
+                    l[n] = tapeWowL.popSample(0);
+                    if (numCh > 1)
+                    {
+                        tapeWowR.setDelay(delaySamples);
+                        tapeWowR.pushSample(0, r[n]);
+                        r[n] = tapeWowR.popSample(0);
+                    }
+                }
+                tapeWowDeviationMsUI.store(maxDevMs, std::memory_order_relaxed);
+            }
+            else
+            {
+                tapeWowDeviationMsUI.store(0.0f, std::memory_order_relaxed);
+            }
+
+            // Tone: simple post low-pass warmth control on the wet path
+            // only (0 = darkest/most vintage-tape, 100 = brightest/most
+            // open) — 3kHz..16kHz.
+            float toneHz = juce::jmap(tonePct, 0.0f, 1.0f, 3000.0f, 16000.0f);
+            *tapeToneFilter.state = *juce::dsp::IIR::Coefficients<float>::makeLowPass(sr, toneHz);
+            tapeToneFilter.process(ctx);
+
+            for (int ch = 0; ch < numCh; ++ch)
+            {
+                auto* wet = buffer.getWritePointer(ch);
+                auto* dry = dryBuffer.getReadPointer(ch);
+                for (int n = 0; n < numSamples; ++n)
+                    wet[n] = dry[n] + (wet[n] - dry[n]) * mixAmt;
+            }
+        }
+        else
+        {
+            tapeIronGrDbUI.store(0.0f, std::memory_order_relaxed);
+            tapeWowDeviationMsUI.store(0.0f, std::memory_order_relaxed);
+        }
+    }
+    else
+    {
+        tapeIronGrDbUI.store(0.0f, std::memory_order_relaxed);
+        tapeWowDeviationMsUI.store(0.0f, std::memory_order_relaxed);
+    }
+    updateMeter((int) TapTape, buffer, numSamples, numCh);
+    pushRaw((int) RawTape, buffer, numSamples, numCh);
+    };
+
+    // ---------------------------------------------------------------
+    // Run the 17 modules above in the user's current chain order (identity
     // order — Pre, Gate, Tune, Ess, Trs, Comp, Opto, Eq, Res, Sat, Exc,
-    // Dbl, Rev, Dly, Lim — by default, same as the original fixed
-    // sequence, so nothing changes unless the user has actually reordered
-    // something via moveModule()). Each lambda reads/writes `buffer` in
-    // place and reads whatever the chain has produced so far, exactly
-    // like the original fixed-order code did — only WHICH ONE runs at
-    // each step is now data-driven.
+    // Dbl, Rev, Spr, Dly, Lim, Tape — by default, same as the original
+    // fixed sequence, so nothing changes unless the user has actually
+    // reordered something via moveModule()). Each lambda reads/writes
+    // `buffer` in place and reads whatever the chain has produced so far,
+    // exactly like the original fixed-order code did — only WHICH ONE runs
+    // at each step is now data-driven.
     // ---------------------------------------------------------------
     {
         const std::array<std::function<void()>, kNumSlots> runners = {
-            runPre, runGate, runTune, runEss, runTrs, runComp, runOpto, runEq, runRes, runSat, runExc, runDbl, runRev, runDly, runLim
+            runPre, runGate, runTune, runEss, runTrs, runComp, runOpto, runEq, runRes, runSat, runExc, runDbl, runRev, runSpr, runDly, runLim, runTape
         };
         for (int pos = 0; pos < kNumSlots; ++pos)
             runners[(size_t) chainOrder[(size_t) pos].load(std::memory_order_relaxed)]();
@@ -2015,6 +2499,58 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     // Master Out Gain
     // ---------------------------------------------------------------
     applySmoothedGainDb(masterOutSmoothed, buffer, apvts.getRawParameterValue(XID::MasterOutGain)->load(), numSamples);
+
+    // ---------------------------------------------------------------
+    // Vintage Drift — a slow, bounded wander applied to the true final
+    // signal: a tiny gain wobble plus a very shallow pitch wobble (the
+    // same modulated-delay primitive as Tape Bus's wow, an order of
+    // magnitude slower/shallower). Both driven by a one-pole-smoothed
+    // white-noise "walk", which is bounded in [-1, 1] BY CONSTRUCTION
+    // (always a convex combination of a bounded previous state and
+    // bounded fresh noise) — safe regardless of the actual random
+    // sequence, no separate stability sweep needed the way the Iron/Spring/
+    // Tape designs above required one.
+    // ---------------------------------------------------------------
+    {
+        float driftAmt = apvts.getRawParameterValue(XID::MasterDriftAmt)->load() / 100.0f;
+        if (driftAmt > 0.0005f)
+        {
+            float walkCoef = onePoleCoef(4000.0f, sr);   // ~4s smoothing -> a slow, non-periodic-feeling wander
+            float w1 = 2.0f * juce::MathConstants<float>::pi * 0.07f / (float) sr;
+            float w2 = 2.0f * juce::MathConstants<float>::pi * 0.13f / (float) sr;
+            float centerMs = 2.0f;
+            float depthMs  = driftAmt * 0.15f;   // shallow — see doc comment above
+
+            auto* l = buffer.getWritePointer(0);
+            auto* r = numCh > 1 ? buffer.getWritePointer(1) : l;
+            for (int n = 0; n < numSamples; ++n)
+            {
+                float noise = driftRng.nextFloat() * 2.0f - 1.0f;
+                driftGainWalk = walkCoef * driftGainWalk + (1.0f - walkCoef) * noise;
+
+                float gainDb = driftGainWalk * driftAmt * 0.4f;   // up to +-0.4dB at full amount
+                float gainLin = juce::Decibels::decibelsToGain(gainDb);
+
+                driftPhase1 += w1;
+                if (driftPhase1 > juce::MathConstants<float>::twoPi) driftPhase1 -= juce::MathConstants<float>::twoPi;
+                driftPhase2 += w2;
+                if (driftPhase2 > juce::MathConstants<float>::twoPi) driftPhase2 -= juce::MathConstants<float>::twoPi;
+                float lfo = 0.5f * std::sin(driftPhase1) + 0.5f * std::sin(driftPhase2);
+                float delaySamples = (centerMs + depthMs * lfo * 0.5f) * 0.001f * (float) sr;
+
+                driftDelayL.setDelay(delaySamples);
+                driftDelayL.pushSample(0, l[n]);
+                l[n] = driftDelayL.popSample(0) * gainLin;
+                if (numCh > 1)
+                {
+                    driftDelayR.setDelay(delaySamples);
+                    driftDelayR.pushSample(0, r[n]);
+                    r[n] = driftDelayR.popSample(0) * gainLin;
+                }
+            }
+        }
+    }
+
     updateMeter((int) TapOut, buffer, numSamples, numCh);
 
     // ---------------------------------------------------------------

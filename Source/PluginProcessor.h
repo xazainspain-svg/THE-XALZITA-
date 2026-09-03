@@ -5,16 +5,16 @@
 #include "Params.h"
 
 /**
-    The XaLZa — the full 15-module vocal chain from the web mockup, plus
-    the real-time Auto-Tune, Transient Shaper and Exciter added afterward:
+    The XaLZa — the full 17-module vocal chain from the web mockup, plus
+    the real-time modules added afterward:
 
       Preamp -> Gate -> Auto-Tune -> De-esser -> Transient Shaper -> Glue Comp ->
       Opto -> EQ 550 -> Resonance -> Saturator -> Exciter -> Doubler -> Reverb ->
-      Delay -> Limiter
+      Spring Reverb -> Delay -> Limiter -> Tape Bus
 
-    with Master In/Out gain and Stereo Width around the outside. Every
-    parameter is a plain, direct APVTS parameter — no macro/intensity
-    indirection layer.
+    with Master In/Out gain, Stereo Width and Vintage Drift around the
+    outside. Every parameter is a plain, direct APVTS parameter — no macro/
+    intensity indirection layer.
 */
 class XaLZaProcessor : public juce::AudioProcessor
 {
@@ -61,7 +61,7 @@ public:
     enum MeterTap
     {
         TapIn = 0, TapPre, TapGate, TapTune, TapEss, TapTrs, TapComp, TapOpto, TapEq, TapRes,
-        TapSat, TapExc, TapDbl, TapRev, TapDly, TapLim, TapOut, kNumMeterTaps
+        TapSat, TapExc, TapDbl, TapRev, TapSpr, TapDly, TapLim, TapTape, TapOut, kNumMeterTaps
     };
 
     float getMeterDbL(int tap) const noexcept { return meterDbL[(size_t) juce::jlimit(0, kNumMeterTaps - 1, tap)].load(std::memory_order_relaxed); }
@@ -73,23 +73,39 @@ public:
     float getRmsDbL(int tap) const noexcept { return rmsDbL[(size_t) juce::jlimit(0, kNumMeterTaps - 1, tap)].load(std::memory_order_relaxed); }
     float getRmsDbR(int tap) const noexcept { return rmsDbR[(size_t) juce::jlimit(0, kNumMeterTaps - 1, tap)].load(std::memory_order_relaxed); }
 
-    // ---- Reorderable chain: which of the 15 modules processBlock() runs
-    //      first/second/.../last. Identity order (Pre, Gate, ... Lim, same
+    // ---- Reorderable chain: which of the 17 modules processBlock() runs
+    //      first/second/.../last. Identity order (Pre, Gate, ... Tape, same
     //      as MeterTap above) by default — matches every original meter/
     //      raw-tap wiring exactly until the user actually reorders
     //      something. Enum order here is deliberately identical to
-    //      MeterTap's Pre..Lim run so tapForSlot() below is just an offset. ----
+    //      MeterTap's Pre..Tape run so tapForSlot() below is just an offset. ----
     enum ModuleSlot
     {
         SlotPre = 0, SlotGate, SlotTune, SlotEss, SlotTrs, SlotComp, SlotOpto, SlotEq, SlotRes,
-        SlotSat, SlotExc, SlotDbl, SlotRev, SlotDly, SlotLim, kNumSlots
+        SlotSat, SlotExc, SlotDbl, SlotRev, SlotSpr, SlotDly, SlotLim, SlotTape, kNumSlots
     };
+    // PSU "sag" emulation state, shared shape used by both Glue Comp
+    // (CompSag) and Opto (OptoSag) — a "rail" state (1.0 = full supply
+    // voltage) that dips toward a target derived from how much that
+    // module's own compressor is currently reducing gain (fast down / much
+    // slower up, asymmetric one-pole coefficients), producing its own extra
+    // gain reduction on top of the module's normal ratio/release. See
+    // sagComputeGain() in the .cpp — offline-verified in Python
+    // (transparent at amt=0, bounded, genuine slow-recovery "breathing"
+    // signature after a loud hit). Public so the free helper function in
+    // PluginProcessor.cpp's anonymous namespace can take it by reference.
+    struct SagState
+    {
+        float envDry = 0.0f, envWet = 0.0f, rail = 1.0f;
+        void reset() { envDry = 0.0f; envWet = 0.0f; rail = 1.0f; }
+    };
+
     static int tapForSlot(int slotId) noexcept { return (int) TapPre + juce::jlimit(0, kNumSlots - 1, slotId); }
     static const char* slotName(int slotId) noexcept
     {
         static const char* names[kNumSlots] = { "PREAMP", "GATE", "AUTO-TUNE", "DE-ESSER", "TRANSIENT SHAPER", "GLUE COMP", "OPTO",
                                                   "EQ 550", "RESONANCE", "SATURATOR", "EXCITER", "DOUBLER",
-                                                  "REVERB", "DELAY", "LIMITER" };
+                                                  "REVERB", "SPRING REVERB", "DELAY", "LIMITER", "TAPE BUS" };
         return names[(size_t) juce::jlimit(0, kNumSlots - 1, slotId)];
     }
 
@@ -188,7 +204,7 @@ public:
     // (oscilloscopes / harmonic bars). Each is genuinely POST that module's
     // own processing — never the module's input — so every visualiser shows
     // what that stage actually did to the signal.
-    enum RawTap { RawPre = 0, RawGate, RawEss, RawSatIn, RawSatOut, RawOpto, RawDly, RawLim, RawRes, RawTune, kNumRawTaps };
+    enum RawTap { RawPre = 0, RawGate, RawEss, RawSatIn, RawSatOut, RawOpto, RawDly, RawLim, RawRes, RawTune, RawTape, RawExc, kNumRawTaps };
     static constexpr int kRawSize = 8192; // power of two
     float rawSample(int tap, int i) const noexcept
     {
@@ -237,6 +253,41 @@ public:
     float dblScopeSampleL(int i) const noexcept { return dblScopeL[(size_t) (i & (kScopeSize - 1))].load(std::memory_order_relaxed); }
     float dblScopeSampleR(int i) const noexcept { return dblScopeR[(size_t) (i & (kScopeSize - 1))].load(std::memory_order_relaxed); }
     int   getDblScopeWritePos() const noexcept { return dblScopeWritePos.load(std::memory_order_relaxed); }
+
+    // ---- Real telemetry for the analog-character features' own
+    // visualisers (Spring Reverb cluster, Tape Bus scope, Iron/Sag
+    // meters) — all genuine per-block measurements from the audio thread,
+    // same "real data, not decoration" convention as everything above.
+    static constexpr int kNumSprCombsUI = 6;
+    // Per-comb output level (linear 0..~1, real per-block peak) and LFO
+    // phase (radians, real running phase) for the Spring Reverb cluster
+    // view — see runSpr.
+    float getSprCombLevel(int comb) const noexcept
+    {
+        return sprCombLevelUI[(size_t) juce::jlimit(0, kNumSprCombsUI - 1, comb)].load(std::memory_order_relaxed);
+    }
+    float getSprCombPhase(int comb) const noexcept
+    {
+        return sprCombPhaseUI[(size_t) juce::jlimit(0, kNumSprCombsUI - 1, comb)].load(std::memory_order_relaxed);
+    }
+    // Tape Bus's real per-block peak wow/flutter deviation (ms) and the
+    // real gain reduction (dB) its Iron/drive stage is currently applying
+    // — see runTape.
+    float getTapeWowDeviationMs() const noexcept { return tapeWowDeviationMsUI.load(std::memory_order_relaxed); }
+    float getTapeIronGrDb() const noexcept { return tapeIronGrDbUI.load(std::memory_order_relaxed); }
+    // Preamp's Iron stage real gain reduction (dB) — see runPre.
+    float getPreIronGrDb() const noexcept { return preIronGrDbUI.load(std::memory_order_relaxed); }
+    // PSU Sag's real extra gain reduction (dB, 0..sagDepthMaxDb) for Comp
+    // and Opto independently — see sagComputeGain()'s doc comment and
+    // runComp/runOpto.
+    float getCompSagDb() const noexcept { return compSagDbUI.load(std::memory_order_relaxed); }
+    float getOptoSagDb() const noexcept { return optoSagDbUI.load(std::memory_order_relaxed); }
+
+    // Transient Shaper's real detector reading — the actual fast/slow
+    // envelope-ratio (dB, ±capDb) driving TrsAttack/TrsSustain, and the
+    // real per-block gain (dB) that detector produced — see runTrs.
+    float getTrsEnvDiffDb() const noexcept { return trsEnvDiffDbUI.load(std::memory_order_relaxed); }
+    float getTrsGainDb() const noexcept { return trsGainDbUI.load(std::memory_order_relaxed); }
 
     // ---- Reverb: user-loadable impulse response for the hybrid
     // algorithmic/convolution engine (see runRev). Decoding an audio file
@@ -290,6 +341,15 @@ private:
     std::atomic<float> resCutDbUI { 0.0f };
     std::atomic<float> dlyPanPhaseUI { 0.0f };
 
+    std::array<std::atomic<float>, kNumSprCombsUI> sprCombLevelUI, sprCombPhaseUI;
+    std::atomic<float> tapeWowDeviationMsUI { 0.0f };
+    std::atomic<float> tapeIronGrDbUI { 0.0f };
+    std::atomic<float> preIronGrDbUI { 0.0f };
+    std::atomic<float> compSagDbUI { 0.0f };
+    std::atomic<float> optoSagDbUI { 0.0f };
+    std::atomic<float> trsEnvDiffDbUI { 0.0f };
+    std::atomic<float> trsGainDbUI { 0.0f };
+
     std::array<std::atomic<float>, kScopeSize> dblScopeL, dblScopeR;
     std::atomic<int> dblScopeWritePos { 0 };
 
@@ -329,6 +389,16 @@ private:
     // Real, subtle high-shelf tilt driven by the Impedance seg-group.
     juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
                                     juce::dsp::IIR::Coefficients<float>> preImpShelf;
+    // "Iron" — transformer-style low-biased saturation (PreIron). One-pole
+    // ~300Hz low-band split, one-pole state per channel (see
+    // ironSaturateSample() in the .cpp — the SAME helper Tape Bus's Drive
+    // reuses below, both offline-verified in Python: normalized by drive
+    // itself so tanh(z)/z <= 1 for all z, i.e. this stage can only ever
+    // SATURATE/compress the low band, never boost it above its own
+    // instantaneous amplitude — a first design that normalized by
+    // tanh(drive) instead was found to overshoot input amplitude by up to
+    // +0.62 in a sweep test, before any C++ was written).
+    float preIronLpL = 0.0f, preIronLpR = 0.0f;
 
     // ---- 2) Gate: envelope-follower expander/gate with hold ----
     float gateEnv = 0.0f;
@@ -557,9 +627,11 @@ private:
 
     // ---- 4) Glue Comp ----
     juce::dsp::Compressor<float> compressor;
+    SagState compSagState;
 
     // ---- 5) Opto (slow, program-dependent 2nd compressor stage) ----
     juce::dsp::Compressor<float> optoComp;
+    SagState optoSagState;
 
     // ---- 6) EQ 550 — 3-band (low shelf / mid peak / high shelf) ----
     juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
@@ -708,6 +780,53 @@ private:
     };
     IrBufferTransfer irTransfer;
 
+    // ---- 10b) Spring Reverb — a second, physically distinct reverb: a bank
+    // of short, damped, independently-LFO-modulated comb filters (mimicking
+    // discrete physical spring lengths — the LFO on each comb's delay time
+    // gives the characteristic dispersive "chirp"/pitch-sweep spring reverbs
+    // are known for), run identically (same tuning) but fully independently
+    // per channel. Offline-verified in Python: finite/bounded at every
+    // Decay setting including the top of the range (highest feedback = the
+    // highest runaway risk), feedback deliberately capped well under 1.0.
+    // See runSpr.
+    struct DampedModComb
+    {
+        juce::dsp::DelayLine<float> line;   // default interpolation is Linear, matching the Python model
+        float delayMs = 0.0f, lfoHz = 0.0f, lfoDepthMs = 0.0f;
+        float lfoPhase = 0.0f, damp = 0.0f;
+
+        void prepare(const juce::dsp::ProcessSpec& spec, float delayMsIn, float lfoHzIn, float lfoDepthMsIn)
+        {
+            delayMs = delayMsIn; lfoHz = lfoHzIn; lfoDepthMs = lfoDepthMsIn;
+            line.prepare(spec);
+            line.setMaximumDelayInSamples((int) ((delayMs + lfoDepthMs + 2.0f) * 0.001 * spec.sampleRate) + 8);
+            line.reset();
+            lfoPhase = 0.0f; damp = 0.0f;
+        }
+        void reset() { line.reset(); lfoPhase = 0.0f; damp = 0.0f; }
+        float processSample(float x, float feedback, float dampCoef, double sampleRate) noexcept
+        {
+            float lfo = std::sin(lfoPhase);
+            lfoPhase += 2.0f * juce::MathConstants<float>::pi * lfoHz / (float) sampleRate;
+            if (lfoPhase > juce::MathConstants<float>::pi * 2.0f)
+                lfoPhase -= juce::MathConstants<float>::pi * 2.0f;
+            float d = juce::jmax(0.0f, (delayMs + lfoDepthMs * lfo) * 0.001f * (float) sampleRate);
+            line.setDelay(d);
+            float s = line.popSample(0);
+            damp = dampCoef * damp + (1.0f - dampCoef) * s;
+            float out = damp;
+            line.pushSample(0, x + out * feedback);
+            return out;
+        }
+    };
+    static constexpr int kNumSprCombs = 6;
+    // Short, mutually-prime-ish, non-integer-ratio delay times (ms) —
+    // mimics discrete physical spring lengths; each comb's own independent
+    // LFO rate gives every spring its own "chirp" speed.
+    static constexpr float sprDelayMs[kNumSprCombs] = { 17.3f, 23.7f, 29.1f, 34.9f, 41.3f, 13.7f };
+    static constexpr float sprLfoHz[kNumSprCombs]   = { 0.31f, 0.47f, 0.53f, 0.61f, 0.67f, 0.71f };
+    std::array<DampedModComb, kNumSprCombs> sprCombL, sprCombR;
+
     // ---- 11) Delay — ping-pong with spread, duck, and an auto-pan LFO ----
     juce::dsp::DelayLine<float> delayL, delayR;
     // Real tempo-synced pre-delay tap — a separate, smaller delay line ahead
@@ -747,10 +866,46 @@ private:
     juce::AudioBuffer<float> truePeakScratch;
     std::atomic<float> truePeakDbUI { -100.0f };
 
+    // ---- 13) Tape Bus — the final stage of the chain: transformer-style
+    // low-biased saturation (TapeDrive, reusing ironSaturateSample() — see
+    // the Preamp Iron comment above) combined with real wow & flutter
+    // (TapeWow — a small modulated delay line, the SAME primitive verified
+    // for Spring Reverb's LFO-modulated combs above, just with much
+    // slower/smaller depth constants: a summed 0.6Hz "wow" + 6.5Hz
+    // "flutter" sine pair). Both default to 0 = bit-identical passthrough.
+    // See runTape.
+    juce::dsp::DelayLine<float> tapeWowL, tapeWowR;
+    // Both phases shared across channels (drive the same delay-time target
+    // for L and R identically) — both channels physically ride the same
+    // tape transport, so wow/flutter affects them together, not
+    // independently.
+    float tapeWowPhase = 0.0f, tapeFlutterPhase = 0.0f;
+    juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
+                                    juce::dsp::IIR::Coefficients<float>> tapeToneFilter;
+    float tapeIronLpL = 0.0f, tapeIronLpR = 0.0f;
+
+    // ---- Master "Vintage Drift" — applied at the very end of the signal
+    // path: (a) a tiny gain wobble from a bounded, mean-reverting random
+    // walk (always hard-clamped, so it is safe by construction regardless
+    // of the random sequence) and (b) a very slow/shallow pitch wobble
+    // reusing the same bounded modulated-delay primitive as Tape Bus's wow
+    // (two slow, mutually-prime-ish sine rates summed, an order of
+    // magnitude slower/shallower than Tape Bus's own wow/flutter). 0 =
+    // fully transparent. See the master-stage drift block in
+    // processBlock().
+    juce::dsp::DelayLine<float> driftDelayL, driftDelayR;
+    float driftPhase1 = 0.0f, driftPhase2 = 0.0f;   // two slow, mutually-prime-ish rates, summed, for a non-periodic-feeling wander
+    float driftGainWalk = 0.0f;   // bounded random walk, hard-clamped every update — see runMasterDrift
+    juce::Random driftRng;
+
     // Pre-allocated scratch buffers, sized in prepareToPlay so processBlock()
     // never allocates on the audio thread.
     juce::AudioBuffer<float> dryBuffer;               // reused per dry/wet stage
     juce::AudioBuffer<float> revBuffer, dlyBuffer, dblBuffer;
+    // Exciter's own added-harmonics signal (post-drive, PRE dry/wet mix) —
+    // real telemetry for ExciterHarmonicsView's spectrum, not the module's
+    // final output. See runExc / RawExc.
+    juce::AudioBuffer<float> excHarmBuffer;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(XaLZaProcessor)
 };

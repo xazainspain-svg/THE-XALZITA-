@@ -106,6 +106,18 @@ private:
 class LedMeter : public juce::Component
 {
 public:
+    // Which module family this instance belongs to — gives each family's
+    // pages their own lit-segment colour identity (the body/near-top
+    // tiers only) instead of every one of the 17 module pages showing the
+    // exact same two-tone meter. The top clip-warning tier always stays
+    // universal danger-red regardless of family — clipping must never be
+    // ambiguous just because a page has its own colour language.
+    enum class Family { Dynamics, Tone, Spatial, Pitch, Character };
+    void setFamily(Family f)
+    {
+        if (family != f) { family = f; repaint(); }
+    }
+
     // rmsDbL/rmsDbR: the processor's real mean-square (RMS) reading for
     // this same tap — a genuinely different measurement from the peak
     // ballistics above (see XaLZaProcessor::updateMeter), not a derived
@@ -139,8 +151,8 @@ private:
     static void updateChannel(float db, float& held, int& holdFramesLeft, int& clipFramesLeft)
     {
         constexpr float clipThresholdDb = -0.3f;
-        constexpr int   holdFrames      = 45;   // ~1.5s at the editor's 30Hz Timer
-        constexpr float decayDbPerFrame = 0.7f; // ~21 dB/s fall-off once the hold expires
+        constexpr int   holdFrames      = 20;   // ~0.67s at the editor's 30Hz Timer — shorter plateau before it starts falling
+        constexpr float decayDbPerFrame = 2.4f; // ~72 dB/s fall-off once the hold expires — fast peak-hold release
         constexpr int   clipLatchFrames = 90;   // ~3s — long enough to actually read the clip
 
         if (db >= held)
@@ -170,11 +182,29 @@ private:
         float colW = (full.getWidth() - gap) * 0.5f;
         auto colL = full.removeFromLeft(colW);
         full.removeFromLeft(gap);
-        drawColumn(g, colL, lastDbL, lastHeldL, clipLatchFramesLeftL > 0, lastRmsL);
-        drawColumn(g, full, lastDbR, lastHeldR, clipLatchFramesLeftR > 0, lastRmsR);
+        drawColumn(g, colL, lastDbL, lastHeldL, clipLatchFramesLeftL > 0, lastRmsL, family);
+        drawColumn(g, full, lastDbR, lastHeldR, clipLatchFramesLeftR > 0, lastRmsR, family);
     }
 
-    static void drawColumn(juce::Graphics& g, juce::Rectangle<float> col, float db, float heldDb, bool clipped, float rmsDb)
+    // Body/near-top tier colours per module family — the clip-warning red
+    // tier at the very top is deliberately NOT part of this table (see
+    // drawColumn below): it always stays universal danger-red so an
+    // overload never reads ambiguously just because a page has its own
+    // palette.
+    static void familyColours(Family f, juce::Colour& body, juce::Colour& hot)
+    {
+        switch (f)
+        {
+            case Family::Tone:      body = juce::Colour(0xffd9a441); hot = juce::Colour(0xffe8c265); break; // amber/gold — PRE, EQ, RES, SAT, EXC
+            case Family::Spatial:   body = juce::Colour(0xff3fa9b5); hot = juce::Colour(0xff6fd0da); break; // teal/cyan — REV, SPR, DLY, DBL
+            case Family::Pitch:     body = juce::Colour(0xff9b6bd6); hot = juce::Colour(0xffc79bf0); break; // violet — TUNE, ESS
+            case Family::Character: body = juce::Colour(0xffb5652f); hot = juce::Colour(0xffd88a4d); break; // copper — TAPE
+            case Family::Dynamics:
+            default:                body = XaLZaColour::accent2;    hot = XaLZaColour::accent;    break; // original palette — GATE, TRS, COMP, OPTO, LIM
+        }
+    }
+
+    static void drawColumn(juce::Graphics& g, juce::Rectangle<float> col, float db, float heldDb, bool clipped, float rmsDb, Family family)
     {
         constexpr int numSeg = 12;
         constexpr float minDb = -50.0f, maxDb = 0.0f;
@@ -184,6 +214,31 @@ private:
         float tHeld = juce::jlimit(0.0f, 1.0f, (heldDb - minDb) / (maxDb - minDb));
         int peakSeg = juce::jlimit(0, numSeg - 1, (int) std::round(tHeld * (float) numSeg) - 1);
         float segH = col.getHeight() / (float) numSeg;
+
+        juce::Colour bodyC, hotC;
+        familyColours(family, bodyC, hotC);
+
+        // Soft glow "bloom" behind the live signal edge — driven by `lit`,
+        // the exact same real value the crisp segments below are drawn
+        // from (not a decorative animation), so a hot signal genuinely
+        // glows brighter/higher instead of just lighting one more block.
+        // Drawn first so the LED segments paint cleanly on top of it.
+        if (lit > 0)
+        {
+            int topIdx = juce::jlimit(0, numSeg - 1, lit - 1);
+            juce::Colour glowC = topIdx >= numSeg - 2 ? XaLZaColour::danger
+                                : topIdx >= numSeg - 4 ? hotC
+                                                        : bodyC;
+            float segY = colFull.getBottom() - segH * (float) (topIdx + 1);
+            auto glowRect = juce::Rectangle<float>(colFull.getX() - 2.0f, segY - segH * 0.6f,
+                                                     colFull.getWidth() + 4.0f, segH * 2.2f);
+            for (int i = 3; i >= 1; --i)
+            {
+                auto ring = glowRect.expanded((float) i * 2.2f, (float) i * 1.4f);
+                g.setColour(glowC.withAlpha(0.045f * (float) (4 - i)));
+                g.fillRoundedRectangle(ring, 2.0f);
+            }
+        }
 
         for (int i = 0; i < numSeg; ++i)
         {
@@ -196,8 +251,8 @@ private:
             {
                 if (isClipSeg)             c = XaLZaColour::danger;
                 else if (i >= numSeg - 2)  c = XaLZaColour::danger;
-                else if (i >= numSeg - 4)  c = XaLZaColour::accent;
-                else                       c = XaLZaColour::accent2;
+                else if (i >= numSeg - 4)  c = hotC;
+                else                       c = bodyC;
             }
             // The peak-hold marker itself always reads as a bright,
             // distinct highlight (not just "whatever colour that segment
@@ -217,9 +272,10 @@ private:
         // shows. Drawn last so it's never hidden behind a lit segment.
         float tRms = juce::jlimit(0.0f, 1.0f, (rmsDb - minDb) / (maxDb - minDb));
         float rmsY = colFull.getBottom() - tRms * colFull.getHeight();
-        // Teal, not the peak-hold marker's white — a thin line reads as a
-        // distinct "average level" indicator rather than a second peak cap.
-        g.setColour(XaLZaColour::accent2.withAlpha(0.95f));
+        // This family's own body colour, not the peak-hold marker's white —
+        // a thin line reads as a distinct "average level" indicator rather
+        // than a second peak cap, and now doubles as a family accent.
+        g.setColour(bodyC.withAlpha(0.95f));
         g.fillRect(juce::Rectangle<float>(colFull.getX(), rmsY - 0.6f, colFull.getWidth(), 1.2f));
     }
 
@@ -229,6 +285,7 @@ private:
     float lastRmsL = -100.0f, lastRmsR = -100.0f;
     int holdFramesLeftL = 0, holdFramesLeftR = 0;
     int clipLatchFramesLeftL = 0, clipLatchFramesLeftR = 0;
+    Family family = Family::Dynamics;
 };
 
 /** Compact gain-reduction meter for the three dynamics modules (Comp,
@@ -497,9 +554,14 @@ public:
     void pushDb(float db)
     {
         float target = juce::jlimit(0.0f, 1.0f, (db - minDb) / (maxDb - minDb));
-        constexpr float tau = 0.13f;   // seconds — snappier than a classic 300ms VU
+        // Asymmetric ballistics: rise keeps the original ~130ms VU-style
+        // integration, but fall uses a much shorter time constant so the
+        // needle snaps back down quickly instead of drifting — a fast
+        // decay/inertia, not a symmetric smoothing filter.
+        constexpr float tauAttack  = 0.13f;
+        constexpr float tauRelease = 0.035f;
         constexpr float dt  = 1.0f / 30.0f;
-        float coef = std::exp(-dt / tau);
+        float coef = std::exp(-dt / (target >= smoothed ? tauAttack : tauRelease));
         smoothed = coef * smoothed + (1.0f - coef) * target;
         repaint();
     }
@@ -563,9 +625,14 @@ public:
     void pushGrDb(float grDb)
     {
         float target = juce::jlimit(0.0f, 1.0f, grDb / maxDb);
-        constexpr float tau = 0.09f;   // snappier than the input VU — GR needles read fast
+        // Asymmetric ballistics, same idea as VUMeter above: the needle
+        // still swings INTO reduction at the original snappy rate, but
+        // recovers back toward 0dB (falling GR) much faster — GR needles
+        // should visibly snap back the instant the compressor lets go.
+        constexpr float tauAttack  = 0.09f;   // grDb rising = more reduction
+        constexpr float tauRelease = 0.025f;  // grDb falling = recovering
         constexpr float dt  = 1.0f / 30.0f;
-        float coef = std::exp(-dt / tau);
+        float coef = std::exp(-dt / (target >= smoothed ? tauAttack : tauRelease));
         smoothed = coef * smoothed + (1.0f - coef) * target;
         repaint();
     }
@@ -643,9 +710,13 @@ public:
     void pushGrDb(float grDb)
     {
         float target = juce::jlimit(0.0f, 1.0f, grDb / maxDb);
-        constexpr float tau = 0.15f;
+        // Asymmetric ballistics — the glow still blooms up at the original
+        // rate as reduction increases, but fades back down much faster once
+        // the photocell lets go, instead of lingering bright.
+        constexpr float tauAttack  = 0.15f;
+        constexpr float tauRelease = 0.04f;
         constexpr float dt  = 1.0f / 30.0f;
-        float coef = std::exp(-dt / tau);
+        float coef = std::exp(-dt / (target >= smoothed ? tauAttack : tauRelease));
         smoothed = coef * smoothed + (1.0f - coef) * target;
         repaint();
     }
@@ -1030,6 +1101,112 @@ private:
     float sampleRateHint = 44100.0f;
     float targetHz = 6000.0f;
     float reductionNorm = 0.0f;
+};
+
+/** Exciter page's primary visualizer: a real FFT of the exciter's OWN
+    added-harmonics signal — the high band after drive/harmonic
+    generation but BEFORE the dry/wet mix (see PluginProcessor::RawExc /
+    runExc's `harm` buffer), not a copy of the module's final output. A
+    live dashed marker tracks the real ExcTone cutoff, and bar energy
+    responds directly to ExcDrive since that genuinely IS how much
+    harmonic content is being synthesized right now. Warm copper/gold
+    "sparkle" ticks crown the hottest bars — a shimmer motif distinct
+    from De-Esser's plain spectrum bars above, since an exciter is about
+    ADDING harmonic content rather than detecting/cutting a band. */
+class ExciterHarmonicsView : public juce::Component
+{
+public:
+    static constexpr int fftOrder = 11;
+    static constexpr int fftSize  = 1 << fftOrder;   // 2048 — matches the other spectrum views
+
+    ExciterHarmonicsView() : fft(fftOrder), window((size_t) fftSize, juce::dsp::WindowingFunction<float>::hann)
+    {
+        std::fill(std::begin(fftData), std::end(fftData), 0.0f);
+        std::fill(std::begin(bars), std::end(bars), 0.0f);
+    }
+
+    void setSampleRate(double sr) { sampleRateHint = (float) juce::jmax(1000.0, sr); }
+
+    // toneHz: the real live ExcTone cutoff (see runExc's cutoffHz).
+    void setToneHz(float hz) { toneHz = hz; }
+
+    // samples: fftSize raw values of the exciter's own harm buffer, oldest to newest.
+    void update(const float* samples)
+    {
+        std::copy(samples, samples + fftSize, fftData);
+        window.multiplyWithWindowingTable(fftData, (size_t) fftSize);
+        fft.performFrequencyOnlyForwardTransform(fftData);
+
+        for (int i = 0; i < numBars; ++i)
+        {
+            float f0 = minHz * std::pow(maxHz / minHz, (float) i / (float) numBars);
+            float f1 = minHz * std::pow(maxHz / minHz, (float) (i + 1) / (float) numBars);
+            int bin0 = juce::jlimit(1, fftSize / 2 - 1, (int) (f0 * (float) fftSize / sampleRateHint));
+            int bin1 = juce::jlimit(bin0 + 1, fftSize / 2, (int) (f1 * (float) fftSize / sampleRateHint));
+            float peak = 0.0f;
+            for (int b = bin0; b < bin1; ++b)
+                peak = juce::jmax(peak, fftData[b]);
+            float db = juce::Decibels::gainToDecibels(peak, -100.0f);
+            float norm = juce::jlimit(0.0f, 1.0f, (db + 84.0f) / 84.0f);
+            bars[i] = juce::jmax(norm, bars[i] * 0.85f);
+        }
+        repaint();
+    }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(b);
+        g.setColour(XaLZaColour::borderSoft);
+        for (int i = 1; i < 4; ++i)
+        {
+            float y = b.getY() + b.getHeight() * (float) i / 4.0f;
+            g.drawLine(b.getX(), y, b.getRight(), y, 0.5f);
+        }
+        g.setColour(XaLZaColour::border);
+        g.drawRect(b, 1.0f);
+
+        float barW = b.getWidth() / (float) numBars;
+        for (int i = 0; i < numBars; ++i)
+        {
+            float h = bars[i] * b.getHeight();
+            juce::Rectangle<float> barRect(b.getX() + (float) i * barW, b.getBottom() - h, barW * 0.78f, h);
+            juce::Colour c = juce::Colour(0xffb5652f).interpolatedWith(juce::Colour(0xffffe0a3), bars[i]);
+            g.setColour(c.withAlpha(0.85f));
+            g.fillRect(barRect);
+
+            // A real "sparkle" tick crowning the hottest bars — only
+            // appears when that band's own synthesized harmonic content
+            // is genuinely hot, not decorative.
+            if (bars[i] > 0.55f)
+            {
+                g.setColour(juce::Colour(0xffffe0a3).withAlpha(juce::jlimit(0.0f, 1.0f, (bars[i] - 0.55f) * 2.2f)));
+                g.fillRect(barRect.getX(), barRect.getY() - 3.0f, barRect.getWidth(), 2.0f);
+            }
+        }
+
+        // Live Tone cutoff marker — slides as ExcTone moves.
+        float t = juce::jlimit(0.0f, 1.0f, std::log(juce::jmax(minHz, toneHz) / minHz) / std::log(maxHz / minHz));
+        float mx = b.getX() + t * b.getWidth();
+        float dashLens[] = { 4.0f, 3.0f };
+        juce::Path dash;
+        dash.startNewSubPath(mx, b.getY()); dash.lineTo(mx, b.getBottom());
+        juce::Path dashed;
+        juce::PathStrokeType(1.2f).createDashedStroke(dashed, dash, dashLens, 2);
+        g.setColour(juce::Colour(0xffffe0a3).withAlpha(0.7f));
+        g.strokePath(dashed, juce::PathStrokeType(1.2f));
+    }
+
+    static constexpr int numBars = 28;
+    static constexpr float minHz = 1000.0f, maxHz = 16000.0f;
+    juce::dsp::FFT fft;
+    juce::dsp::WindowingFunction<float> window;
+    float fftData[2 * fftSize];
+    float bars[numBars] = {};
+    float sampleRateHint = 44100.0f;
+    float toneHz = 3000.0f;
 };
 
 /** Oscilloscope-style raw waveform trace. Fed a fixed window of raw,
@@ -2082,6 +2259,70 @@ private:
     int writePos = 0;
 };
 
+/** Transient Shaper page view: the real fast/slow envelope-ratio detector
+    (see runTrs — trsFast at 1/5ms, trsSlow at 25/200ms, diffDb is their
+    dB ratio) scrolling as a bipolar trace centred on zero — positive
+    means "this instant reads as a transient", negative "this instant
+    reads as sustain" — paired with the real resulting applied gain (dB),
+    both genuinely live-linked to TrsAttack/TrsSustain (the detector
+    itself doesn't move with the knobs, but the applied-gain trace's
+    amplitude directly tracks them). Unlike GATE's binary open/closed
+    strip above or COMP/OPTO's static analytic curves, this is the only
+    module view in the plugin showing a continuous, signed "how transient
+    is RIGHT NOW" reading. */
+class TransientDetectorView : public juce::Component
+{
+public:
+    void push(float envDiffNorm, float gainDbNorm)
+    {
+        histA[(size_t) writePos] = envDiffNorm;
+        histB[(size_t) writePos] = gainDbNorm;
+        writePos = (writePos + 1) % histLen;
+        repaint();
+    }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto bnds = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(bnds);
+        g.setColour(XaLZaColour::borderSoft);
+        g.drawLine(bnds.getX(), bnds.getCentreY(), bnds.getRight(), bnds.getCentreY(), 0.6f);
+        g.setColour(XaLZaColour::border);
+        g.drawRect(bnds, 1.0f);
+
+        auto drawLine = [&] (const std::array<float, (size_t) histLen>& hist, juce::Colour c)
+        {
+            juce::Path p;
+            bool started = false;
+            for (int i = 0; i < histLen; ++i)
+            {
+                int idx = (writePos + i) % histLen;
+                float v = hist[(size_t) idx];
+                float x = bnds.getX() + bnds.getWidth() * (float) i / (float) (histLen - 1);
+                float y = bnds.getCentreY() - juce::jlimit(-1.0f, 1.0f, v) * bnds.getHeight() * 0.46f;
+                if (!started) { p.startNewSubPath(x, y); started = true; } else p.lineTo(x, y);
+            }
+            g.setColour(c);
+            g.strokePath(p, juce::PathStrokeType(1.6f));
+        };
+        // Applied gain drawn first/dimmer (the derived reading), detector
+        // trace last/brighter (the actual measurement) — same "real over
+        // reference" layering convention WaveformScope uses.
+        drawLine(histB, XaLZaColour::accent.withAlpha(0.7f));
+        drawLine(histA, XaLZaColour::accent2);
+
+        g.setColour(XaLZaColour::textMuted);
+        g.setFont(juce::Font(juce::FontOptions(8.0f).withStyle("Bold")));
+        g.drawText("DETECTOR", bnds.removeFromBottom(13.0f).reduced(4.0f, 0.0f), juce::Justification::centredLeft);
+    }
+
+    static constexpr int histLen = 150;   // 5 seconds of history at 30Hz
+    std::array<float, (size_t) histLen> histA{}, histB{};
+    int writePos = 0;
+};
+
 /** The Saturator's actual waveshaping transfer curve — linear amplitude
     in vs out, -1..+1 — computed with the EXACT SAME shape() formulas
     runSat applies per Character (see PluginProcessor.cpp's runSat lambda:
@@ -2601,6 +2842,112 @@ private:
     WaveformScope ir;
 };
 
+/** Spring Reverb page view: a cluster of 6 bars, one per physical comb
+    ("spring") in XaLZaProcessor::DampedModComb — real per-comb tank level
+    (bar height, sqrt-curved since the tank's own damped-feedback content
+    is much quieter than the wet mix so a linear scale would read as
+    permanently near-empty) and real per-comb LFO phase (hue rotation),
+    sampled straight off the live DSP state every block via
+    proc.getSprCombLevel()/getSprCombPhase() — modelled on ResBandBars'
+    proven bar-cluster layout above. Distinct springs visibly breathe at
+    their own independent modulation rates, which is literally what a
+    physical spring tank does, not a decorative animation. */
+class SpringClusterView : public juce::Component
+{
+public:
+    void setData(const float* level, const float* phase01, int numCombs)
+    {
+        n = juce::jlimit(1, kMax, numCombs);
+        for (int i = 0; i < kMax; ++i)
+        {
+            lvl[i] = i < n ? level[i] : 0.0f;
+            ph[i]  = i < n ? phase01[i] : 0.0f;
+        }
+        repaint();
+    }
+
+private:
+    static constexpr int kMax = 6;
+
+    void paint(juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(b);
+        g.setColour(XaLZaColour::border);
+        g.drawRect(b, 1.0f);
+
+        auto area = getLocalBounds().reduced(6, 4).toFloat();
+        float cellW = area.getWidth() / (float) n;
+        g.setFont(juce::Font(juce::FontOptions(8.5f)));
+
+        for (int i = 0; i < n; ++i)
+        {
+            auto cell = juce::Rectangle<float>(area.getX() + cellW * (float) i, area.getY(), cellW, area.getHeight());
+            auto barCell = cell.reduced(cellW * 0.18f, 0.0f);
+            float norm = juce::jlimit(0.0f, 1.0f, std::sqrt(juce::jmax(0.0f, lvl[i]) * 3.0f));
+            float labelH = 12.0f;
+            auto barArea = barCell.withTrimmedBottom(labelH);
+            float barH = barArea.getHeight() * norm;
+            auto bar = juce::Rectangle<float>(barArea.getX(), barArea.getBottom() - barH, barArea.getWidth(), barH);
+
+            g.setColour(XaLZaColour::borderSoft);
+            g.drawRect(barArea, 1.0f);
+
+            // Hue rotates continuously with each spring's own LFO phase —
+            // a real per-comb "shimmer" cue, not a static accent colour.
+            float huePos = ph[i] - std::floor(ph[i]);
+            g.setColour(juce::Colour::fromHSV(huePos, 0.55f, 0.95f, 1.0f).withAlpha(0.5f + 0.5f * norm));
+            g.fillRect(bar);
+
+            g.setColour(XaLZaColour::textMuted);
+            g.drawText("S" + juce::String(i + 1), cell.removeFromBottom(labelH), juce::Justification::centred);
+        }
+    }
+
+    int n = kMax;
+    float lvl[kMax] = {};
+    float ph[kMax] = {};
+};
+
+/** Tape Bus page view: a real WaveformScope of the actual post-tape
+    signal (RawTape) paired with an EnvelopeGraph history of the two
+    things that make tape "tape" — Iron drive gain reduction (dB) and
+    Wow/Flutter time deviation (ms) — both genuinely measured on the
+    audio thread each block (see PluginProcessor.cpp's runTape), never
+    decorative. Modelled directly on ReverbView's composite layout above. */
+class TapeBusView : public juce::Component
+{
+public:
+    TapeBusView() { addAndMakeVisible(scope); addAndMakeVisible(env); }
+
+    void setWaveform(const float* samples) { scope.setSamples(samples); }
+
+    void pushTelemetry(float ironGrDb, float wowDevMs)
+    {
+        // Normalised against generous, real, offline-verified headroom —
+        // Iron's own drive range tops out well under 12dB of GR on the low
+        // band even at max settings; Wow's configured max depth is exactly
+        // 0.6ms (depthMs=1.2ms * lfo=1 * 0.5 at TapeWow=100%) — so both
+        // read mid-scale at typical settings rather than pinned at 0 or 1.
+        env.push(juce::jlimit(0.0f, 1.0f, ironGrDb / 12.0f),
+                  juce::jlimit(0.0f, 1.0f, wowDevMs / 0.6f));
+    }
+
+private:
+    void resized() override
+    {
+        auto b = getLocalBounds();
+        auto left = b.removeFromLeft(b.getWidth() / 2);
+        left.removeFromRight(4);
+        scope.setBounds(left);
+        env.setBounds(b);
+    }
+
+    WaveformScope scope;
+    EnvelopeGraph env;
+};
+
 /** Composite Doubler page view: the existing post-Doubler stereo
     goniometer alongside the real Per-Voice table (see PerVoiceTable
     above). */
@@ -2898,9 +3245,9 @@ private:
 };
 
 /** MASTER-page signal-chain overview — the brand's own palm icon turned
-    into real navigation: the 15 modules grouped into 5 fronds (INPUT =
+    into real navigation: the 17 modules grouped into 5 fronds (INPUT =
     Pre/Gate/Ess/Trs, DYN = Tune/Comp/Opto, TONE = Eq/Res/Sat/Exc,
-    SPACE = Dbl/Rev/Dly, OUT = Lim), each frond a soft tapered leaf-wash — the same "real
+    SPACE = Dbl/Rev/Spr/Dly, OUT = Lim/Tape), each frond a soft tapered leaf-wash — the same "real
     peak-hold width" math paintPalmFrond/RadialHarmonicView already use
     elsewhere — that visibly blooms wider and brighter the louder that
     whole stage's real live output is right now (loudest non-bypassed
@@ -2920,7 +3267,7 @@ private:
 class SignalChainFlowView : public juce::Component
 {
 public:
-    static constexpr int kNumSlots = 15;
+    static constexpr int kNumSlots = 17;
     static constexpr int kNumGroups = 5;
 
     struct NodeState { bool bypassed = false; float levelDb = -100.0f; };
@@ -2944,15 +3291,16 @@ public:
 private:
     // Slot ids follow XaLZaProcessor::ModuleSlot (Pre=0, Gate=1, Tune=2,
     // Ess=3, Trs=4, Comp=5, Opto=6, Eq=7, Res=8, Sat=9, Exc=10, Dbl=11,
-    // Rev=12, Dly=13, Lim=14). Auto-Tune (2) joins DYN alongside Comp/Opto
-    // — all three are "correction/shaping" stages. Transient Shaper (4)
-    // joins INPUT (an input-character tool, like Gate/Ess); Exciter (10)
-    // joins TONE (a harmonic/tone tool, like Eq/Res/Sat) — widened from 3
-    // to 4 members per group to fit both without inventing a 6th frond;
-    // groups that don't need the 4th slot simply pad it with -1, same as
-    // OUT already did for Lim.
+    // Rev=12, Spr=13, Dly=14, Lim=15, Tape=16). Auto-Tune (2) joins DYN
+    // alongside Comp/Opto — all three are "correction/shaping" stages.
+    // Transient Shaper (4) joins INPUT (an input-character tool, like
+    // Gate/Ess); Exciter (10) joins TONE (a harmonic/tone tool, like
+    // Eq/Res/Sat) — widened from 3 to 4 members per group to fit both
+    // without inventing a 6th frond. Spring Reverb (13) joins SPACE
+    // alongside Dbl/Rev/Dly (now filling all 4 slots); Tape Bus (16) joins
+    // OUT alongside Lim — the only group still padding with -1.
     static constexpr int groupMembers[kNumGroups][4] = {
-        { 0, 1, 3, 4 }, { 2, 5, 6, -1 }, { 7, 8, 9, 10 }, { 11, 12, 13, -1 }, { 14, -1, -1, -1 }
+        { 0, 1, 3, 4 }, { 2, 5, 6, -1 }, { 7, 8, 9, 10 }, { 11, 12, 13, 14 }, { 15, 16, -1, -1 }
     };
 
     void paint(juce::Graphics& g) override
@@ -3093,11 +3441,11 @@ private:
     static const char* shortCode(int slotId)
     {
         static const char* codes[kNumSlots] = { "PRE", "GATE", "TUNE", "ESS", "TRS", "COMP", "OPTO", "EQ",
-                                                  "RES", "SAT", "EXC", "DBL", "REV", "DLY", "LIM" };
+                                                  "RES", "SAT", "EXC", "DBL", "REV", "SPR", "DLY", "LIM", "TAPE" };
         return codes[(size_t) juce::jlimit(0, kNumSlots - 1, slotId)];
     }
 
-    int order[kNumSlots] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14 };
+    int order[kNumSlots] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
     int tabIndexBySlot[kNumSlots] = {};
     std::array<NodeState, kNumSlots> nodes;
 
@@ -3107,7 +3455,7 @@ private:
     int cachedNodeCount = 0;
 };
 
-/** Chain-order popup content: 15 rows, real press-and-drag reordering (not
+/** Chain-order popup content: 17 rows, real press-and-drag reordering (not
     just Up/Down stepping — those stay too, as a precise fallback). Drag a
     row anywhere in the list in one gesture; the other rows animate out of
     the way live to show exactly where it'll land, and the real DSP chain
@@ -3287,7 +3635,7 @@ private:
 
 /**
     Editor layout: a narrow vertical tab rail on the left (an overview tab
-    + the 15 modules, in the mockup's own tab order), and a content area on
+    + the 17 modules, in the mockup's own tab order), and a content area on
     the right that shows either the overview page (Master gain/width,
     meters, goniometer, correlation meter, signal-chain flow and the
     whole-mix spectrum analyser) or the selected module's own fine-tune
@@ -3323,6 +3671,13 @@ private:
         LedMeter meterIn, meterOut;
         juce::Label capIn, capOut, dbIn, dbOut;
         GrMeter grMeter;
+        // Second, independent small readout row — reuses GrMeter verbatim
+        // for the new analog-character telemetry (PSU Sag / Iron GR) so a
+        // module can show its own compressor GR *and* this extra reading
+        // side by side, with minimal new layout code. -1 = not shown.
+        // Values: 0 = Comp Sag, 1 = Opto Sag, 2 = Pre Iron, 3 = Tape Iron.
+        GrMeter auxMeter;
+        int auxSource = -1;
         juce::TextButton bypassBtn { "BYP" }, soloBtn { "SOLO" };
         std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> bypassAttachment;
         juce::String bypassParamID;
@@ -3340,6 +3695,7 @@ private:
             capIn.setVisible(v); capOut.setVisible(v);
             dbIn.setVisible(v); dbOut.setVisible(v);
             grMeter.setVisible(v && grIndex >= 0);
+            auxMeter.setVisible(v && auxSource >= 0);
             bypassBtn.setVisible(v);
             soloBtn.setVisible(v);
         }
@@ -3347,7 +3703,8 @@ private:
 
     KnobUI& addKnob(const juce::String& paramID, const juce::String& shortLabel, bool accent);
     ModuleMeterUI& addModuleMeter(const juce::String& tab, int tapIn, int tapOut, int grIndex,
-                                   const juce::String& bypassParamID);
+                                   const juce::String& bypassParamID, int auxSource = -1,
+                                   LedMeter::Family family = LedMeter::Family::Dynamics);
     void applyPreset(int presetIndex);
     void toggleSolo(const juce::String& bypassParamID);
     void updateSoloButtonStates();
@@ -3516,6 +3873,14 @@ private:
     juce::Label dlyScopeTitle;
     LimiterAnalysisView limView;
     juce::Label limViewTitle;
+    SpringClusterView sprView;
+    juce::Label sprViewTitle;
+    TapeBusView tapeView;
+    juce::Label tapeViewTitle;
+    TransientDetectorView trsView;
+    juce::Label trsViewTitle;
+    ExciterHarmonicsView excView;
+    juce::Label excViewTitle;
 
     // Resolved from tabNames in the constructor.
     int preTabIndex = 1, gateTabIndex = 10, essTabIndex = 11, compTabIndex = 2,
@@ -3526,7 +3891,10 @@ private:
         // tabNames is populated (see PluginEditor.cpp); tabNames appends
         // "TRS" then "EXC" after the existing 14 entries, so 14/15 here
         // match that append order.
-        trsTabIndex = 14, excTabIndex = 15;
+        trsTabIndex = 14, excTabIndex = 15,
+        // Same append-order convention: tabNames appends "SPR" then "TAPE"
+        // after those, so 16/17 here match.
+        sprTabIndex = 16, tapeTabIndex = 17;
 
     // "Listen" toggles — Gate and De-esser only, since those are the two
     // modules with a genuinely distinct detector signal worth auditioning.
@@ -3684,7 +4052,7 @@ private:
     juce::Label bypassSummaryLabel;
 
     // Overview page's signal-chain flow strip — whole-plugin overview of
-    // all 15 modules in their real live order, each glowing with its own
+    // all 17 modules in their real live order, each glowing with its own
     // real output level; click a node to jump to that page. See
     // SignalChainFlowView's own comment for what's genuinely measured.
     SignalChainFlowView chainFlow;
