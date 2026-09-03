@@ -5,10 +5,12 @@
 #include <atomic>
 
 // ---------------------------------------------------------------------------
-// Parameter IDs — the full 12-module chain from the original web mockup
+// Parameter IDs — the 12-module chain from the original web mockup
 // (Preamp, Gate, De-esser, Glue Comp, Opto, EQ 550, Resonance, Saturator,
 // Doubler, Reverb, Delay, Limiter), same names/ranges/defaults as the
-// mockup's PARAM_META table and its "Flat" / "Warm Lead Vocal" presets.
+// mockup's PARAM_META table and its "Flat" / "Warm Lead Vocal" presets,
+// plus three real-time modules added afterward: Auto-Tune (Tune*),
+// Transient Shaper (Trs*) and Exciter (Exc*) — 15 modules total.
 // ---------------------------------------------------------------------------
 namespace XID
 {
@@ -22,12 +24,15 @@ namespace XID
     // module can be A/B'd in isolation.
     static const juce::String PreBypass  = "PreBypass";
     static const juce::String GateBypass = "GateBypass";
+    static const juce::String TuneBypass = "TuneBypass";
     static const juce::String EssBypass  = "EssBypass";
+    static const juce::String TrsBypass  = "TrsBypass";
     static const juce::String CompBypass = "CompBypass";
     static const juce::String OptoBypass = "OptoBypass";
     static const juce::String EqBypass   = "EqBypass";
     static const juce::String ResBypass  = "ResBypass";
     static const juce::String SatBypass  = "SatBypass";
+    static const juce::String ExcBypass  = "ExcBypass";
     static const juce::String DblBypass  = "DblBypass";
     static const juce::String RevBypass  = "RevBypass";
     static const juce::String DlyBypass  = "DlyBypass";
@@ -63,6 +68,12 @@ namespace XID
     static const juce::String EssFreq   = "EssFreq";
     static const juce::String EssBand   = "EssBand"; // 0=S 1=T 2=CH — real detect-Q + freq-bias character, see runEss
 
+    // Transient Shaper — linked dual envelope-follower attack/sustain
+    // reshaping, see XaLZaProcessor::runTrs. -100..100, 0 = transparent
+    // (both default to 0 so a fresh instance / old session is unaffected).
+    static const juce::String TrsAttack  = "TrsAttack";
+    static const juce::String TrsSustain = "TrsSustain";
+
     static const juce::String CompThresh  = "CompThresh";
     static const juce::String CompMakeup  = "CompMakeup";
     static const juce::String CompAttack  = "CompAttack";
@@ -97,6 +108,13 @@ namespace XID
     static const juce::String SatMix     = "SatMix";
     static const juce::String SatChar    = "SatChar";   // 0=Tube 1=Tape 2=Transistor 3=Diode — real distinct waveshapes, see runSat
 
+    // Exciter — harmonic enhancer. Isolates the band above Tone's crossover
+    // and drives ONLY that band through an asymmetric soft clip, mixed back
+    // on top of the dry signal — see XaLZaProcessor::runExc.
+    static const juce::String ExcDrive = "ExcDrive";
+    static const juce::String ExcTone  = "ExcTone";   // crossover freq, 0=1.5kHz .. 100=6kHz
+    static const juce::String ExcMix   = "ExcMix";
+
     static const juce::String DblDetune = "DblDetune";
     static const juce::String DblWidth  = "DblWidth";
     static const juce::String DblDelay  = "DblDelay";
@@ -118,6 +136,29 @@ namespace XID
     // and the Algorithmic<->Convolution hybrid blend — see runRev.
     static const juce::String RevDamping       = "RevDamping";
     static const juce::String RevHybrid        = "RevHybrid";
+    // Real M/S stereo width on the WET tail only (0=mono, 100=normal,
+    // 200=exaggerated wide) and a real Freeze (infinite-sustain) toggle —
+    // see runRev.
+    static const juce::String RevWidth         = "RevWidth";
+    static const juce::String RevFreeze        = "RevFreeze";
+
+    // Real-time Auto-Tune — a genuine pitch detector (autocorrelation) +
+    // pitch shifter (granular, see XaLZaProcessor::GranularPitchShifter),
+    // not a cosmetic knob. Key/Scale pick the target note set; Retune is
+    // how fast the detected pitch snaps to it (0 = instant/robotic "hard
+    // tune", higher = natural glide); Amount blends the correction ratio
+    // between 1.0 (no shift) and the full correction needed — see runTune.
+    static const juce::String TuneKey    = "TuneKey";      // 0..11 = C..B
+    static const juce::String TuneScale  = "TuneScale";    // 0=Major 1=Minor 2=Chromatic
+    static const juce::String TuneRetune = "TuneRetune";   // ms
+    static const juce::String TuneAmount = "TuneAmount";   // %
+    // Optional LPC-based formant-preserving pitch shift (see
+    // XaLZaProcessor::FormantEnvelope / processFormantPreservedSample) —
+    // off by default. The plain shift's "chipmunk"/"Vader" character on
+    // large corrections is an established, sought-after part of the hard-
+    // tune urban-vocal sound (see the GranularPitchShifter doc comment),
+    // so this stays an explicit opt-in rather than replacing it outright.
+    static const juce::String TuneFormant = "TuneFormant";
 
     static const juce::String DlyTime        = "DlyTime";
     static const juce::String DlyFeedback    = "DlyFeedback";
@@ -131,6 +172,11 @@ namespace XID
     // classic analog/tape-echo "repeats get darker and thinner" character.
     static const juce::String DlyFbHpf       = "DlyFbHpf";
     static const juce::String DlyFbLpf       = "DlyFbLpf";
+    // Real tape-echo-style saturation in the feedback path (soft tanh drive
+    // with makeup gain) — at higher settings also brings in a small amount
+    // of delay-time wow, exactly like a real tape unit's drive and wobble
+    // being physically linked — see runDly.
+    static const juce::String DlyDrive       = "DlyDrive";
     static const juce::String DlySync        = "DlySync";     // real host-tempo sync toggle, see runDly
     static const juce::String DlyNoteDiv     = "DlyNoteDiv";  // 0..6 index into DlyNoteTable (Params.h) — used when DlySync is on
     static const juce::String DlyPreDelay    = "DlyPreDelay"; // 0=Off 1=1/32 2=1/16 — real tempo-synced pre-delay tap, see runDly
@@ -197,12 +243,15 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     };
     addBypass(XID::PreBypass,  "Pre Bypass");
     addBypass(XID::GateBypass, "Gate Bypass");
+    addBypass(XID::TuneBypass, "Auto-Tune Bypass");
     addBypass(XID::EssBypass,  "De-esser Bypass");
+    addBypass(XID::TrsBypass,  "Transient Shaper Bypass");
     addBypass(XID::CompBypass, "Comp Bypass");
     addBypass(XID::OptoBypass, "Opto Bypass");
     addBypass(XID::EqBypass,   "EQ Bypass");
     addBypass(XID::ResBypass,  "Resonance Bypass");
     addBypass(XID::SatBypass,  "Saturator Bypass");
+    addBypass(XID::ExcBypass,  "Exciter Bypass");
     addBypass(XID::DblBypass,  "Doubler Bypass");
     addBypass(XID::RevBypass,  "Reverb Bypass");
     addBypass(XID::DlyBypass,  "Delay Bypass");
@@ -212,6 +261,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     addBypass(XID::GateScEnable, "Gate External Sidechain");
     addBypass(XID::GateLookahead, "Gate Lookahead");
     addBypass(XID::DlySync, "Delay Tempo Sync");
+    addBypass(XID::RevFreeze, "Reverb Freeze");
+    addBypass(XID::TuneFormant, "Tune Formant Preserve");
     // Mockup toggles/mode switches that snap or gate real DSP:
     addBypass(XID::PrePad, "Pre Pad -20dB");           // real -20dB input pad
     addBypass(XID::PrePhase, "Pre Phase Invert");      // real polarity flip
@@ -232,10 +283,24 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     add(XID::GateHold, "Gate Hold", 0.0f, 500.0f, 45.0f);
     add(XID::GateRelease, "Gate Release", 5.0f, 1000.0f, 120.0f);
 
+    add(XID::TuneKey, "Tune Key", 0.0f, 11.0f, 0.0f);
+    add(XID::TuneScale, "Tune Scale", 0.0f, 2.0f, 0.0f);
+    add(XID::TuneRetune, "Tune Retune Speed", 0.0f, 400.0f, 80.0f);
+    // Defaults to 0 = fully transparent (ratio stays 1.0, see runTune) —
+    // a fresh instance and every old preset/session that never mentions
+    // this param sound bit-identical to before Auto-Tune existed.
+    add(XID::TuneAmount, "Tune Amount", 0.0f, 100.0f, 0.0f);
+
     add(XID::EssThresh, "De-esser Threshold", -40.0f, 0.0f, -20.0f);
     add(XID::EssRange, "De-esser Range", -24.0f, 0.0f, -8.0f);
     add(XID::EssFreq, "De-esser Freq", 2000.0f, 12000.0f, 6300.0f);
     add(XID::EssBand, "De-esser Band", 0.0f, 2.0f, 1.0f);
+
+    // Both default to 0 = unity gain everywhere (see runTrs) — a fresh
+    // instance and every old session are bit-identical to before this
+    // module existed.
+    add(XID::TrsAttack, "Trs Attack", -100.0f, 100.0f, 0.0f);
+    add(XID::TrsSustain, "Trs Sustain", -100.0f, 100.0f, 0.0f);
 
     add(XID::CompThresh, "Comp Threshold", -40.0f, 0.0f, -20.0f);
     add(XID::CompMakeup, "Comp Makeup", -6.0f, 12.0f, 0.0f);
@@ -275,6 +340,12 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     add(XID::SatMix, "Sat Mix", 0.0f, 100.0f, 0.0f);
     add(XID::SatChar, "Sat Character", 0.0f, 3.0f, 0.0f);
 
+    // Both Drive and Mix default to 0 = bit-identical passthrough (see
+    // runExc) until turned up.
+    add(XID::ExcDrive, "Exciter Drive", 0.0f, 100.0f, 0.0f);
+    add(XID::ExcTone, "Exciter Tone", 0.0f, 100.0f, 50.0f);
+    add(XID::ExcMix, "Exciter Mix", 0.0f, 100.0f, 0.0f);
+
     add(XID::DblDetune, "Doubler Detune", 0.0f, 40.0f, 12.0f);
     add(XID::DblWidth, "Doubler Width", 0.0f, 100.0f, 88.0f);
     add(XID::DblDelay, "Doubler Delay", 0.0f, 40.0f, 14.0f);
@@ -299,6 +370,12 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     // both engines' wet signal. Defaults to 0 so nothing changes for
     // anyone until they load an IR and turn this up.
     add(XID::RevHybrid, "Rev Hybrid (IR Blend)", 0.0f, 100.0f, 0.0f);
+    // Wet-tail stereo width, independent of the reverb engine's own internal
+    // spread — a real M/S scale (0=mono collapse, 100=unchanged, up to
+    // 200=exaggerated wide), exactly the same formula MasterWidth already
+    // uses at the bus level, applied here to just the reverb's own wet
+    // signal. Defaults to 100 = no change from prior behaviour.
+    add(XID::RevWidth, "Rev Width", 0.0f, 200.0f, 100.0f);
 
     add(XID::DlyTime, "Dly Time", 20.0f, 1000.0f, 250.0f);
     add(XID::DlyFeedback, "Dly Feedback", 0.0f, 90.0f, 38.0f);
@@ -309,6 +386,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createXaLZaParameterL
     add(XID::DlyPanRate, "Dly Pan Rate", 0.05f, 4.0f, 0.5f);
     add(XID::DlyFbHpf, "Dly Feedback HPF", 20.0f, 2000.0f, 120.0f);
     add(XID::DlyFbLpf, "Dly Feedback LPF", 1000.0f, 18000.0f, 8000.0f);
+    // Defaults to 0 = bit-identical to old behaviour until turned up.
+    add(XID::DlyDrive, "Dly Drive", 0.0f, 100.0f, 0.0f);
     add(XID::DlyNoteDiv, "Dly Note Division", 0.0f, 6.0f, 4.0f);
     add(XID::DlyPreDelay, "Dly Pre-Delay", 0.0f, 2.0f, 0.0f);
 
@@ -606,6 +685,213 @@ inline const std::vector<XalzaPreset>& xalzaFactoryPresets()
             { XID::LimInputGain, 1.2f },
             { XID::LimCeiling, -0.65f },
             { XID::LimRelease, 80.0f },
+            { XID::LimClip, 5.0f },
+        } },
+        // ---- Genre presets: the first three factory presets to actually
+        // use Auto-Tune, the Transient Shaper and the Exciter, each tuned
+        // for a distinct urban-vocal-chain character rather than a generic
+        // "turn everything up a bit" starting point.
+        { "Reggaeton Lead", {
+            { XID::PreGain, 38.0f },
+            { XID::PreChar, 40.0f },
+            { XID::PreHPF, 85.0f },
+            { XID::GateThresh, -40.0f },
+            { XID::GateRange, -60.0f },
+            { XID::GateAttack, 1.5f },
+            { XID::GateHold, 30.0f },
+            { XID::GateRelease, 90.0f },
+            { XID::TuneKey, 0.0f },
+            { XID::TuneScale, 0.0f },
+            // Fast-ish glide, moderate amount, formant preserved: an
+            // audible correction character without the full chipmunk.
+            { XID::TuneRetune, 45.0f },
+            { XID::TuneAmount, 55.0f },
+            { XID::TuneFormant, 1.0f },
+            { XID::EssThresh, -16.0f },
+            { XID::EssRange, -9.0f },
+            { XID::EssFreq, 6800.0f },
+            // Punchy transient, tighter tail — cuts through a busy dembow beat.
+            { XID::TrsAttack, 25.0f },
+            { XID::TrsSustain, -10.0f },
+            { XID::CompThresh, -19.0f },
+            { XID::CompMakeup, 3.5f },
+            { XID::CompAttack, 8.0f },
+            { XID::CompRelease, 180.0f },
+            { XID::CompMix, 100.0f },
+            { XID::OptoReduction, 35.0f },
+            { XID::OptoGain, 4.0f },
+            { XID::OptoMix, 80.0f },
+            { XID::EqLow, 3.0f },
+            { XID::EqMid, -1.5f },
+            { XID::EqHigh, 5.5f },
+            { XID::ResAmount, 55.0f },
+            { XID::ResSharpness, 50.0f },
+            { XID::ResReactivity, 50.0f },
+            { XID::ResNotchLimit, -12.0f },
+            { XID::ResLow, 120.0f },
+            { XID::ResHigh, 9400.0f },
+            { XID::SatDrive, 45.0f },
+            { XID::SatTone, 1.0f },
+            { XID::SatCeiling, -0.3f },
+            { XID::SatMix, 55.0f },
+            { XID::ExcDrive, 35.0f },
+            { XID::ExcTone, 35.0f },
+            { XID::ExcMix, 30.0f },
+            { XID::DblDetune, 10.0f },
+            { XID::DblWidth, 80.0f },
+            { XID::DblDelay, 12.0f },
+            { XID::DblMix, 30.0f },
+            { XID::RevSize, 45.0f },
+            { XID::RevDecay, 1.8f },
+            { XID::RevPreDelay, 15.0f },
+            { XID::RevMix, 12.0f },
+            { XID::RevDuck, 75.0f },
+            { XID::RevDuckRelease, 200.0f },
+            { XID::DlyFeedback, 30.0f },
+            { XID::DlySpread, 60.0f },
+            { XID::DlyMix, 16.0f },
+            { XID::DlyDuck, 65.0f },
+            { XID::DlyDuckRelease, 200.0f },
+            { XID::DlyPanRate, 0.5f },
+            { XID::LimInputGain, 2.0f },
+            { XID::LimCeiling, -0.5f },
+            { XID::LimRelease, 70.0f },
+            { XID::LimClip, 12.0f },
+        } },
+        { "Trap Ad-lib (Hard-Tune)", {
+            { XID::PreGain, 44.0f },
+            { XID::PreChar, 30.0f },
+            { XID::PreHPF, 100.0f },
+            { XID::GateThresh, -38.0f },
+            { XID::GateRange, -70.0f },
+            { XID::GateAttack, 1.0f },
+            { XID::GateHold, 20.0f },
+            { XID::GateRelease, 60.0f },
+            { XID::TuneKey, 0.0f },
+            // Chromatic + 0ms retune + 100% amount + formant OFF: the fully
+            // robotic hard-tune snap this genre deliberately reaches for —
+            // see the GranularPitchShifter doc comment on why that
+            // character is a feature here, not a bug to hide.
+            { XID::TuneScale, 2.0f },
+            { XID::TuneRetune, 0.0f },
+            { XID::TuneAmount, 100.0f },
+            { XID::TuneFormant, 0.0f },
+            { XID::EssThresh, -18.0f },
+            { XID::EssRange, -8.0f },
+            { XID::EssFreq, 7000.0f },
+            { XID::TrsAttack, 40.0f },
+            { XID::TrsSustain, -30.0f },
+            { XID::CompThresh, -20.0f },
+            { XID::CompMakeup, 4.0f },
+            { XID::CompAttack, 5.0f },
+            { XID::CompRelease, 120.0f },
+            { XID::CompMix, 100.0f },
+            { XID::OptoReduction, 20.0f },
+            { XID::OptoGain, 2.0f },
+            { XID::OptoMix, 40.0f },
+            { XID::EqLow, 1.0f },
+            { XID::EqMid, -2.0f },
+            { XID::EqHigh, 6.5f },
+            { XID::ResAmount, 40.0f },
+            { XID::ResSharpness, 50.0f },
+            { XID::ResReactivity, 50.0f },
+            { XID::ResNotchLimit, -12.0f },
+            { XID::ResLow, 120.0f },
+            { XID::ResHigh, 9400.0f },
+            { XID::SatDrive, 30.0f },
+            { XID::SatTone, 0.0f },
+            { XID::SatCeiling, -0.3f },
+            { XID::SatMix, 35.0f },
+            { XID::ExcDrive, 50.0f },
+            { XID::ExcTone, 45.0f },
+            { XID::ExcMix, 40.0f },
+            { XID::DblDetune, 18.0f },
+            { XID::DblWidth, 95.0f },
+            { XID::DblDelay, 18.0f },
+            { XID::DblMix, 45.0f },
+            { XID::RevSize, 30.0f },
+            { XID::RevDecay, 1.0f },
+            { XID::RevPreDelay, 8.0f },
+            { XID::RevMix, 6.0f },
+            { XID::RevDuck, 80.0f },
+            { XID::RevDuckRelease, 180.0f },
+            { XID::DlyFeedback, 42.0f },
+            { XID::DlySpread, 70.0f },
+            { XID::DlyMix, 24.0f },
+            { XID::DlyDuck, 60.0f },
+            { XID::DlyDuckRelease, 180.0f },
+            { XID::DlyPanRate, 0.5f },
+            { XID::LimInputGain, 3.0f },
+            { XID::LimCeiling, -0.3f },
+            { XID::LimRelease, 60.0f },
+            { XID::LimClip, 18.0f },
+        } },
+        { "R&B Smooth", {
+            { XID::PreGain, 30.0f },
+            { XID::PreChar, 25.0f },
+            { XID::PreHPF, 70.0f },
+            { XID::GateThresh, -46.0f },
+            { XID::GateRange, -55.0f },
+            { XID::GateAttack, 3.0f },
+            { XID::GateHold, 60.0f },
+            { XID::GateRelease, 160.0f },
+            { XID::TuneKey, 0.0f },
+            // Slow, natural glide, gentle amount, formant preserved: pitch
+            // support you can barely hear working, not a hard-tune effect.
+            { XID::TuneScale, 1.0f },
+            { XID::TuneRetune, 120.0f },
+            { XID::TuneAmount, 35.0f },
+            { XID::TuneFormant, 1.0f },
+            { XID::EssThresh, -17.0f },
+            { XID::EssRange, -7.0f },
+            { XID::EssFreq, 6000.0f },
+            // Softened attack, longer sustain — smooths consonants and lets
+            // held notes breathe instead of choking the tail off.
+            { XID::TrsAttack, -10.0f },
+            { XID::TrsSustain, 25.0f },
+            { XID::CompThresh, -18.0f },
+            { XID::CompMakeup, 2.5f },
+            { XID::CompAttack, 15.0f },
+            { XID::CompRelease, 300.0f },
+            { XID::CompMix, 90.0f },
+            { XID::OptoReduction, 45.0f },
+            { XID::OptoGain, 4.0f },
+            { XID::OptoMix, 85.0f },
+            { XID::EqLow, 3.5f },
+            { XID::EqMid, -1.0f },
+            { XID::EqHigh, 3.0f },
+            { XID::ResAmount, 50.0f },
+            { XID::ResSharpness, 50.0f },
+            { XID::ResReactivity, 50.0f },
+            { XID::ResNotchLimit, -12.0f },
+            { XID::ResLow, 120.0f },
+            { XID::ResHigh, 9400.0f },
+            { XID::SatDrive, 25.0f },
+            { XID::SatTone, 0.0f },
+            { XID::SatCeiling, -0.3f },
+            { XID::SatMix, 30.0f },
+            { XID::ExcDrive, 15.0f },
+            { XID::ExcTone, 55.0f },
+            { XID::ExcMix, 15.0f },
+            { XID::DblDetune, 8.0f },
+            { XID::DblWidth, 70.0f },
+            { XID::DblDelay, 10.0f },
+            { XID::DblMix, 20.0f },
+            { XID::RevSize, 60.0f },
+            { XID::RevDecay, 2.8f },
+            { XID::RevPreDelay, 22.0f },
+            { XID::RevMix, 22.0f },
+            { XID::RevDuck, 65.0f },
+            { XID::RevDuckRelease, 240.0f },
+            { XID::DlyFeedback, 34.0f },
+            { XID::DlySpread, 55.0f },
+            { XID::DlyMix, 14.0f },
+            { XID::DlyDuck, 65.0f },
+            { XID::DlyDuckRelease, 240.0f },
+            { XID::DlyPanRate, 0.5f },
+            { XID::LimInputGain, 1.5f },
+            { XID::LimCeiling, -0.6f },
+            { XID::LimRelease, 100.0f },
             { XID::LimClip, 5.0f },
         } },
     };

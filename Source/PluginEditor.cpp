@@ -390,7 +390,7 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     setLookAndFeel(&laf);
 
     // ---- Tab order matches the mockup's own tab strip exactly ----
-    tabNames = { "MASTER", "PRE", "COMP", "OPTO", "EQ", "SAT", "REV", "DLY", "DBL", "RES", "GATE", "ESS", "LIM" };
+    tabNames = { "MASTER", "PRE", "TUNE", "COMP", "OPTO", "EQ", "SAT", "REV", "DLY", "DBL", "RES", "GATE", "ESS", "LIM", "TRS", "EXC" };
     pageKnobs.resize(tabNames.size());
     moduleMeterByTab.resize(tabNames.size(), nullptr);
 
@@ -460,6 +460,32 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
         }
     };
     addChildComponent(autoGainBtn);
+
+    // Auto-Tune: Retune Speed + Amount are the two fine-tune knobs; Key
+    // (12 semitone names) and Scale (Major/Minor/Chromatic) are real
+    // seg-groups in the title row (see resized()) — see runTune for what
+    // all four genuinely do.
+    addPage("TUNE", { { XID::TuneRetune, "Retune" }, { XID::TuneAmount, "Amount" } });
+    tuneKeySeg = std::make_unique<SegButtonGroup>(proc.apvts, XID::TuneKey,
+        std::vector<SegButtonGroup::Option>{ { "C", 0.0f }, { "C#", 1.0f }, { "D", 2.0f }, { "D#", 3.0f },
+                                               { "E", 4.0f }, { "F", 5.0f }, { "F#", 6.0f }, { "G", 7.0f },
+                                               { "G#", 8.0f }, { "A", 9.0f }, { "A#", 10.0f }, { "B", 11.0f } });
+    addChildComponent(*tuneKeySeg);
+    tuneScaleSeg = std::make_unique<SegButtonGroup>(proc.apvts, XID::TuneScale,
+        std::vector<SegButtonGroup::Option>{ { "Major", 0.0f }, { "Minor", 1.0f }, { "Chromatic", 2.0f } });
+    addChildComponent(*tuneScaleSeg);
+    // Off by default — the plain shift's chipmunk/Vader character on large
+    // corrections is an established, sought-after part of the urban
+    // hard-tune sound (see GranularPitchShifter's doc comment), so this
+    // stays an explicit opt-in.
+    tuneFormantBtn.setClickingTogglesState(true);
+    tuneFormantBtn.setColour(juce::TextButton::buttonOnColourId, XaLZaColour::accent);
+    tuneFormantBtn.setColour(juce::TextButton::textColourOnId, XaLZaColour::panelBg);
+    tuneFormantBtn.setTooltip("Preserve the natural vocal formants while pitch-correcting (LPC-based), instead of the plain shift's chipmunk/robotic character on large corrections");
+    addChildComponent(tuneFormantBtn);
+    tuneFormantAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        proc.apvts, XID::TuneFormant, tuneFormantBtn);
+
     addPage("COMP", { { XID::CompThresh, "Thresh" }, { XID::CompMakeup, "Makeup" }, { XID::CompAttack, "Attack" },
                        { XID::CompRelease, "Release" }, { XID::CompMix, "Mix" } });
     // Ratio is a seg-group of fixed presets (matches the mockup's
@@ -495,6 +521,7 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     satCharSeg = std::make_unique<SegButtonGroup>(proc.apvts, XID::SatChar,
         std::vector<SegButtonGroup::Option>{ { "Tube", 0.0f }, { "Tape", 1.0f }, { "Transistor", 2.0f }, { "Diode", 3.0f } });
     addChildComponent(*satCharSeg);
+    addPage("EXC",  { { XID::ExcDrive, "Drive" }, { XID::ExcTone, "Tone" }, { XID::ExcMix, "Mix" } });
     // 4 main knobs up top; Duck/DuckRelease and Wet HPF/LPF appended right
     // after (same pageKnobs[revTabIndex] vector, indices 4-5 and 6-7 —
     // addPage() appends) so resized() can lay the latter two pairs out
@@ -511,7 +538,8 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     // not synced to host tempo.
     addPage("DLY",  { { XID::DlyFeedback, "Fdbk" }, { XID::DlySpread, "Spread" },
                        { XID::DlyMix, "Mix" }, { XID::DlyDuck, "Duck" }, { XID::DlyDuckRelease, "DuckRel" },
-                       { XID::DlyPanRate, "PanRate" }, { XID::DlyFbHpf, "Fbk HPF" }, { XID::DlyFbLpf, "Fbk LPF" } });
+                       { XID::DlyPanRate, "PanRate" }, { XID::DlyFbHpf, "Fbk HPF" }, { XID::DlyFbLpf, "Fbk LPF" },
+                       { XID::DlyDrive, "Drive" } });
     dlyTimeSeg = std::make_unique<SegButtonGroup>(proc.apvts, XID::DlyTime,
         std::vector<SegButtonGroup::Option>{ { "100ms", 100.0f }, { "200ms", 200.0f }, { "300ms", 300.0f },
                                                { "500ms", 500.0f }, { "750ms", 750.0f } });
@@ -561,18 +589,22 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     essBandSeg = std::make_unique<SegButtonGroup>(proc.apvts, XID::EssBand,
         std::vector<SegButtonGroup::Option>{ { "S", 0.0f }, { "T", 1.0f }, { "CH", 2.0f } });
     addChildComponent(*essBandSeg);
+    addPage("TRS",  { { XID::TrsAttack, "Attack" }, { XID::TrsSustain, "Sustain" } });
     addPage("LIM",  { { XID::LimInputGain, "InGain" }, { XID::LimCeiling, "Ceiling" }, { XID::LimRelease, "Release" }, { XID::LimClip, "Clip" } });
 
     // ---- Per-module IN/OUT meters + GR readouts, tapping the real serial chain ----
     addModuleMeter("PRE",  (int) XaLZaProcessor::TapIn,   (int) XaLZaProcessor::TapPre,  -1, XID::PreBypass);
     addModuleMeter("GATE", (int) XaLZaProcessor::TapPre,  (int) XaLZaProcessor::TapGate, -1, XID::GateBypass);
-    addModuleMeter("ESS",  (int) XaLZaProcessor::TapGate, (int) XaLZaProcessor::TapEss,  -1, XID::EssBypass);
-    addModuleMeter("COMP", (int) XaLZaProcessor::TapEss,  (int) XaLZaProcessor::TapComp,  0, XID::CompBypass);
+    addModuleMeter("TUNE", (int) XaLZaProcessor::TapGate, (int) XaLZaProcessor::TapTune, -1, XID::TuneBypass);
+    addModuleMeter("ESS",  (int) XaLZaProcessor::TapTune, (int) XaLZaProcessor::TapEss,  -1, XID::EssBypass);
+    addModuleMeter("TRS",  (int) XaLZaProcessor::TapEss,  (int) XaLZaProcessor::TapTrs,  -1, XID::TrsBypass);
+    addModuleMeter("COMP", (int) XaLZaProcessor::TapTrs,  (int) XaLZaProcessor::TapComp,  0, XID::CompBypass);
     addModuleMeter("OPTO", (int) XaLZaProcessor::TapComp, (int) XaLZaProcessor::TapOpto,  1, XID::OptoBypass);
     addModuleMeter("EQ",   (int) XaLZaProcessor::TapOpto, (int) XaLZaProcessor::TapEq,   -1, XID::EqBypass);
     addModuleMeter("RES",  (int) XaLZaProcessor::TapEq,   (int) XaLZaProcessor::TapRes,  -1, XID::ResBypass);
     addModuleMeter("SAT",  (int) XaLZaProcessor::TapRes,  (int) XaLZaProcessor::TapSat,  -1, XID::SatBypass);
-    addModuleMeter("DBL",  (int) XaLZaProcessor::TapSat,  (int) XaLZaProcessor::TapDbl,  -1, XID::DblBypass);
+    addModuleMeter("EXC",  (int) XaLZaProcessor::TapSat,  (int) XaLZaProcessor::TapExc,  -1, XID::ExcBypass);
+    addModuleMeter("DBL",  (int) XaLZaProcessor::TapExc,  (int) XaLZaProcessor::TapDbl,  -1, XID::DblBypass);
     addModuleMeter("REV",  (int) XaLZaProcessor::TapDbl,  (int) XaLZaProcessor::TapRev,  -1, XID::RevBypass);
     addModuleMeter("DLY",  (int) XaLZaProcessor::TapRev,  (int) XaLZaProcessor::TapDly,  -1, XID::DlyBypass);
     addModuleMeter("LIM",  (int) XaLZaProcessor::TapDly,  (int) XaLZaProcessor::TapLim,   2, XID::LimBypass);
@@ -625,8 +657,8 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     addChildComponent(chainFlowCap);
     {
         const int tabIdxBySlot[XaLZaProcessor::kNumSlots] = {
-            preTabIndex, gateTabIndex, essTabIndex, compTabIndex, optoTabIndex, eqTabIndex,
-            resTabIndex, satTabIndex, dblTabIndex, revTabIndex, dlyTabIndex, limTabIndex
+            preTabIndex, gateTabIndex, tuneTabIndex, essTabIndex, trsTabIndex, compTabIndex, optoTabIndex, eqTabIndex,
+            resTabIndex, satTabIndex, excTabIndex, dblTabIndex, revTabIndex, dlyTabIndex, limTabIndex
         };
         chainFlow.setTabIndices(tabIdxBySlot);
     }
@@ -710,6 +742,7 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
         addChildComponent(l);
     };
     setupVizLabel(preVuTitle,         "INPUT LEVEL + OUTPUT WAVEFORM + HARMONIC COLOR + HPF RESPONSE");
+    setupVizLabel(tuneViewTitle,      "DETECTED PITCH + REAL CORRECTION TARGET");
     setupVizLabel(gateEnvTitle,       "POST-GATE WAVEFORM + OPEN/CLOSED ACTIVITY");
     setupVizLabel(essEnvTitle,        "SIBILANCE SPECTRUM + LIVE TARGET BAND");
     setupVizLabel(compGrTitle,        "GAIN REDUCTION METER + TRANSFER CURVE");
@@ -722,6 +755,7 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     setupVizLabel(dlyScopeTitle,      "PING-PONG BOUNCE + TAP TIMELINE (POST-DELAY)");
     setupVizLabel(limViewTitle,       "BRICKWALL OUTPUT + SPECTROGRAM");
     addChildComponent(preView);
+    addChildComponent(tuneView);
     addChildComponent(gateView);
     addChildComponent(essView);
     addChildComponent(compView);
@@ -744,6 +778,25 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     revIrNameLabel.setFont(juce::Font(juce::FontOptions(9.5f)));
     revIrNameLabel.setColour(juce::Label::textColourId, XaLZaColour::textMuted);
     addChildComponent(revIrNameLabel);
+
+    // Real Freeze (juce::dsp::Reverb's own continuous-feedback mode) and
+    // real M/S Width on the wet tail — see runRev. Width is exposed as a
+    // seg-group of musically-useful presets (same pattern as the other
+    // "categorical-feeling but really continuous" params like SatChar)
+    // rather than fighting REV's already-packed knob row for one more
+    // fine-tune knob.
+    revFreezeBtn.setClickingTogglesState(true);
+    revFreezeBtn.setColour(juce::TextButton::buttonOnColourId, XaLZaColour::accent);
+    revFreezeBtn.setColour(juce::TextButton::textColourOnId, XaLZaColour::panelBg);
+    revFreezeBtn.setTooltip("Freeze the reverb tail into continuous, infinite sustain");
+    addChildComponent(revFreezeBtn);
+    revFreezeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        proc.apvts, XID::RevFreeze, revFreezeBtn);
+    revWidthSeg = std::make_unique<SegButtonGroup>(proc.apvts, XID::RevWidth,
+        std::vector<SegButtonGroup::Option>{ { "Mono", 0.0f }, { "Narrow", 50.0f }, { "Normal", 100.0f },
+                                               { "Wide", 150.0f }, { "Huge", 200.0f } });
+    addChildComponent(*revWidthSeg);
+
     addChildComponent(dlyView);
     addChildComponent(limView);
     eqSpectrum.setSampleRate(proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 44100.0);
@@ -791,13 +844,16 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
         return it != tabNames.end() ? (int) std::distance(tabNames.begin(), it) : fallback;
     };
     preTabIndex  = resolveTab("PRE",  preTabIndex);
+    tuneTabIndex = resolveTab("TUNE", tuneTabIndex);
     gateTabIndex = resolveTab("GATE", gateTabIndex);
     essTabIndex  = resolveTab("ESS",  essTabIndex);
+    trsTabIndex  = resolveTab("TRS",  trsTabIndex);
     compTabIndex = resolveTab("COMP", compTabIndex);
     optoTabIndex = resolveTab("OPTO", optoTabIndex);
     eqTabIndex   = resolveTab("EQ",   eqTabIndex);
     resTabIndex  = resolveTab("RES",  resTabIndex);
     satTabIndex  = resolveTab("SAT",  satTabIndex);
+    excTabIndex  = resolveTab("EXC",  excTabIndex);
     dblTabIndex  = resolveTab("DBL",  dblTabIndex);
     revTabIndex  = resolveTab("REV",  revTabIndex);
     dlyTabIndex  = resolveTab("DLY",  dlyTabIndex);
@@ -805,6 +861,7 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
 
     bigViz = {
         { preTabIndex,  &preView,          &preVuTitle },
+        { tuneTabIndex, &tuneView,         &tuneViewTitle },
         { gateTabIndex, &gateView,         &gateEnvTitle },
         { essTabIndex,  &essView,          &essEnvTitle },
         { compTabIndex, &compView,         &compGrTitle },
@@ -834,7 +891,7 @@ XaLZaEditor::XaLZaEditor(XaLZaProcessor& p)
     };
     addAndMakeVisible(presetBox);
 
-    chainOrderBtn.setTooltip("Reorder the 12-module signal chain");
+    chainOrderBtn.setTooltip("Reorder the 15-module signal chain");
     chainOrderBtn.onClick = [this]
     {
         auto panel = std::make_unique<ChainOrderPanel>(proc);
@@ -984,9 +1041,9 @@ void XaLZaEditor::loadImpulseResponseFile()
 
 void XaLZaEditor::toggleSolo(const juce::String& bypassParamID)
 {
-    static const std::array<juce::String, 12> allBypass = {
-        XID::PreBypass, XID::GateBypass, XID::EssBypass, XID::CompBypass, XID::OptoBypass, XID::EqBypass,
-        XID::ResBypass, XID::SatBypass, XID::DblBypass, XID::RevBypass, XID::DlyBypass, XID::LimBypass,
+    static const std::array<juce::String, 15> allBypass = {
+        XID::PreBypass, XID::GateBypass, XID::TuneBypass, XID::EssBypass, XID::TrsBypass, XID::CompBypass, XID::OptoBypass, XID::EqBypass,
+        XID::ResBypass, XID::SatBypass, XID::ExcBypass, XID::DblBypass, XID::RevBypass, XID::DlyBypass, XID::LimBypass,
     };
 
     if (activeSoloParamID == bypassParamID)
@@ -1026,9 +1083,10 @@ void XaLZaEditor::showAboutBox()
 {
     juce::String msg;
     msg << "The XaLZa v" << proc.getVersionString() << "\n\n"
-        << "12-module vocal chain (Windows VST3):\n"
-        << "Preamp - Gate - De-esser - Glue Comp - Opto - EQ 550 -\n"
-        << "Resonance - Saturator - Doubler - Reverb - Delay - Limiter\n\n"
+        << "15-module vocal chain (Windows VST3):\n"
+        << "Preamp - Gate - Auto-Tune - De-esser - Transient Shaper - Glue Comp -\n"
+        << "Opto - EQ 550 - Resonance - Saturator - Exciter - Doubler - Reverb -\n"
+        << "Delay - Limiter\n\n"
         << "Built with JUCE " << juce::String(JUCE_MAJOR_VERSION) << "."
         << juce::String(JUCE_MINOR_VERSION) << "." << juce::String(JUCE_BUILDNUMBER) << ".\n"
         << "macOS/AU is intentionally not built yet.";
@@ -1191,10 +1249,14 @@ void XaLZaEditor::showPage(int index)
         b->setVisible(currentTab == preTabIndex);
     autoGainBtn.setVisible(currentTab == preTabIndex);
     optoModeSeg->setVisible(currentTab == optoTabIndex);
+    tuneKeySeg->setVisible(currentTab == tuneTabIndex);
+    tuneScaleSeg->setVisible(currentTab == tuneTabIndex);
+    tuneFormantBtn.setVisible(currentTab == tuneTabIndex);
     satCharSeg->setVisible(currentTab == satTabIndex);
     dblVoicesSeg->setVisible(currentTab == dblTabIndex);
     for (auto* c : { (juce::Component*) &revDuckCardTitle, (juce::Component*) &revDuckCurve, (juce::Component*) &revDuckFrame,
-                      (juce::Component*) &revLoadIrBtn, (juce::Component*) &revIrNameLabel })
+                      (juce::Component*) &revLoadIrBtn, (juce::Component*) &revIrNameLabel,
+                      (juce::Component*) &revFreezeBtn, (juce::Component*) revWidthSeg.get() })
         c->setVisible(currentTab == revTabIndex);
     resStyleSeg->setVisible(currentTab == resTabIndex);
     resBandsSeg->setVisible(currentTab == resTabIndex);
@@ -1353,10 +1415,14 @@ void XaLZaEditor::timerCallback()
     // Modules-bypassed summary: which modules are bypassed right now, at a glance.
     if (currentTab == 0)
     {
+        // Order matches XaLZaProcessor::ModuleSlot exactly (Pre, Gate, Tune,
+        // Ess, Trs, Comp, Opto, Eq, Res, Sat, Exc, Dbl, Rev, Dly, Lim) —
+        // indexed directly by slot id below, not just used for the summary
+        // text.
         static const std::vector<std::pair<juce::String, juce::String>> bypassIds = {
-            { XID::PreBypass, "PRE" }, { XID::GateBypass, "GATE" }, { XID::EssBypass, "ESS" },
-            { XID::CompBypass, "COMP" }, { XID::OptoBypass, "OPTO" }, { XID::EqBypass, "EQ" },
-            { XID::ResBypass, "RES" }, { XID::SatBypass, "SAT" }, { XID::DblBypass, "DBL" },
+            { XID::PreBypass, "PRE" }, { XID::GateBypass, "GATE" }, { XID::TuneBypass, "TUNE" }, { XID::EssBypass, "ESS" },
+            { XID::TrsBypass, "TRS" }, { XID::CompBypass, "COMP" }, { XID::OptoBypass, "OPTO" }, { XID::EqBypass, "EQ" },
+            { XID::ResBypass, "RES" }, { XID::SatBypass, "SAT" }, { XID::ExcBypass, "EXC" }, { XID::DblBypass, "DBL" },
             { XID::RevBypass, "REV" }, { XID::DlyBypass, "DLY" }, { XID::LimBypass, "LIM" },
         };
         juce::StringArray bypassed;
@@ -1433,6 +1499,12 @@ void XaLZaEditor::timerCallback()
         for (int i = 0; i < PitchContourView::windowSize; ++i)
             pitchBuf[i] = proc.rawSample((int) XaLZaProcessor::RawPre, prePos - PitchContourView::windowSize + i);
         preView.pushPitch(pitchBuf);
+    }
+    else if (currentTab == tuneTabIndex)
+    {
+        // Both values come straight from the real audio-thread detector/
+        // corrector (runTune) — see TuneView's class comment.
+        tuneView.push(proc.getTuneDetectedHz(), proc.getTuneTargetHz());
     }
     else if (currentTab == gateTabIndex)
     {
@@ -1626,10 +1698,22 @@ void XaLZaEditor::timerCallback()
                 juce::dsp::ProcessSpec probeSpec { srIr, (juce::uint32) lenSamples, 1u };
                 irProbeReverb.prepare(probeSpec);
                 irProbeReverb.reset();
+                irProbeDiffuser.prepare(probeSpec);
+                irProbeDiffuser.reset();
+
+                // Same input-diffusion pass the real engine applies (see
+                // runRev), on the unit impulse, before it hits the engine —
+                // keeps this probe honest about the real onset shape.
+                {
+                    auto* imp = irProbeBuffer.getWritePointer(0);
+                    for (int n = 0; n < lenSamples; ++n)
+                        imp[n] = irProbeDiffuser.processSample(imp[n]);
+                }
 
                 float sizePct = proc.apvts.getRawParameterValue(XID::RevSize)->load() / 100.0f;
                 float decaySec = proc.apvts.getRawParameterValue(XID::RevDecay)->load();
                 float dampingTrimPct = proc.apvts.getRawParameterValue(XID::RevDamping)->load();
+                bool  freezeOn = proc.apvts.getRawParameterValue(XID::RevFreeze)->load() > 0.5f;
                 juce::dsp::Reverb::Parameters rp;
                 rp.roomSize   = juce::jlimit(0.0f, 1.0f, sizePct);
                 rp.damping    = juce::jlimit(0.05f, 0.95f,
@@ -1638,7 +1722,7 @@ void XaLZaEditor::timerCallback()
                 rp.wetLevel   = 1.0f;
                 rp.dryLevel   = 0.0f;
                 rp.width      = 1.0f;
-                rp.freezeMode = 0.0f;
+                rp.freezeMode = freezeOn ? 1.0f : 0.0f;
                 irProbeReverb.setParameters(rp);
 
                 juce::dsp::AudioBlock<float> irBlock(irProbeBuffer);
@@ -1998,8 +2082,16 @@ void XaLZaEditor::resized()
     aboutButton.setBounds(footerArea.removeFromLeft(220).reduced(10, 4));
 
     auto rail = full.removeFromLeft(railW);
+    // Row height shrinks to fit however many tabs there are instead of a
+    // fixed 34px — with 16 tabs (15 modules + MASTER) that fixed height
+    // ran past the rail's actual available height and pushed the last
+    // couple of tab buttons below the visible canvas, invisible and
+    // unclickable at every zoom level (there's no scroll/clip viewport
+    // around this rail). jmin keeps the original 34px look for any tab
+    // count that still fits.
+    int tabRowH = tabButtons.empty() ? 34 : juce::jmin(34, rail.getHeight() / (int) tabButtons.size());
     for (size_t i = 0; i < tabButtons.size(); ++i)
-        tabButtons[i]->setBounds(rail.getX(), rail.getY() + (int) i * 34, rail.getWidth(), 34);
+        tabButtons[i]->setBounds(rail.getX(), rail.getY() + (int) i * tabRowH, rail.getWidth(), tabRowH);
 
     auto content = full.reduced(marginX, marginY);
 
@@ -2101,7 +2193,15 @@ void XaLZaEditor::resized()
             }
             else
             {
-                layoutKnobRow(pageKnobs[(size_t) currentTab], knobArea, fineLabelH, fineKnobW, fineKnobH, fineCellW);
+                // Most bigViz pages' knob count fits fineCellW comfortably;
+                // DLY now has 9 (Drive added) — shrink the cell just enough
+                // to fit n knobs in the available width instead of letting
+                // layoutKnobRow's own jmin() clamp collapse the last one to
+                // zero width (see layoutKnobRow's totalW = jmin(...)).
+                auto& rowKnobs = pageKnobs[(size_t) currentTab];
+                int cellW = rowKnobs.empty() ? fineCellW
+                                              : juce::jmin(fineCellW, knobArea.getWidth() / (int) rowKnobs.size());
+                layoutKnobRow(rowKnobs, knobArea, fineLabelH, fineKnobW, fineKnobH, cellW);
             }
 
             if (currentTab == preTabIndex)
@@ -2203,6 +2303,12 @@ void XaLZaEditor::resized()
             }
             else if (currentTab == compTabIndex)
                 compRatioSeg->setBounds(titleRow.removeFromRight(220).reduced(0, 1));
+            else if (currentTab == revTabIndex)
+            {
+                revWidthSeg->setBounds(titleRow.removeFromRight(230).reduced(0, 1));
+                titleRow.removeFromRight(6);
+                revFreezeBtn.setBounds(titleRow.removeFromRight(64).reduced(0, 1));
+            }
             else if (currentTab == dlyTabIndex)
             {
                 // Pre-Delay first (always visible), then SYNC, then whichever
@@ -2219,6 +2325,14 @@ void XaLZaEditor::resized()
             }
             else if (currentTab == optoTabIndex)
                 optoModeSeg->setBounds(titleRow.removeFromRight(160).reduced(0, 1));
+            else if (currentTab == tuneTabIndex)
+            {
+                tuneFormantBtn.setBounds(titleRow.removeFromRight(80).reduced(0, 1));
+                titleRow.removeFromRight(6);
+                tuneScaleSeg->setBounds(titleRow.removeFromRight(170).reduced(0, 1));
+                titleRow.removeFromRight(6);
+                tuneKeySeg->setBounds(titleRow.removeFromRight(360).reduced(0, 1));
+            }
             else if (currentTab == satTabIndex)
                 satCharSeg->setBounds(titleRow.removeFromRight(260).reduced(0, 1));
             else if (currentTab == dblTabIndex)

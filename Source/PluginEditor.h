@@ -1695,6 +1695,84 @@ private:
     int writePos = 0;
 };
 
+/** Auto-Tune's live trace — two overlaid scrolling pitch curves, both fed
+    directly from the real processor state (XaLZaProcessor::getTuneDetectedHz/
+    getTuneTargetHz, the exact same values runTune's detector/corrector
+    computed on the audio thread — not a second, separately-clocked pitch
+    detector), so you can literally see how hard the correction is working:
+    the muted line is what the voice is actually singing, the accent line
+    is the real note it's being pulled toward right now. Same log-frequency
+    scrolling convention as PitchContourView above, on purpose — this is
+    the same "what does this control actually do to the signal" contract
+    every other visualiser in the plugin follows. */
+class TuneView : public juce::Component
+{
+public:
+    static constexpr int numCols = 140;
+
+    void push(float detectedHz, float targetHz)
+    {
+        historyDetected[(size_t) writePos] = detectedHz;
+        historyTarget[(size_t) writePos]   = targetHz;
+        writePos = (writePos + 1) % numCols;
+        repaint();
+    }
+
+private:
+    void paint(juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        g.setColour(XaLZaColour::panelBg);
+        g.fillRect(b);
+        g.setColour(XaLZaColour::border);
+        g.drawRect(b, 1.0f);
+
+        auto inner = b.reduced(1.0f);
+        if (inner.getWidth() < 4.0f || inner.getHeight() < 4.0f)
+            return;
+
+        constexpr float lowHz = 70.0f, highHz = 1000.0f;
+        auto yFor = [&] (float hz)
+        {
+            float t = std::log(juce::jlimit(lowHz, highHz, hz) / lowHz) / std::log(highHz / lowHz);
+            return inner.getBottom() - t * inner.getHeight();
+        };
+
+        g.setColour(XaLZaColour::borderSoft);
+        for (float refHz : { 110.0f, 220.0f, 440.0f, 880.0f })
+        {
+            float y = yFor(refHz);
+            g.drawLine(inner.getX(), y, inner.getRight(), y, 0.5f);
+        }
+
+        float colW = inner.getWidth() / (float) numCols;
+        auto drawTrace = [&] (const float* hist, juce::Colour colour, float thickness)
+        {
+            juce::Path trace;
+            bool inStroke = false;
+            for (int i = 0; i < numCols; ++i)
+            {
+                size_t idx = (size_t) ((writePos + i) % numCols);
+                float hz = hist[idx];
+                float x = inner.getX() + (float) i * colW;
+                if (hz <= 0.0f) { inStroke = false; continue; }
+                float y = yFor(hz);
+                if (!inStroke) { trace.startNewSubPath(x, y); inStroke = true; }
+                else            trace.lineTo(x, y);
+            }
+            g.setColour(colour);
+            g.strokePath(trace, juce::PathStrokeType(thickness));
+        };
+
+        drawTrace(historyDetected, XaLZaColour::textMuted.withAlpha(0.75f), 1.4f);
+        drawTrace(historyTarget, XaLZaColour::accent, 2.0f);
+    }
+
+    float historyDetected[numCols] = {};
+    float historyTarget[numCols] = {};
+    int writePos = 0;
+};
+
 /** Live vowel/formant tracker — plots the singer's first two vocal-tract
     resonances (F1 = mouth openness, F2 = tongue frontness) as a moving
     dot on the classic IPA vowel trapezoid, the way vocal-coaching
@@ -2820,9 +2898,9 @@ private:
 };
 
 /** MASTER-page signal-chain overview — the brand's own palm icon turned
-    into real navigation: the 12 modules grouped into 5 fronds (INPUT =
-    Pre/Gate/Ess, DYN = Comp/Opto, TONE = Eq/Res/Sat, SPACE = Dbl/Rev/Dly,
-    OUT = Lim), each frond a soft tapered leaf-wash — the same "real
+    into real navigation: the 15 modules grouped into 5 fronds (INPUT =
+    Pre/Gate/Ess/Trs, DYN = Tune/Comp/Opto, TONE = Eq/Res/Sat/Exc,
+    SPACE = Dbl/Rev/Dly, OUT = Lim), each frond a soft tapered leaf-wash — the same "real
     peak-hold width" math paintPalmFrond/RadialHarmonicView already use
     elsewhere — that visibly blooms wider and brighter the louder that
     whole stage's real live output is right now (loudest non-bypassed
@@ -2842,7 +2920,7 @@ private:
 class SignalChainFlowView : public juce::Component
 {
 public:
-    static constexpr int kNumSlots = 12;
+    static constexpr int kNumSlots = 15;
     static constexpr int kNumGroups = 5;
 
     struct NodeState { bool bypassed = false; float levelDb = -100.0f; };
@@ -2864,8 +2942,17 @@ public:
     }
 
 private:
-    static constexpr int groupMembers[kNumGroups][3] = {
-        { 0, 1, 2 }, { 3, 4, -1 }, { 5, 6, 7 }, { 8, 9, 10 }, { 11, -1, -1 }
+    // Slot ids follow XaLZaProcessor::ModuleSlot (Pre=0, Gate=1, Tune=2,
+    // Ess=3, Trs=4, Comp=5, Opto=6, Eq=7, Res=8, Sat=9, Exc=10, Dbl=11,
+    // Rev=12, Dly=13, Lim=14). Auto-Tune (2) joins DYN alongside Comp/Opto
+    // — all three are "correction/shaping" stages. Transient Shaper (4)
+    // joins INPUT (an input-character tool, like Gate/Ess); Exciter (10)
+    // joins TONE (a harmonic/tone tool, like Eq/Res/Sat) — widened from 3
+    // to 4 members per group to fit both without inventing a 6th frond;
+    // groups that don't need the 4th slot simply pad it with -1, same as
+    // OUT already did for Lim.
+    static constexpr int groupMembers[kNumGroups][4] = {
+        { 0, 1, 3, 4 }, { 2, 5, 6, -1 }, { 7, 8, 9, 10 }, { 11, 12, 13, -1 }, { 14, -1, -1, -1 }
     };
 
     void paint(juce::Graphics& g) override
@@ -2896,8 +2983,8 @@ private:
             float cellX0 = area.getX() + cellW * (float) gi;
             float cellCx = cellX0 + cellW * 0.5f;
 
-            int members[3]; int n = 0;
-            for (int k = 0; k < 3; ++k)
+            int members[4]; int n = 0;
+            for (int k = 0; k < 4; ++k)
                 if (groupMembers[gi][k] >= 0) members[n++] = groupMembers[gi][k];
 
             // Loudest currently-active (non-bypassed) member of the
@@ -3005,12 +3092,12 @@ private:
 
     static const char* shortCode(int slotId)
     {
-        static const char* codes[kNumSlots] = { "PRE", "GATE", "ESS", "COMP", "OPTO", "EQ",
-                                                  "RES", "SAT", "DBL", "REV", "DLY", "LIM" };
+        static const char* codes[kNumSlots] = { "PRE", "GATE", "TUNE", "ESS", "TRS", "COMP", "OPTO", "EQ",
+                                                  "RES", "SAT", "EXC", "DBL", "REV", "DLY", "LIM" };
         return codes[(size_t) juce::jlimit(0, kNumSlots - 1, slotId)];
     }
 
-    int order[kNumSlots] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+    int order[kNumSlots] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14 };
     int tabIndexBySlot[kNumSlots] = {};
     std::array<NodeState, kNumSlots> nodes;
 
@@ -3020,7 +3107,7 @@ private:
     int cachedNodeCount = 0;
 };
 
-/** Chain-order popup content: 12 rows, real press-and-drag reordering (not
+/** Chain-order popup content: 15 rows, real press-and-drag reordering (not
     just Up/Down stepping — those stay too, as a precise fallback). Drag a
     row anywhere in the list in one gesture; the other rows animate out of
     the way live to show exactly where it'll land, and the real DSP chain
@@ -3200,7 +3287,7 @@ private:
 
 /**
     Editor layout: a narrow vertical tab rail on the left (an overview tab
-    + the 12 modules, in the mockup's own tab order), and a content area on
+    + the 15 modules, in the mockup's own tab order), and a content area on
     the right that shows either the overview page (Master gain/width,
     meters, goniometer, correlation meter, signal-chain flow and the
     whole-mix spectrum analyser) or the selected module's own fine-tune
@@ -3368,6 +3455,8 @@ private:
     juce::Label preVuTitle;
     GateActivityView gateView;
     juce::Label gateEnvTitle;
+    TuneView tuneView;
+    juce::Label tuneViewTitle;
     DeEsserSpectrumView essView;
     juce::Label essEnvTitle;
     CompressorView compView;
@@ -3385,7 +3474,41 @@ private:
     ReverbView revView;
     juce::Label revDecayTitle;
     // Message-thread-only reverb instance for the Impulse Response trace —
-    // never touches the audio thread. See ReverbView's comment.
+    // never touches the audio thread. See ReverbView's comment. Mirrors the
+    // real engine's input-diffusion stage too (see
+    // XaLZaProcessor::AllpassDiffuser — same stage lengths/gain, duplicated
+    // here since that struct is private to the processor) so the heatmap
+    // shows the real, now-denser onset instead of the pre-diffuser shape.
+    struct IrProbeDiffuser
+    {
+        static constexpr int kStages = 4;
+        static constexpr float stageMs[kStages] = { 4.7f, 3.1f, 6.3f, 2.3f };
+        static constexpr float g = 0.5f;
+        std::array<juce::dsp::DelayLine<float>, kStages> lines;
+        void prepare(const juce::dsp::ProcessSpec& spec)
+        {
+            for (int i = 0; i < kStages; ++i)
+            {
+                auto& l = lines[(size_t) i];
+                l.prepare(spec);
+                l.setMaximumDelayInSamples((int) (stageMs[(size_t) i] * 0.001 * spec.sampleRate) + 8);
+                l.setDelay(stageMs[(size_t) i] * 0.001f * (float) spec.sampleRate);
+            }
+        }
+        void reset() { for (auto& l : lines) l.reset(); }
+        float processSample(float x) noexcept
+        {
+            for (auto& l : lines)
+            {
+                float wD = l.popSample(0);
+                float w  = x + g * wD;
+                x = -g * w + wD;
+                l.pushSample(0, w);
+            }
+            return x;
+        }
+    };
+    IrProbeDiffuser irProbeDiffuser;
     juce::dsp::Reverb irProbeReverb;
     juce::AudioBuffer<float> irProbeBuffer;
     int irProbeCounter = 0;
@@ -3397,7 +3520,13 @@ private:
     // Resolved from tabNames in the constructor.
     int preTabIndex = 1, gateTabIndex = 10, essTabIndex = 11, compTabIndex = 2,
         optoTabIndex = 3, eqTabIndex = 4, resTabIndex = 9, satTabIndex = 5,
-        dblTabIndex = 8, revTabIndex = 6, dlyTabIndex = 7, limTabIndex = 12;
+        dblTabIndex = 8, revTabIndex = 6, dlyTabIndex = 7, limTabIndex = 12,
+        tuneTabIndex = 2,
+        // Fallback defaults only — overwritten by resolveTab() once
+        // tabNames is populated (see PluginEditor.cpp); tabNames appends
+        // "TRS" then "EXC" after the existing 14 entries, so 14/15 here
+        // match that append order.
+        trsTabIndex = 14, excTabIndex = 15;
 
     // "Listen" toggles — Gate and De-esser only, since those are the two
     // modules with a genuinely distinct detector signal worth auditioning.
@@ -3447,6 +3576,18 @@ private:
     std::unique_ptr<SegButtonGroup> preImpedanceSeg;
     std::unique_ptr<SegButtonGroup> optoModeSeg;
 
+    // Auto-Tune's Key (12 semitone-name buttons) and Scale (Major/Minor/
+    // Chromatic) — both real seg-groups binding TuneKey/TuneScale, same
+    // pattern as every other categorical-feeling-but-continuous param
+    // in this plugin (see compRatioSeg's comment).
+    std::unique_ptr<SegButtonGroup> tuneKeySeg;
+    std::unique_ptr<SegButtonGroup> tuneScaleSeg;
+    // Optional LPC-based formant preservation toggle (see
+    // XaLZaProcessor::FormantEnvelope) — off by default, same
+    // TextButton-toggle pattern as revFreezeBtn.
+    juce::TextButton tuneFormantBtn { "FORMANT" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> tuneFormantAttachment;
+
     // "Input Doctor": one-click gain staging. Reads the real measured
     // input RMS (the same reading the IN meter/RMS marker show) and nudges
     // Pre Gain by exactly the dB needed to land the average around a sane
@@ -3486,6 +3627,15 @@ private:
     std::vector<float> loadedIrMono;
     double loadedIrSr = 0.0;
     void loadImpulseResponseFile();
+
+    // Freeze (real infinite-sustain toggle) and Width (real M/S wet-tail
+    // stereo width) — live in REV's title row, same slot other pages use
+    // for their own toggle/seg-group controls (see resized()), so neither
+    // needed to fight the already-packed knob row / ducking card / IR area
+    // below for space.
+    juce::TextButton revFreezeBtn { "FREEZE" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> revFreezeAttachment;
+    std::unique_ptr<SegButtonGroup> revWidthSeg;
 
     // Resonance's Style and Bands seg-groups — real filter-topology
     // changes (Q/detect-width scaling and parallel-notch count), see
@@ -3534,7 +3684,7 @@ private:
     juce::Label bypassSummaryLabel;
 
     // Overview page's signal-chain flow strip — whole-plugin overview of
-    // all 12 modules in their real live order, each glowing with its own
+    // all 15 modules in their real live order, each glowing with its own
     // real output level; click a node to jump to that page. See
     // SignalChainFlowView's own comment for what's genuinely measured.
     SignalChainFlowView chainFlow;

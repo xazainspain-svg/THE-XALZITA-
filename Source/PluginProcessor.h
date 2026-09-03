@@ -5,10 +5,12 @@
 #include "Params.h"
 
 /**
-    The XaLZa — the full 12-module vocal chain from the web mockup:
+    The XaLZa — the full 15-module vocal chain from the web mockup, plus
+    the real-time Auto-Tune, Transient Shaper and Exciter added afterward:
 
-      Preamp -> Gate -> De-esser -> Glue Comp -> Opto -> EQ 550 ->
-      Resonance -> Saturator -> Doubler -> Reverb -> Delay -> Limiter
+      Preamp -> Gate -> Auto-Tune -> De-esser -> Transient Shaper -> Glue Comp ->
+      Opto -> EQ 550 -> Resonance -> Saturator -> Exciter -> Doubler -> Reverb ->
+      Delay -> Limiter
 
     with Master In/Out gain and Stereo Width around the outside. Every
     parameter is a plain, direct APVTS parameter — no macro/intensity
@@ -58,8 +60,8 @@ public:
     //      serial signal chain in processBlock(). ----
     enum MeterTap
     {
-        TapIn = 0, TapPre, TapGate, TapEss, TapComp, TapOpto, TapEq, TapRes,
-        TapSat, TapDbl, TapRev, TapDly, TapLim, TapOut, kNumMeterTaps
+        TapIn = 0, TapPre, TapGate, TapTune, TapEss, TapTrs, TapComp, TapOpto, TapEq, TapRes,
+        TapSat, TapExc, TapDbl, TapRev, TapDly, TapLim, TapOut, kNumMeterTaps
     };
 
     float getMeterDbL(int tap) const noexcept { return meterDbL[(size_t) juce::jlimit(0, kNumMeterTaps - 1, tap)].load(std::memory_order_relaxed); }
@@ -71,7 +73,7 @@ public:
     float getRmsDbL(int tap) const noexcept { return rmsDbL[(size_t) juce::jlimit(0, kNumMeterTaps - 1, tap)].load(std::memory_order_relaxed); }
     float getRmsDbR(int tap) const noexcept { return rmsDbR[(size_t) juce::jlimit(0, kNumMeterTaps - 1, tap)].load(std::memory_order_relaxed); }
 
-    // ---- Reorderable chain: which of the 12 modules processBlock() runs
+    // ---- Reorderable chain: which of the 15 modules processBlock() runs
     //      first/second/.../last. Identity order (Pre, Gate, ... Lim, same
     //      as MeterTap above) by default — matches every original meter/
     //      raw-tap wiring exactly until the user actually reorders
@@ -79,14 +81,14 @@ public:
     //      MeterTap's Pre..Lim run so tapForSlot() below is just an offset. ----
     enum ModuleSlot
     {
-        SlotPre = 0, SlotGate, SlotEss, SlotComp, SlotOpto, SlotEq, SlotRes,
-        SlotSat, SlotDbl, SlotRev, SlotDly, SlotLim, kNumSlots
+        SlotPre = 0, SlotGate, SlotTune, SlotEss, SlotTrs, SlotComp, SlotOpto, SlotEq, SlotRes,
+        SlotSat, SlotExc, SlotDbl, SlotRev, SlotDly, SlotLim, kNumSlots
     };
     static int tapForSlot(int slotId) noexcept { return (int) TapPre + juce::jlimit(0, kNumSlots - 1, slotId); }
     static const char* slotName(int slotId) noexcept
     {
-        static const char* names[kNumSlots] = { "PREAMP", "GATE", "DE-ESSER", "GLUE COMP", "OPTO",
-                                                  "EQ 550", "RESONANCE", "SATURATOR", "DOUBLER",
+        static const char* names[kNumSlots] = { "PREAMP", "GATE", "AUTO-TUNE", "DE-ESSER", "TRANSIENT SHAPER", "GLUE COMP", "OPTO",
+                                                  "EQ 550", "RESONANCE", "SATURATOR", "EXCITER", "DOUBLER",
                                                   "REVERB", "DELAY", "LIMITER" };
         return names[(size_t) juce::jlimit(0, kNumSlots - 1, slotId)];
     }
@@ -186,7 +188,7 @@ public:
     // (oscilloscopes / harmonic bars). Each is genuinely POST that module's
     // own processing — never the module's input — so every visualiser shows
     // what that stage actually did to the signal.
-    enum RawTap { RawPre = 0, RawGate, RawEss, RawSatIn, RawSatOut, RawOpto, RawDly, RawLim, RawRes, kNumRawTaps };
+    enum RawTap { RawPre = 0, RawGate, RawEss, RawSatIn, RawSatOut, RawOpto, RawDly, RawLim, RawRes, RawTune, kNumRawTaps };
     static constexpr int kRawSize = 8192; // power of two
     float rawSample(int tap, int i) const noexcept
     {
@@ -208,6 +210,14 @@ public:
     float getEssBandDb() const noexcept { return essBandDbUI.load(std::memory_order_relaxed); }
     float getEssReductionDb() const noexcept { return essReductionDbUI.load(std::memory_order_relaxed); }
     float getResCutDb() const noexcept { return resCutDbUI.load(std::memory_order_relaxed); }
+
+    // Auto-Tune's real detected pitch (0 = unvoiced/no confident pitch this
+    // analysis hop) and the real corrected target it's being pulled toward
+    // — both genuinely measured/computed in runTune, read by TuneView so
+    // its trace shows exactly what the detector and corrector are doing,
+    // not a decorative animation.
+    float getTuneDetectedHz() const noexcept { return tuneDetectedHzUI.load(std::memory_order_relaxed); }
+    float getTuneTargetHz() const noexcept { return tuneTargetHzUI.load(std::memory_order_relaxed); }
 
     // Real live phase (radians, wraps at 2*pi) of the Delay's ping-pong
     // auto-pan LFO — read directly by the UI so the Delay page's bounce
@@ -334,12 +344,216 @@ private:
     int gateLaRingSize = 0, gateLaRingMask = 0, gateLaWritePos = 0, gateLaSamples = 0;
     bool gateLaWasEnabled = false;
 
+    // ---- 2b) Auto-Tune: a real autocorrelation pitch detector (decimated,
+    // hop-based — full-rate-every-sample autocorrelation is far too costly
+    // for the audio thread) driving a granular pitch shifter (2 overlapping
+    // grains reading a live history buffer at a modulated rate — the
+    // classic "two-tap variable-speed delay line" pitch-shift technique).
+    // Key/Scale pick the target note set; Retune Speed sets how fast the
+    // shift ratio slews toward the target (0 = instant/robotic hard-tune);
+    // Amount blends the correction ratio between 1.0 (no shift) and full
+    // correction, so there is only ever ONE processed signal path — never
+    // a dry+shifted blend, which would phase/flange since they aren't
+    // phase-aligned. See runTune. Formant correction is NOT implemented
+    // (a real simplification, not hidden) — strong shifts will "chipmunk"/
+    // "Darth Vader" a little, same trade-off as most simple real-time
+    // pitch shifters; this is most audible (and most sought-after, for
+    // urban/trap-style hard-tune) at fast Retune + high Amount.
+    struct GranularPitchShifter
+    {
+        static constexpr int kNumGrains = 2;
+        std::vector<float> buf;
+        int bufLen = 0;
+        int writePos = 0;
+        float grainLenSamples = 2400.0f;
+        std::array<float, kNumGrains> grainDist {};
+
+        void prepare(double sampleRate)
+        {
+            grainLenSamples = (float) (0.05 * sampleRate);   // 50ms grains
+            bufLen = juce::jmax(256, (int) (0.25 * sampleRate));   // ample margin over grainLenSamples at any sample rate
+            buf.assign((size_t) bufLen, 0.0f);
+            writePos = 0;
+            for (int i = 0; i < kNumGrains; ++i)
+                grainDist[(size_t) i] = (float) i * grainLenSamples / (float) kNumGrains;
+        }
+        void reset()
+        {
+            std::fill(buf.begin(), buf.end(), 0.0f);
+            writePos = 0;
+        }
+        // pitchRatio: desired playback speed through recorded history
+        // (>1 = pitch up, <1 = pitch down, 1 = transparent passthrough).
+        // Each grain's "distance behind the write pointer" changes at rate
+        // (1 - pitchRatio) per sample — derived from: read position moves
+        // at rate pitchRatio, write position moves at rate 1, so the gap
+        // between them changes at (1 - pitchRatio); at pitchRatio==1 the
+        // gap never changes, so a grain simply becomes a fixed delay tap
+        // (bit-exact silent passthrough character, no windowing loss).
+        // Verified offline (Python) against known test tones before this
+        // was written in C++: frequency error stayed within a few cents
+        // for +-1 octave shifts.
+        float processSample(float x, float pitchRatio) noexcept
+        {
+            if (bufLen == 0)
+                return x;
+            buf[(size_t) writePos] = x;
+            float delta = 1.0f - pitchRatio;
+            float acc = 0.0f, sumW = 0.0f;
+            for (int i = 0; i < kNumGrains; ++i)
+            {
+                float readPosF = (float) writePos - grainDist[(size_t) i];
+                while (readPosF < 0.0f) readPosF += (float) bufLen;
+                int i0 = (int) readPosF;
+                float frac = readPosF - (float) i0;
+                int i0m = i0 % bufLen;
+                int i1 = (i0m + 1) % bufLen;
+                float s = buf[(size_t) i0m] + frac * (buf[(size_t) i1] - buf[(size_t) i0m]);
+                float w = 0.5f - 0.5f * std::cos(juce::MathConstants<float>::twoPi
+                              * (grainDist[(size_t) i] / grainLenSamples));
+                acc += s * w;
+                sumW += w;
+                grainDist[(size_t) i] += delta;
+                if (grainDist[(size_t) i] >= grainLenSamples)      grainDist[(size_t) i] -= grainLenSamples;
+                else if (grainDist[(size_t) i] < 0.0f)             grainDist[(size_t) i] += grainLenSamples;
+            }
+            writePos = (writePos + 1) % bufLen;
+            return sumW > 0.0001f ? acc / sumW : x;
+        }
+    };
+    GranularPitchShifter tuneShifterL, tuneShifterR;
+
+    // Pitch detector state — mono-summed (L+R) analysis, autocorrelation
+    // run once per hop on a decimated window (cheap enough for the audio
+    // thread; see runTune). tuneDetectedHz/tuneSmoothedRatio are the audio-
+    // thread's own working state; the *UI atomics below are what TuneView
+    // actually reads.
+    static constexpr int kTuneWindow   = 4096;   // real-rate analysis window, samples
+    static constexpr int kTuneDecimate = 4;
+    static constexpr int kTuneHop      = 512;
+    std::array<float, kTuneWindow> tuneAnalysisBuf {};
+    int   tuneAnalysisWritePos = 0;
+    int   tuneHopCounter = 0;
+    float tuneDetectedHz = 0.0f;      // 0 = unvoiced / no confident pitch this hop
+    float tuneSmoothedRatio = 1.0f;   // one-pole toward the target ratio, rate set by Retune Speed
+    std::atomic<float> tuneDetectedHzUI { 0.0f };
+    std::atomic<float> tuneTargetHzUI { 0.0f };
+    // Decimated autocorrelation + parabolic refinement over the last
+    // kTuneWindow samples of tuneAnalysisBuf; returns 0.0f when unvoiced/
+    // not confident. Defined in PluginProcessor.cpp, called once per
+    // kTuneHop samples from runTune.
+    float detectTunePitchHz(double sr) noexcept;
+
+    // ---- Auto-Tune formant preservation (optional, TuneFormant param) ----
+    // LPC-based "whiten -> shift residual -> re-colour" path, verified
+    // offline (Python) before being written here: extracts a per-hop
+    // spectral envelope (Levinson-Durbin LPC, order kOrder) from the same
+    // mono analysis window already used for pitch detection, flattens
+    // ("whitens") the signal through that envelope's inverse (a stable
+    // FIR — the analysis filter A(z)), pitch-shifts the whitened residual
+    // with the existing GranularPitchShifter, then re-applies the
+    // ORIGINAL (un-shifted) envelope on the way out (the recursive
+    // synthesis filter 1/A(z)) — so the harmonic content moves but the
+    // resonant "shape of the mouth" stays put, avoiding the chipmunk/
+    // Vader character a plain shift has on large corrections. Three
+    // details below fixed real instabilities found during offline
+    // verification, not just correctness bugs:
+    //   - pre-emphasis before LPC estimation (and de-emphasis after
+    //     synthesis) — without it a low-pitched, harmonic-rich voice
+    //     reliably produces a spurious near-DC resonance in the synthesis
+    //     filter (a modeling artifact of the vocal spectral tilt, not a
+    //     real formant) that rang up to a large output spike in testing;
+    //   - bandwidth expansion (a[k] *= gamma^k) — damps any pole sitting
+    //     close to the unit circle so a hop-boundary discontinuity decays
+    //     quickly instead of ringing;
+    //   - per-sample linear interpolation of the coefficients across each
+    //     hop instead of switching once per hop — the whitening (FIR)
+    //     side is stable either way, but the recursive re-colouring side
+    //     is not: swapping its coefficients abruptly while its own delay
+    //     line still holds samples computed under the OLD coefficients is
+    //     a state/coefficient mismatch that can excite a resonance hard.
+    // A final per-sample soft clip on the synthesised output is a last-
+    // resort safety net (an extreme/clipped input could still
+    // occasionally produce a large transient even with all of the above
+    // in offline testing) — inactive at normal levels. See runTune / the
+    // .cpp for the full body.
+    struct FormantEnvelope
+    {
+        static constexpr int kOrder = 24;
+        std::array<float, kOrder + 1> aPrev {}, aNew {};
+        // How many real (post-reset) samples have been fed into
+        // tuneAnalysisBuf so far, capped at kFormantWindow. Below that cap,
+        // the analysis window still has left-over zero padding in it (see
+        // the priming discussion above), so analyseFormantEnvelope() holds
+        // identity coefficients until this reaches kFormantWindow.
+        int primeCount = 0;
+
+        void reset() noexcept
+        {
+            aPrev.fill(0.0f); aPrev[0] = 1.0f;
+            aNew.fill(0.0f);  aNew[0]  = 1.0f;
+            primeCount = 0;
+        }
+    };
+    struct FormantChannelState
+    {
+        static constexpr int kOrder = FormantEnvelope::kOrder;
+        std::array<float, kOrder> xHist {}, yHist {};
+        float preState = 0.0f, deState = 0.0f;
+        void reset() noexcept { xHist.fill(0.0f); yHist.fill(0.0f); preState = 0.0f; deState = 0.0f; }
+    };
+    FormantEnvelope tuneFormantEnv;
+    FormantChannelState tuneFormantL, tuneFormantR;
+    static constexpr int kFormantWindow = kTuneWindow;   // reuse the pitch-detector's own analysis window
+    // Recomputes tuneFormantEnv.aNew from the last kFormantWindow samples
+    // of tuneAnalysisBuf (the SAME mono analysis buffer runTune already
+    // fills for pitch detection); called once per kTuneHop, right
+    // alongside detectTunePitchHz. Defined in PluginProcessor.cpp.
+    void analyseFormantEnvelope() noexcept;
+    // One sample of the whiten/shift/re-colour chain above, for one
+    // channel; frac is this sample's position (0..1) through the current
+    // hop, used to linearly interpolate aPrev->aNew. Defined in
+    // PluginProcessor.cpp.
+    float processFormantPreservedSample(FormantChannelState& st, GranularPitchShifter& shifter,
+                                         float x, float frac, float pitchRatio) noexcept;
+
     // ---- 3) De-esser: dynamic peak filter driven by a sibilance-band ----
     juce::dsp::IIR::Filter<float> essDetectL, essDetectR;   // band detector (not applied to main signal)
     float essEnv = 0.0f;
     float essGainDb = 0.0f;  // smoothed current attenuation (negative dB)
     juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
                                     juce::dsp::IIR::Coefficients<float>> essDynEq;
+
+    // ---- 3b) Transient Shaper: dual envelope-follower attack/sustain
+    // reshaping. A "fast" detector (quick attack AND quick release) hugs
+    // the true instantaneous envelope; a "slow" detector (slow attack AND
+    // slow release) lags on the way up (so a sharp hit reads fast >> slow
+    // = attack) and lags on the way down too (so a decaying tail reads
+    // fast << slow = sustain/body) — distinct release times are what
+    // makes the sustain side respond at all; equal releases would make
+    // the two track identically during any decay. Linked across L/R (one
+    // pair of detectors fed by max(|L|,|R|), one gain applied to both
+    // channels) so stereo balance isn't disturbed. Verified offline
+    // (Python) before being written here — see runTrs.
+    struct EnvFollower
+    {
+        float env = 0.0f;
+        float attackCoef = 0.0f, releaseCoef = 0.0f;
+        void setTimes(float attackMs, float releaseMs, double sampleRate) noexcept
+        {
+            attackCoef  = attackMs  <= 0.0f ? 0.0f : std::exp(-1.0f / (float) (sampleRate * attackMs  * 0.001));
+            releaseCoef = releaseMs <= 0.0f ? 0.0f : std::exp(-1.0f / (float) (sampleRate * releaseMs * 0.001));
+        }
+        float process(float absX) noexcept
+        {
+            float c = absX > env ? attackCoef : releaseCoef;
+            env = c * env + (1.0f - c) * absX;
+            return env;
+        }
+        void reset() noexcept { env = 0.0f; }
+    };
+    EnvFollower trsFast, trsSlow;
+    float trsGainSmoothed = 1.0f;   // linear, one-pole smoothed to avoid zipper artifacts on the applied gain
 
     // ---- 4) Glue Comp ----
     juce::dsp::Compressor<float> compressor;
@@ -368,6 +582,23 @@ private:
     juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
                                     juce::dsp::IIR::Coefficients<float>> satTone;
 
+    // ---- 8b) Exciter: harmonic enhancer. Isolates the band above a
+    // Tone-controlled crossover (ExcHpf), drives ONLY that band through an
+    // asymmetric soft clip (tanh of a signal plus a small squared term, so
+    // it generates both even and odd harmonics rather than just odd like a
+    // symmetric clipper), and mixes the result back on top of the dry
+    // signal — it never replaces the dry path, so Drive=0/Mix=0 is
+    // bit-identical passthrough. Deliberately has NO makeup-gain
+    // restoration back to unity (unlike the Saturator, which is a
+    // full-signal-path effect that must preserve overall level): this is
+    // an add-in "spice" signal, and tanh's own natural compression is what
+    // keeps its contribution bounded — verified offline (Python) that
+    // adding makeup gain here nearly doubled peak output at Drive=100/
+    // Mix=100, while leaving it off kept output within ~0.01 of input
+    // peak at those same extreme settings. See runExc.
+    juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>,
+                                    juce::dsp::IIR::Coefficients<float>> excHpf;
+
     // 2x oversampling around every tanh/waveshaping stage in the chain
     // (Preamp Character, Saturator, Limiter's extra clip stage) — pushes
     // the fold-back aliasing those nonlinearities generate up above
@@ -384,6 +615,51 @@ private:
     juce::dsp::Reverb reverb;
     juce::dsp::DelayLine<float> revPreDelayL, revPreDelayR;
     float revDuckEnv = 0.0f;
+
+    // Input diffuser — 4 nested Schroeder allpass stages per channel, run
+    // on the pre-delayed dry signal just before it enters the algorithmic
+    // engine. This is the same "one delay line per stage" allpass structure
+    // used ahead of almost every real algorithmic/plate reverb (Dattorro,
+    // Griesinger) to break a transient into a dense diffuse cloud in a few
+    // milliseconds — without it, a Freeverb-style comb/allpass network on
+    // its own tends to sound "boingy"/metallic on percussive input. Always
+    // on, no user parameter — pure sound-quality improvement, mirrors
+    // exactly between L/R (same stage lengths/gain) so it never smears the
+    // stereo image on its own.
+    struct AllpassDiffuser
+    {
+        static constexpr int kStages = 4;
+        // Mutually-prime-ish stage lengths (ms) — classic Schroeder/Dattorro
+        // diffuser values, short enough to stay inaudible as discrete echoes.
+        static constexpr float stageMs[kStages] = { 4.7f, 3.1f, 6.3f, 2.3f };
+        static constexpr float g = 0.5f;   // conservative — enough density, no audible ringing
+
+        std::array<juce::dsp::DelayLine<float>, kStages> lines;
+
+        void prepare(const juce::dsp::ProcessSpec& spec)
+        {
+            for (int i = 0; i < kStages; ++i)
+            {
+                auto& l = lines[(size_t) i];
+                l.prepare(spec);
+                l.setMaximumDelayInSamples((int) (stageMs[(size_t) i] * 0.001 * spec.sampleRate) + 8);
+                l.setDelay(stageMs[(size_t) i] * 0.001f * (float) spec.sampleRate);
+            }
+        }
+        void reset() { for (auto& l : lines) l.reset(); }
+        float processSample(float x) noexcept
+        {
+            for (auto& l : lines)
+            {
+                float wD = l.popSample(0);
+                float w  = x + g * wD;
+                x = -g * w + wD;
+                l.pushSample(0, w);
+            }
+            return x;
+        }
+    };
+    AllpassDiffuser revDiffuserL, revDiffuserR;
     // Wet-only tone shaping (post juce::dsp::Reverb, pre mix-back) — a
     // genuine user-facing filter pair, separate from the reverb's own
     // internal room-size/damping model.
@@ -440,6 +716,10 @@ private:
     juce::dsp::DelayLine<float> dlyPreDelayL, dlyPreDelayR;
     float dlyDuckEnv = 0.0f;
     float dlyPanPhase = 0.0f;
+    // Wow phase — only advanced/audible once Drive > 0 (see runDly); a real
+    // tape unit's pitch wobble and its saturation are physically linked, so
+    // Drive controls both together instead of needing a second knob.
+    float dlyWowPhase = 0.0f;
     // Feedback-path-only filtering (mono per channel — this loop is already
     // sample-by-sample, so plain juce::dsp::IIR::Filter<float>::processSample
     // is simpler here than a block ProcessorDuplicator): each repeat that

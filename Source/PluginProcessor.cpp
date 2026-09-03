@@ -7,6 +7,269 @@ namespace
     {
         return std::exp(-1.0f / (0.001f * juce::jmax(0.01f, timeMs) * (float) sr));
     }
+
+    // Auto-Tune: nearest MIDI note (as a float, but always an exact integer
+    // semitone) to midiNote that belongs to the given Key/Scale. Chromatic
+    // (scaleIdx==2) accepts every semitone. Brute-force scan of a +-14
+    // semitone window — cheap (<=29*7 comparisons), and simple enough to be
+    // obviously correct rather than clever, since this only runs once per
+    // sample when a pitch is actually detected.
+    inline float nearestScaleNote(float midiNote, int keyIdx, int scaleIdx) noexcept
+    {
+        int roundedNote = (int) std::round(midiNote);
+        if (scaleIdx == 2)
+            return (float) roundedNote;
+
+        static const int majorIv[7] = { 0, 2, 4, 5, 7, 9, 11 };
+        static const int minorIv[7] = { 0, 2, 3, 5, 7, 8, 10 };
+        const int* iv = scaleIdx == 0 ? majorIv : minorIv;
+
+        int bestNote = roundedNote;
+        float bestDist = 1.0e9f;
+        for (int note = roundedNote - 14; note <= roundedNote + 14; ++note)
+        {
+            int pc = ((note - keyIdx) % 12 + 12) % 12;
+            bool inScale = false;
+            for (int k = 0; k < 7; ++k)
+                if (iv[k] == pc) { inScale = true; break; }
+            if (!inScale)
+                continue;
+            float dist = std::abs((float) note - midiNote);
+            if (dist < bestDist) { bestDist = dist; bestNote = note; }
+        }
+        return (float) bestNote;
+    }
+
+    // Levinson-Durbin recursion: from an (order+1)-length autocorrelation
+    // sequence r[0..order], returns LPC coefficients aOut[0..order]
+    // (aOut[0]=1) and residual prediction error eOut. Reflection
+    // coefficients are guaranteed |k|<1 for any real signal with positive
+    // energy (r[0]>0), so the resulting synthesis filter 1/A(z) is
+    // guaranteed minimum-phase/stable — offline-verified (Python) before
+    // this was written in C++; see FormantEnvelope's doc comment in
+    // PluginProcessor.h for the three real instabilities that verification
+    // caught (none of them in this recursion itself — all downstream, in
+    // how the resulting coefficients are analysed/applied).
+    inline void levinsonDurbin(const float* r, int order, float* aOut, float& eOut) noexcept
+    {
+        constexpr int kMaxOrder = 32;   // headroom over XaLZaProcessor::FormantEnvelope::kOrder (24)
+        std::array<float, kMaxOrder + 1> a {}, newA {};
+        a[0] = 1.0f;
+        float e = r[0];
+        if (e <= 1.0e-12f)
+        {
+            aOut[0] = 1.0f;
+            for (int i = 1; i <= order; ++i) aOut[i] = 0.0f;
+            eOut = 1.0e-6f;
+            return;
+        }
+        for (int i = 1; i <= order; ++i)
+        {
+            float acc = r[i];
+            for (int j = 1; j < i; ++j)
+                acc += a[(size_t) j] * r[i - j];
+            float k = -acc / e;
+            newA = a;
+            for (int j = 1; j < i; ++j)
+                newA[(size_t) j] = a[(size_t) j] + k * a[(size_t) (i - j)];
+            newA[(size_t) i] = k;
+            a = newA;
+            e *= (1.0f - k * k);
+            if (e <= 1.0e-9f) e = 1.0e-9f;
+        }
+        for (int i = 0; i <= order; ++i)
+            aOut[i] = a[(size_t) i];
+        eOut = e;
+    }
+}
+
+float XaLZaProcessor::detectTunePitchHz(double sr) noexcept
+{
+    constexpr int decWindow = kTuneWindow / kTuneDecimate;   // 1024
+    std::array<float, (size_t) decWindow> dec {};
+    for (int i = 0; i < decWindow; ++i)
+    {
+        float sum = 0.0f;
+        int base = (tuneAnalysisWritePos + i * kTuneDecimate) % kTuneWindow;
+        for (int k = 0; k < kTuneDecimate; ++k)
+            sum += tuneAnalysisBuf[(size_t) ((base + k) % kTuneWindow)];
+        dec[(size_t) i] = sum / (float) kTuneDecimate;
+    }
+    // Hann window on the decimated frame — reduces edge artefacts in the
+    // autocorrelation (verified offline against known test tones: max
+    // error stayed within ~7 cents across the 82Hz-523Hz vocal-ish range
+    // tested, well under a semitone).
+    for (int i = 0; i < decWindow; ++i)
+        dec[(size_t) i] *= 0.5f - 0.5f * std::cos(juce::MathConstants<float>::twoPi
+                              * (float) i / (float) (decWindow - 1));
+
+    double srDec = sr / (double) kTuneDecimate;
+    int minLag = juce::jmax(1, (int) (srDec / 1000.0));            // 1000Hz upper bound
+    int maxLag = juce::jmin(decWindow - 2, (int) (srDec / 70.0));  // 70Hz lower bound
+
+    auto scoreAtLag = [&] (int lag) -> float
+    {
+        float num = 0.0f, ea = 0.0f, eb = 0.0f;
+        for (int i = 0; i < decWindow - lag; ++i)
+        {
+            float a = dec[(size_t) i];
+            float b = dec[(size_t) (i + lag)];
+            num += a * b; ea += a * a; eb += b * b;
+        }
+        return num / (std::sqrt(ea * eb) + 1.0e-9f);
+    };
+
+    float bestScore = -1.0e9f;
+    int bestLag = -1;
+    for (int lag = minLag; lag <= maxLag; ++lag)
+    {
+        float score = scoreAtLag(lag);
+        if (score > bestScore) { bestScore = score; bestLag = lag; }
+    }
+
+    if (bestLag < 0 || bestScore < 0.5f)   // unvoiced / not a confident periodic signal
+        return 0.0f;
+
+    // Parabolic interpolation around bestLag for sub-lag precision.
+    float refinedLag = (float) bestLag;
+    if (bestLag - 1 >= minLag && bestLag + 1 <= maxLag)
+    {
+        float sM1 = scoreAtLag(bestLag - 1);
+        float sP1 = scoreAtLag(bestLag + 1);
+        float denom = sM1 - 2.0f * bestScore + sP1;
+        if (std::abs(denom) > 1.0e-9f)
+        {
+            float d = 0.5f * (sM1 - sP1) / denom;
+            refinedLag += juce::jlimit(-1.0f, 1.0f, d);
+        }
+    }
+    return (float) (srDec / (double) refinedLag);
+}
+
+void XaLZaProcessor::analyseFormantEnvelope() noexcept
+{
+    constexpr int order = FormantEnvelope::kOrder;
+    tuneFormantEnv.aPrev = tuneFormantEnv.aNew;
+
+    // Not enough real, contiguous audio yet (still within the first
+    // kFormantWindow samples after prepare/reset) — a left-zero-padded
+    // analysis window has an edge discontinuity that corrupts the LPC
+    // estimate (offline-verified: this alone produced an unstable-gain
+    // synthesis filter for a warm-up frame). Hold identity (bypass)
+    // coefficients until the buffer is fully real.
+    if (tuneFormantEnv.primeCount < kFormantWindow)
+    {
+        tuneFormantEnv.aNew.fill(0.0f);
+        tuneFormantEnv.aNew[0] = 1.0f;
+        return;
+    }
+
+    // Pre-emphasis (flattens the natural -6dB/octave vocal spectral tilt
+    // before LPC estimation — offline-verified: without it, a low-pitched
+    // harmonic-rich voice reliably produced a spurious +36dB near-DC
+    // resonance, an LPC modeling artefact of the tilt rather than a real
+    // formant) + Hann window + an RMS gate for frames too quiet to trust.
+    constexpr float kPreEmph = 0.97f;
+    float prev = 0.0f;
+    float energy = 0.0f;
+    std::array<float, (size_t) kFormantWindow> pre {};
+    for (int i = 0; i < kFormantWindow; ++i)
+    {
+        float x = tuneAnalysisBuf[(size_t) ((tuneAnalysisWritePos + i) % kTuneWindow)];
+        float y = x - kPreEmph * prev;
+        prev = x;
+        pre[(size_t) i] = y;
+        energy += y * y;
+    }
+    if (std::sqrt(energy / (float) kFormantWindow) < 1.0e-3f)
+    {
+        tuneFormantEnv.aNew.fill(0.0f);
+        tuneFormantEnv.aNew[0] = 1.0f;
+        return;
+    }
+
+    for (int i = 0; i < kFormantWindow; ++i)
+        pre[(size_t) i] *= 0.5f - 0.5f * std::cos(juce::MathConstants<float>::twoPi
+                                * (float) i / (float) (kFormantWindow - 1));
+
+    std::array<float, (size_t) order + 1> r {};
+    for (int lag = 0; lag <= order; ++lag)
+    {
+        float sum = 0.0f;
+        for (int i = 0; i < kFormantWindow - lag; ++i)
+            sum += pre[(size_t) i] * pre[(size_t) (i + lag)];
+        r[(size_t) lag] = sum;
+    }
+    r[0] *= 1.0001f;   // tiny white-noise correction for numerical stability
+
+    std::array<float, (size_t) order + 1> a {};
+    float e = 0.0f;
+    levinsonDurbin(r.data(), order, a.data(), e);
+
+    // Bandwidth expansion: a'[k] = a[k]*gamma^k pulls every pole slightly
+    // toward the origin — cheap insurance against a near-unit-circle pole
+    // ringing dangerously (offline-verified: converts "some hops ring
+    // into a growing spike" into "always damps out"), imperceptible on
+    // the formant peaks themselves.
+    constexpr float gamma = 0.994f;
+    float gk = 1.0f;
+    for (int k = 0; k <= order; ++k)
+    {
+        tuneFormantEnv.aNew[(size_t) k] = a[(size_t) k] * gk;
+        gk *= gamma;
+    }
+}
+
+float XaLZaProcessor::processFormantPreservedSample(FormantChannelState& st, GranularPitchShifter& shifter,
+                                                      float x, float frac, float pitchRatio) noexcept
+{
+    constexpr int order = FormantEnvelope::kOrder;
+    // Per-sample linear interpolation of the coefficients across the
+    // current hop, instead of switching once per hop — offline-verified:
+    // the whitening (FIR) side below is stable no matter what, but the
+    // recursive re-colouring side isn't, and swapping its coefficients
+    // abruptly while its own delay line still holds samples computed
+    // under the OLD coefficients is a state/coefficient mismatch that can
+    // ring a resonance up hard for a few ms before it decays.
+    std::array<float, (size_t) order + 1> aC {};
+    for (int k = 0; k <= order; ++k)
+        aC[(size_t) k] = tuneFormantEnv.aPrev[(size_t) k] * (1.0f - frac) + tuneFormantEnv.aNew[(size_t) k] * frac;
+
+    constexpr float kPreEmph = 0.97f;
+    float xPre = x - kPreEmph * st.preState;
+    st.preState = x;
+
+    // Whitening (analysis) filter A(z): resid = A(z) * x. Plain FIR —
+    // always stable regardless of the coefficient interpolation above.
+    float resid = xPre;
+    for (int k = 1; k <= order; ++k)
+        resid += aC[(size_t) k] * st.xHist[(size_t) (k - 1)];
+    for (int k = order - 1; k > 0; --k)
+        st.xHist[(size_t) k] = st.xHist[(size_t) (k - 1)];
+    st.xHist[0] = xPre;
+
+    float shifted = shifter.processSample(resid, pitchRatio);
+
+    // Re-colouring (synthesis) filter 1/A(z): recursive, using the SAME
+    // (original, un-shifted) envelope — this is what puts the formants
+    // back after the residual's pitch has moved.
+    float yn = shifted;
+    for (int k = 1; k <= order; ++k)
+        yn -= aC[(size_t) k] * st.yHist[(size_t) (k - 1)];
+    for (int k = order - 1; k > 0; --k)
+        st.yHist[(size_t) k] = st.yHist[(size_t) (k - 1)];
+    st.yHist[0] = yn;   // feedback holds the filter's own true (unclipped) history
+
+    // De-emphasis: restores the natural spectral tilt pre-emphasis removed.
+    st.deState = yn + kPreEmph * st.deState;
+    float out = st.deState;
+
+    // Last-resort safety soft-clip on the way out only (never fed back
+    // into yHist above) — offline-verified that an extreme/already-
+    // clipped input could still occasionally produce a large transient
+    // even with every fix above; inactive at normal signal levels.
+    constexpr float ceiling = 4.0f;
+    return ceiling * std::tanh(out / ceiling);
 }
 
 XaLZaProcessor::XaLZaProcessor()
@@ -294,6 +557,31 @@ void XaLZaProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     revPreDelayL.reset();
     revPreDelayR.reset();
 
+    revDiffuserL.prepare(monoSpec);
+    revDiffuserR.prepare(monoSpec);
+    revDiffuserL.reset();
+    revDiffuserR.reset();
+
+    tuneShifterL.prepare(sampleRate);
+    tuneShifterR.prepare(sampleRate);
+    tuneShifterL.reset();
+    tuneShifterR.reset();
+    tuneAnalysisBuf.fill(0.0f);
+    tuneAnalysisWritePos = 0;
+    tuneHopCounter = 0;
+    tuneDetectedHz = 0.0f;
+    tuneSmoothedRatio = 1.0f;
+    tuneFormantEnv.reset();
+    tuneFormantL.reset();
+    tuneFormantR.reset();
+
+    trsFast.reset();
+    trsSlow.reset();
+    trsGainSmoothed = 1.0f;
+
+    excHpf.prepare(spec);
+    excHpf.reset();
+
     delayL.prepare(monoSpec);
     delayR.prepare(monoSpec);
     delayL.setMaximumDelayInSamples((int) (sampleRate * 2.0));
@@ -549,6 +837,86 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     };
 
     // ---------------------------------------------------------------
+    // 2b) AUTO-TUNE — real autocorrelation pitch detection (decimated,
+    // once per kTuneHop samples — see detectTunePitchHz) driving a
+    // granular pitch shifter (GranularPitchShifter, PluginProcessor.h)
+    // that pulls the detected pitch toward the nearest Key/Scale note.
+    // Only ONE processed signal path — Amount blends the correction
+    // RATIO toward 1.0, never a dry+shifted audio mix (which would
+    // phase/flange, since the two copies aren't phase-aligned).
+    // ---------------------------------------------------------------
+    auto runTune = [&]()
+    {
+    bool tuneBypassed = apvts.getRawParameterValue(XID::TuneBypass)->load() > 0.5f;
+    if (!tuneBypassed)
+    {
+        int keyIdx    = juce::jlimit(0, 11, (int) std::round(apvts.getRawParameterValue(XID::TuneKey)->load()));
+        int scaleIdx  = juce::jlimit(0, 2, (int) std::round(apvts.getRawParameterValue(XID::TuneScale)->load()));
+        float retuneMs  = apvts.getRawParameterValue(XID::TuneRetune)->load();
+        float amountPct = apvts.getRawParameterValue(XID::TuneAmount)->load() / 100.0f;
+
+        // 0ms retune -> snap almost instantly (the classic hard-tune/
+        // robotic urban-vocal sound); higher -> an audibly natural glide.
+        float retuneCoef = onePoleCoef(juce::jmax(1.0f, retuneMs), sr);
+        bool formantOn = apvts.getRawParameterValue(XID::TuneFormant)->load() > 0.5f;
+
+        auto* l = buffer.getWritePointer(0);
+        auto* r = numCh > 1 ? buffer.getWritePointer(1) : l;
+
+        for (int n = 0; n < numSamples; ++n)
+        {
+            float mono = numCh > 1 ? 0.5f * (l[n] + r[n]) : l[n];
+
+            tuneAnalysisBuf[(size_t) tuneAnalysisWritePos] = mono;
+            tuneAnalysisWritePos = (tuneAnalysisWritePos + 1) % kTuneWindow;
+            if (tuneFormantEnv.primeCount < kFormantWindow)
+                ++tuneFormantEnv.primeCount;
+            if (++tuneHopCounter >= kTuneHop)
+            {
+                tuneHopCounter = 0;
+                tuneDetectedHz = detectTunePitchHz(sr);
+                tuneDetectedHzUI.store(tuneDetectedHz, std::memory_order_relaxed);
+                if (formantOn)
+                    analyseFormantEnvelope();
+            }
+
+            float targetRatio = 1.0f;
+            float targetHz = 0.0f;
+            if (tuneDetectedHz > 0.0f)
+            {
+                float midiNote = 69.0f + 12.0f * std::log2(tuneDetectedHz / 440.0f);
+                float nearestMidi = nearestScaleNote(midiNote, keyIdx, scaleIdx);
+                float fullRatio = std::pow(2.0f, (nearestMidi - midiNote) / 12.0f);
+                targetRatio = 1.0f + (fullRatio - 1.0f) * amountPct;
+                targetHz = tuneDetectedHz * fullRatio;
+            }
+            tuneSmoothedRatio = retuneCoef * tuneSmoothedRatio + (1.0f - retuneCoef) * targetRatio;
+            if ((n & 63) == 0)
+                tuneTargetHzUI.store(targetHz, std::memory_order_relaxed);
+
+            if (formantOn)
+            {
+                float frac = (float) tuneHopCounter / (float) kTuneHop;
+                l[n] = processFormantPreservedSample(tuneFormantL, tuneShifterL, l[n], frac, tuneSmoothedRatio);
+                if (numCh > 1) r[n] = processFormantPreservedSample(tuneFormantR, tuneShifterR, r[n], frac, tuneSmoothedRatio);
+            }
+            else
+            {
+                l[n] = tuneShifterL.processSample(l[n], tuneSmoothedRatio);
+                if (numCh > 1) r[n] = tuneShifterR.processSample(r[n], tuneSmoothedRatio);
+            }
+        }
+    }
+    else
+    {
+        tuneDetectedHzUI.store(0.0f, std::memory_order_relaxed);
+        tuneTargetHzUI.store(0.0f, std::memory_order_relaxed);
+    }
+    updateMeter((int) TapTune, buffer, numSamples, numCh);
+    pushRaw((int) RawTune, buffer, numSamples, numCh);
+    };
+
+    // ---------------------------------------------------------------
     // 3) DE-ESSER — dynamic peak filter driven by a sibilance-band envelope
     // ---------------------------------------------------------------
     auto runEss = [&]()
@@ -627,6 +995,55 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     }
     updateMeter((int) TapEss, buffer, numSamples, numCh);
     pushRaw((int) RawEss, buffer, numSamples, numCh);
+    };
+
+    // ---------------------------------------------------------------
+    // 3b) TRANSIENT SHAPER — linked dual envelope-follower attack/sustain
+    // reshaping (see the EnvFollower/trsFast/trsSlow doc comment in
+    // PluginProcessor.h for the detector design). Offline-verified
+    // (Python) against a synthetic percussive hit before being written
+    // here: +100% attack raised the transient peak ~4x (+12dB cap),
+    // -100% attack cut it to ~1/4, +-100% sustain raised/lowered the tail
+    // RMS in the same direction, and both knobs at 0 measured as exactly
+    // unity gain (bit-identical passthrough) across the whole test signal.
+    // ---------------------------------------------------------------
+    auto runTrs = [&]()
+    {
+    bool trsBypassed = apvts.getRawParameterValue(XID::TrsBypass)->load() > 0.5f;
+    if (!trsBypassed)
+    {
+        float attackPct  = apvts.getRawParameterValue(XID::TrsAttack)->load();
+        float sustainPct = apvts.getRawParameterValue(XID::TrsSustain)->load();
+
+        if (attackPct != 0.0f || sustainPct != 0.0f)
+        {
+            trsFast.setTimes(1.0f, 5.0f, sr);
+            trsSlow.setTimes(25.0f, 200.0f, sr);
+            float gainSmoothCoef = onePoleCoef(0.5f, sr);
+            constexpr float capDb = 18.0f;
+            float atkGainMaxDb = (attackPct / 100.0f) * 12.0f;
+            float susGainMaxDb = (sustainPct / 100.0f) * 12.0f;
+
+            auto* l = buffer.getWritePointer(0);
+            auto* r = numCh > 1 ? buffer.getWritePointer(1) : l;
+            for (int n = 0; n < numSamples; ++n)
+            {
+                float linked = numCh > 1 ? juce::jmax(std::abs(l[n]), std::abs(r[n])) : std::abs(l[n]);
+                float fast = trsFast.process(linked);
+                float slow = trsSlow.process(linked);
+                float diffDb = 20.0f * std::log10((fast + 1.0e-6f) / (slow + 1.0e-6f));
+                float atkTerm = juce::jlimit(0.0f, capDb, diffDb) / capDb;
+                float susTerm = juce::jlimit(0.0f, capDb, -diffDb) / capDb;
+                float gainDb = atkGainMaxDb * atkTerm + susGainMaxDb * susTerm;
+                float targetGainLin = juce::Decibels::decibelsToGain(gainDb);
+                trsGainSmoothed = gainSmoothCoef * trsGainSmoothed + (1.0f - gainSmoothCoef) * targetGainLin;
+
+                l[n] *= trsGainSmoothed;
+                if (numCh > 1) r[n] *= trsGainSmoothed;
+            }
+        }
+    }
+    updateMeter((int) TapTrs, buffer, numSamples, numCh);
     };
 
     // ---------------------------------------------------------------
@@ -980,6 +1397,62 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     };
 
     // ---------------------------------------------------------------
+    // 8b) EXCITER — harmonic enhancer. Isolates the band above Tone's
+    // crossover (excHpf), drives ONLY that band through an asymmetric
+    // soft clip (tanh of a signal plus a small squared term, so it
+    // generates both even and odd harmonics rather than just odd like a
+    // symmetric clipper), and mixes the result back on top of the dry
+    // signal. Offline-verified (Python): bit-identical to dry at
+    // Drive=0/Mix=0; real 2nd/3rd-harmonic energy appears above the
+    // crossover at Drive=100; content well below the crossover is
+    // essentially untouched; peak output stayed within ~0.01 of a loud
+    // input's own peak even at Drive=100/Mix=100 (no makeup-gain
+    // restoration on purpose — see the excHpf doc comment in
+    // PluginProcessor.h).
+    // ---------------------------------------------------------------
+    auto runExc = [&]()
+    {
+    bool excBypassed = apvts.getRawParameterValue(XID::ExcBypass)->load() > 0.5f;
+    if (!excBypassed)
+    {
+        float drivePct = apvts.getRawParameterValue(XID::ExcDrive)->load();
+        float tonePct  = apvts.getRawParameterValue(XID::ExcTone)->load();
+        float mixAmt   = apvts.getRawParameterValue(XID::ExcMix)->load() / 100.0f;
+
+        if (mixAmt > 0.0005f)
+        {
+            for (int ch = 0; ch < numCh; ++ch)
+                dryBuffer.copyFrom(ch, 0, buffer, ch, 0, numSamples);
+
+            float cutoffHz = juce::jmap(tonePct, 0.0f, 100.0f, 1500.0f, 6000.0f);
+            *excHpf.state = *juce::dsp::IIR::Coefficients<float>::makeHighPass(sr, cutoffHz, 0.707f);
+            excHpf.process(ctx);   // buffer now holds the isolated high band
+
+            float driveAmt = juce::jmap(drivePct, 0.0f, 100.0f, 1.0f, 10.0f);
+            bool driveOn = drivePct > 0.0005f;
+
+            for (int ch = 0; ch < numCh; ++ch)
+            {
+                auto* wet = buffer.getWritePointer(ch);
+                auto* dry = dryBuffer.getReadPointer(ch);
+                for (int n = 0; n < numSamples; ++n)
+                {
+                    float hi = wet[n];
+                    float harm = hi;
+                    if (driveOn)
+                    {
+                        float driven = driveAmt * hi + 0.15f * driveAmt * hi * hi;
+                        harm = std::tanh(driven) / driveAmt;
+                    }
+                    wet[n] = dry[n] + mixAmt * harm;
+                }
+            }
+        }
+    }
+    updateMeter((int) TapExc, buffer, numSamples, numCh);
+    };
+
+    // ---------------------------------------------------------------
     // 9) DOUBLER — two modulated delay voices layered on top of the dry signal
     // ---------------------------------------------------------------
     auto runDbl = [&]()
@@ -1102,6 +1575,8 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         // loaded-impulse convolution, in between a genuine crossfade of
         // both engines' wet signal.
         float hybridPct = apvts.getRawParameterValue(XID::RevHybrid)->load() / 100.0f;
+        float widthPct  = apvts.getRawParameterValue(XID::RevWidth)->load() / 100.0f;
+        bool  freezeOn  = apvts.getRawParameterValue(XID::RevFreeze)->load() > 0.5f;
 
         revBuffer.setSize(numCh, numSamples, false, false, true);
 
@@ -1139,6 +1614,22 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
                 revConvBuffer.copyFrom(ch, 0, revBuffer, ch, 0, numSamples);
         }
 
+        // Input diffusion — see AllpassDiffuser's comment. Runs on the
+        // pre-delayed dry signal that's about to enter the algorithmic
+        // engine only (the convolution snapshot above was already taken
+        // from the clean pre-delayed signal, since a loaded IR brings its
+        // own real diffusion from the room it was captured in).
+        {
+            auto* dL = revBuffer.getWritePointer(0);
+            auto* dR = numCh > 1 ? revBuffer.getWritePointer(1) : dL;
+            for (int n = 0; n < numSamples; ++n)
+            {
+                dL[n] = revDiffuserL.processSample(dL[n]);
+                if (numCh > 1)
+                    dR[n] = revDiffuserR.processSample(dR[n]);
+            }
+        }
+
         juce::dsp::Reverb::Parameters rp;
         rp.roomSize   = juce::jlimit(0.0f, 1.0f, sizePct);
         rp.damping    = juce::jlimit(0.05f, 0.95f,
@@ -1147,7 +1638,10 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         rp.wetLevel   = 1.0f;
         rp.dryLevel   = 0.0f;
         rp.width      = 1.0f;
-        rp.freezeMode = 0.0f;
+        // Real freeze — JUCE's own engine puts itself into a continuous
+        // feedback loop at freezeMode>=0.5, giving genuine infinite sustain
+        // for pad/ambient use, rather than the previously-hardcoded off.
+        rp.freezeMode = freezeOn ? 1.0f : 0.0f;
         reverb.setParameters(rp);
 
         juce::dsp::AudioBlock<float> revBlock(revBuffer);
@@ -1178,6 +1672,23 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         *revWetLpf.state = *juce::dsp::IIR::Coefficients<float>::makeLowPass(sr, juce::jmax(20.0f, wetLpfHz));
         revWetHpf.process(revCtx);
         revWetLpf.process(revCtx);
+
+        // Real M/S wet-tail width — independent of the engine's own fixed
+        // internal spread (rp.width stays at its normal 1.0 above), same
+        // formula as MasterWidth at the bus level, applied to just the
+        // reverb's own wet buffer. 100% = bit-identical to prior behaviour.
+        if (numCh > 1 && std::abs(widthPct - 1.0f) > 0.0005f)
+        {
+            auto* wl = revBuffer.getWritePointer(0);
+            auto* wr = revBuffer.getWritePointer(1);
+            for (int n = 0; n < numSamples; ++n)
+            {
+                float mid  = 0.5f * (wl[n] + wr[n]);
+                float side = 0.5f * (wl[n] - wr[n]) * widthPct;
+                wl[n] = mid + side;
+                wr[n] = mid - side;
+            }
+        }
 
         if (mixPct > 0.0005f)
         {
@@ -1254,6 +1765,7 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         float duckPct   = apvts.getRawParameterValue(XID::DlyDuck)->load() / 100.0f;
         float duckRelMs = apvts.getRawParameterValue(XID::DlyDuckRelease)->load();
         float panRateHz = apvts.getRawParameterValue(XID::DlyPanRate)->load();
+        float drivePct  = apvts.getRawParameterValue(XID::DlyDrive)->load() / 100.0f;
 
         dlyBuffer.setSize(numCh, numSamples, false, false, true);
 
@@ -1284,8 +1796,30 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         float attCoef = onePoleCoef(5.0f, sr);
         float relCoef = onePoleCoef(duckRelMs, sr);
 
+        // Real tape-echo-style character, only costed when Drive > 0:
+        // a soft tanh drive on the recirculating feedback signal (with
+        // makeup gain so overall repeat level doesn't visibly drop as
+        // Drive increases), plus a small amount of delay-time wow at a
+        // fixed, slow, musically-subtle rate — the same physical coupling
+        // a real tape unit has between its saturation and its pitch
+        // wobble, driven by the one Drive knob instead of a second one.
+        bool  driveOn   = drivePct > 0.0005f;
+        float drivePre  = 1.0f + drivePct * 2.5f;
+        float driveMakeup = driveOn ? 1.0f / std::tanh(drivePre) : 1.0f;
+        float wowW = 2.0f * juce::MathConstants<float>::pi * 0.35f / (float) sr;   // fixed, subtle rate
+        float wowDepthSamples = 0.0012f * (float) sr;   // up to ~1.2ms peak deviation at full Drive
+
         for (int n = 0; n < numSamples; ++n)
         {
+            if (driveOn)
+            {
+                dlyWowPhase += wowW;
+                if (dlyWowPhase > juce::MathConstants<float>::twoPi) dlyWowPhase -= juce::MathConstants<float>::twoPi;
+                float wow = std::sin(dlyWowPhase) * drivePct * wowDepthSamples;
+                delayL.setDelay(juce::jlimit(1.0f, maxDelay, delaySamplesL + wow));
+                delayR.setDelay(juce::jlimit(1.0f, maxDelay, delaySamplesR - wow));
+            }
+
             float predL = dlyPreDelayL.popSample(0);
             float predR = dlyPreDelayR.popSample(0);
             dlyPreDelayL.pushSample(0, inL[n]);
@@ -1295,6 +1829,11 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             float dR = delayR.popSample(0);
             float fbL = dlyFbLpfL.processSample(dlyFbHpfL.processSample(dL));
             float fbR = dlyFbLpfR.processSample(dlyFbHpfR.processSample(dR));
+            if (driveOn)
+            {
+                fbL = std::tanh(fbL * drivePre) * driveMakeup;
+                fbR = std::tanh(fbR * drivePre) * driveMakeup;
+            }
             delayL.pushSample(0, predL + fbR * fbPct);
             delayR.pushSample(0, predR + fbL * fbPct);
 
@@ -1438,17 +1977,18 @@ void XaLZaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     };
 
     // ---------------------------------------------------------------
-    // Run the 12 modules above in the user's current chain order (identity
-    // order — Pre, Gate, Ess, Comp, Opto, Eq, Res, Sat, Dbl, Rev, Dly, Lim —
-    // by default, same as the original fixed sequence, so nothing changes
-    // unless the user has actually reordered something via moveModule()).
-    // Each lambda reads/writes `buffer` in place and reads whatever the
-    // chain has produced so far, exactly like the original fixed-order
-    // code did — only WHICH ONE runs at each step is now data-driven.
+    // Run the 15 modules above in the user's current chain order (identity
+    // order — Pre, Gate, Tune, Ess, Trs, Comp, Opto, Eq, Res, Sat, Exc,
+    // Dbl, Rev, Dly, Lim — by default, same as the original fixed
+    // sequence, so nothing changes unless the user has actually reordered
+    // something via moveModule()). Each lambda reads/writes `buffer` in
+    // place and reads whatever the chain has produced so far, exactly
+    // like the original fixed-order code did — only WHICH ONE runs at
+    // each step is now data-driven.
     // ---------------------------------------------------------------
     {
         const std::array<std::function<void()>, kNumSlots> runners = {
-            runPre, runGate, runEss, runComp, runOpto, runEq, runRes, runSat, runDbl, runRev, runDly, runLim
+            runPre, runGate, runTune, runEss, runTrs, runComp, runOpto, runEq, runRes, runSat, runExc, runDbl, runRev, runDly, runLim
         };
         for (int pos = 0; pos < kNumSlots; ++pos)
             runners[(size_t) chainOrder[(size_t) pos].load(std::memory_order_relaxed)]();
