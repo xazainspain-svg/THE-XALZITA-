@@ -7,7 +7,9 @@ const RACK = { note: {} };
 function rackClip(ti, create) { const t = song.tracks[ti]; if (!t.clips[selSlot] && create) t.clips[selSlot] = clipNew(); return t.clips[selSlot]; }
 function renderRackPane() {
   const pane = $('#rackPane'); pane.innerHTML = '';
-  pane.appendChild(el('div', 'rollbar', 'Channel Rack — patrón (escena) ' + (selSlot + 1) + '. Clic: activar/desactivar paso (arrastra para pintar) · Mayús+clic: acento · selecciona otra escena en Session para editar otro patrón.'));
+  const hb = el('div', 'rollbar rackhead'), pv = el('button', 'mini', '◀'), nx = el('button', 'mini', '▶'), pn = el('span', 'lcd2', 'Patrón ' + (selSlot + 1));
+  pv.onclick = () => { selSlot = (selSlot + SCENES - 1) % SCENES; renderAll(); }; nx.onclick = () => { selSlot = (selSlot + 1) % SCENES; renderAll(); };
+  hb.append(pv, pn, nx); hb.title = 'Clic: activar/desactivar paso (arrastra para pintar) · Mayús+clic: acento'; pane.appendChild(hb);
   const wrap = el('div', 'rack'); pane.appendChild(wrap); let drag = null;
   const stepCell = (ti, pitchFn, c, s) => {
     const b = el('div', 'rs g' + (Math.floor(s / 4) % 2)); b.dataset.s = s;

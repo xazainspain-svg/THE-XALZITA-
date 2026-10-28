@@ -4,7 +4,7 @@
 // (volumen y panorama) con puntos editables.
 
 const ARR = { z: 6, snap: 4, sel: null, cursor: 0, follow: true, autoOpen: {}, autoParam: {}, slotSel: {}, drag: null, ph: null,
-  mode: 'slip', tool: 'draw', range: null, amode: 'read', fade: 2, silDb: -40, silMs: 150 };
+  more: false, mode: 'slip', tool: 'draw', range: null, amode: 'read', fade: 2, silDb: -40, silMs: 150 };
 const LANE_H = 62, AUTO_H = 72, HEAD_W = 150, RULER_H2 = 26, ARR_STEPS = ARR_BARS * 16;
 const ARR_SNAPS = [['Compás', 16], ['Tiempo', 4], ['1/2 tiempo', 2], ['Paso', 1], ['Sin snap', 0]];
 
@@ -48,8 +48,11 @@ function renderArr() {
   const del = el('button', '', 'Borrar'); del.title = 'Supr'; del.onclick = arrDelete;
   const aa = el('button', '', '+ Automatización'); aa.onclick = () => { song.autos.push({ target: 't' + selTrack + '.vol', pts: [] }); renderArr(); };
   const fol = el('label', ''), fc = el('input'); fc.type = 'checkbox'; fc.checked = ARR.follow; fc.onchange = () => { ARR.follow = fc.checked; }; fol.append(fc, ' Seguir');
-  bar.append(zl, zr, el('span', '', 'Snap'), sn, loop, cap, dup, spl, del, aa, fol,
-    el('span', 'hint', 'Doble clic en una pista: insertar clip · arrastra el clip para moverlo · bordes: recortar / alargar (en bucle) · clic en la regla: cursor · Mayús+arrastrar en la regla: loop'));
+  const ttl = el('div', 'ptitle', 'Playlist — Arrangement'); root.insertBefore(ttl, bar);
+  makePalette(bar);
+  const more = el('button', ARR.more ? 'on' : '', 'Más ▾'); more.title = 'Modos, fundidos, strip silence, marcadores, punch y automatización'; more.onclick = () => { ARR.more = !ARR.more; renderArr(); };
+  bar.append(el('span', 'sep', 'Snap'), sn, zl, zr, loop, more, cap, dup, spl, del, aa, fol);
+  bar.title = 'Clic en una pista: colocar el patrón seleccionado · arrastra para mover · bordes: recortar · regla: cursor · Mayús+arrastrar en la regla: loop';
 
   arrBar2(root);
   const board = el('div', 'arrboard'); board.style.width = (HEAD_W + W) + 'px'; root.appendChild(board);
@@ -60,10 +63,10 @@ function renderArr() {
   song.tracks.forEach((t, i) => {
     const head = el('div', 'arrhead'); head.style.setProperty('--c', t.color); head.style.height = LANE_H + 'px';
     const top = el('div', 'hrow'), nm = el('b', '', t.name); nm.style.cursor = 'pointer'; nm.onclick = () => { selTrack = i; renderBottom(); };
-    const bm = el('button', 'm' + (t.mute ? ' on' : ''), 'M'), bs = el('button', 's' + (t.solo ? ' on' : ''), 'S');
-    bm.onclick = () => { t.mute = !t.mute; bm.classList.toggle('on', t.mute); if (eng) eng.applyMix(); };
-    bs.onclick = () => { t.solo = !t.solo; bs.classList.toggle('on', t.solo); if (eng) eng.applyMix(); };
-    top.append(nm, bm, bs); head.appendChild(top);
+    const led = el('button', 'led' + (t.mute ? '' : ' on')); led.title = 'Activar / silenciar pista (clic derecho: solo)';
+    led.onclick = () => { t.mute = !t.mute; led.classList.toggle('on', !t.mute); if (eng) eng.applyMix(); };
+    led.oncontextmenu = e => { e.preventDefault(); t.solo = !t.solo; led.style.outline = t.solo ? '2px solid #f6921e' : ''; if (eng) eng.applyMix(); };
+    top.append(led, nm); head.appendChild(top);
     const row2 = el('div', 'hrow'), sl = el('select'); const slots = t.clips.map((c, k) => c ? k : -1).filter(k => k >= 0);
     slots.forEach(k => { const o = el('option', '', 'Clip ' + (k + 1)); o.value = k; sl.appendChild(o); });
     if (!slots.length) { const o = el('option', '', '(sin clips)'); o.value = -1; sl.appendChild(o); }
@@ -275,14 +278,17 @@ function arrTick(st) {
 }
 
 // ----------------------------------------------------------------- estilo Pro Tools: modos, herramientas, fundidos, tomas, marcadores, punch
-function arrBar2(root) {
-  const bar = el('div', 'arrbar');
-  const sel = (label, opts, val, fn) => { const l = el('label', ''); l.append(label + ' '); const s = el('select'); opts.forEach(([v, t]) => { const o = el('option', '', t); o.value = v; s.appendChild(o); }); s.value = val; s.onchange = () => fn(s.value); l.appendChild(s); bar.appendChild(l); };
-  sel('Modo', [['slip', 'Slip'], ['shuffle', 'Shuffle'], ['grid', 'Grid']], ARR.mode, v => { ARR.mode = v; });
+function makePalette(bar) {
   const pal = el('div', 'tools');
   [['draw', '✎', 'Dibujar: clic en una pista coloca el patrón seleccionado; arrastra para mover; bordes para recortar'], ['del', '⌫', 'Borrar clips'], ['mute', '⊘', 'Silenciar clips'], ['slice', '✂', 'Cortar clips'], ['select', '▭', 'Seleccionar un rango (Supr lo borra)']].forEach(([k, g, tip]) => {
     const b = el('button', ARR.tool === k ? 'on' : '', g); b.title = tip; b.onclick = () => { ARR.tool = k; ARR.range = null; renderArr(); }; pal.appendChild(b); });
   bar.appendChild(pal);
+}
+function arrBar2(root) {
+  const bar = el('div', 'arrbar arrmore'); bar.hidden = !ARR.more;
+  const sel = (label, opts, val, fn) => { const l = el('label', ''); l.append(label + ' '); const s = el('select'); opts.forEach(([v, t]) => { const o = el('option', '', t); o.value = v; s.appendChild(o); }); s.value = val; s.onchange = () => fn(s.value); l.appendChild(s); bar.appendChild(l); };
+  sel('Modo', [['slip', 'Slip'], ['shuffle', 'Shuffle'], ['grid', 'Grid']], ARR.mode, v => { ARR.mode = v; });
+
   const num = (label, val, w, fn, min = 0, max = 99) => { const l = el('label', ''); l.append(label + ' '); const i = el('input'); i.type = 'number'; i.min = min; i.max = max; i.value = val; i.style.width = w; i.onchange = () => fn(+i.value); l.appendChild(i); bar.appendChild(l); };
   num('Fundido (pasos)', ARR.fade, '46px', v => { ARR.fade = v; });
   const act = (label, tip, fn) => { const b = el('button', '', label); b.title = tip; b.onclick = fn; bar.appendChild(b); };

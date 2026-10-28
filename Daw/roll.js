@@ -10,7 +10,7 @@ const SCALE_NAMES = { chromatic: 'Cromática', major: 'Mayor', minor: 'Menor', h
 const CHORDS = { none: [0], major: [0, 4, 7], minor: [0, 3, 7], sus4: [0, 5, 7], maj7: [0, 4, 7, 11], min7: [0, 3, 7, 10], dom7: [0, 4, 7, 10], octave: [0, 12] };
 const CHORD_NAMES = { none: 'Sin acorde', major: 'Mayor', minor: 'Menor', sus4: 'Sus4', maj7: 'Maj7', min7: 'Min7', dom7: 'Dom7', octave: 'Octava' };
 const SNAPS = [['Compás', 16], ['Tiempo', 4], ['1/2 tiempo', 2], ['Paso', 1], ['1/2 paso', 0.5], ['1/4 paso', 0.25], ['Sin snap', 0]];
-const TOOLS = [['draw', '✎ Dibujar', '1'], ['select', '▭ Seleccionar', '2'], ['del', '✕ Borrar', '3'], ['slice', '✂ Cortar', '4'], ['mute', '⊘ Silenciar', '5']];
+const TOOLS = [['draw', '✎', '1', 'Dibujar'], ['select', '▭', '2', 'Seleccionar'], ['del', '✕', '3', 'Borrar'], ['slice', '✂', '4', 'Cortar'], ['mute', '⊘', '5', 'Silenciar']];
 const RK_W = 54, RULER_H = 20, VEL_H = 64;
 
 const isBlackKey = n => [1, 3, 6, 8, 10].includes(n % 12);
@@ -27,7 +27,7 @@ function renderClipPane() {
   const drums = t.kind === 'drums';
 
   const bar = el('div', 'rollbar');
-  TOOLS.forEach(([k, label, key]) => { const b = el('button', ROLL.tool === k ? 'on' : '', label); b.title = 'Atajo: ' + key; b.onclick = () => { ROLL.tool = k; renderClipPane(); }; bar.appendChild(b); });
+  const tp = el('div', 'tools'); TOOLS.forEach(([k, label, key, nm]) => { const b = el('button', ROLL.tool === k ? 'on' : '', label); b.title = nm + ' (atajo ' + key + ')'; b.onclick = () => { ROLL.tool = k; renderClipPane(); }; tp.appendChild(b); }); bar.appendChild(tp);
   const selOf = (opts, val, fn) => { const s = el('select'); opts.forEach(([v, l]) => { const o = el('option', '', l); o.value = v; s.appendChild(o); }); s.value = val; s.onchange = () => fn(s.value); return s; };
   bar.appendChild(el('span', 'sep', 'Snap'));
   bar.appendChild(selOf(SNAPS.map(([l, v]) => [v, l]), ROLL.snap, v => { ROLL.snap = +v; }));
@@ -50,10 +50,12 @@ function renderClipPane() {
     bar.appendChild(x);
   });
   const clr = el('button', '', 'Vaciar'); clr.onclick = () => { c.notes = []; ROLL.sel.clear(); drawRoll(); }; bar.appendChild(clr);
+  const tg = el('button', ROLL.tools ? 'on' : '', '⚙'); tg.title = 'Herramientas: cuantizar, humanizar, arpegio, strum, voltear, pan y tono por nota'; tg.onclick = () => { ROLL.tools = !ROLL.tools; renderClipPane(); }; bar.appendChild(tg);
   const mx = el('button', ROLL.big ? 'on' : '', '⤢'); mx.title = 'Maximizar / restaurar panel'; mx.onclick = () => { ROLL.big = !ROLL.big; $('#win-roll').classList.toggle('max', ROLL.big); renderClipPane(); };
   bar.appendChild(mx);
   pane.appendChild(bar);
   rollToolsRow(pane, c, t);
+  if (!ROLL.tools) { const rr = pane.querySelectorAll('.rollbar'); rr[rr.length - 1].hidden = true; }
 
   const R = rollGeom(t), sw = ROLL.stepW, W = clipLen(c) * sw, H = (R.hi - R.lo + 1) * R.h;
   const grid = el('div', 'roll'); pane.appendChild(grid);

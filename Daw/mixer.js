@@ -16,32 +16,31 @@ function renderMixer() {
 
   const mkStrip = (idx, name, color, get, set, isMaster) => {
     const s = el('div', 'strip' + (mixSel === idx ? ' sel' : '') + (isMaster ? ' master' : '')); s.style.setProperty('--c', color);
-    const nm = el('div', 'sname', name); nm.onclick = () => { mixSel = idx; renderMixer(); };
-    if (!isMaster) nm.ondblclick = () => { const n = prompt('Nombre del insert', name); if (n) { song.inserts[idx].name = n; renderMixer(); } };
-    s.appendChild(nm);
+    const sel = () => { mixSel = idx; MIXG = false; renderMixer(); };
+    const top = el('div', 'stop2'), num = el('span', 'snum', isMaster ? 'M' : String(idx + 1)); num.onclick = sel;
     if (!isMaster) {
-      const used = song.inserts[idx].fx.filter(Boolean).length, dots = el('div', 'sdots', used ? used + ' fx' : '—'); s.appendChild(dots);
-    } else s.appendChild(el('div', 'sdots', 'limitador'));
+      const ins = song.inserts[idx], led = el('button', 'led' + (ins.mute ? '' : ' on')); led.title = 'Activar / silenciar insert';
+      led.onclick = () => { ins.mute = !ins.mute; led.classList.toggle('on', !ins.mute); if (eng) eng.applyMix(); };
+      const so = el('button', 'solo' + (ins.solo ? ' on' : ''), 'S'); so.title = 'Solo'; so.onclick = () => { ins.solo = !ins.solo; so.classList.toggle('on', ins.solo); if (eng) eng.applyMix(); };
+      top.append(led, num, so);
+      const pk = makeKnob('PAN', -1, 1, ins.pan, 0, v => { ins.pan = v; if (eng) eng.applyMix(); autoRec('i' + idx + '.pan', v); }, 30); s.append(top, pk.el);
+    } else { top.append(num); s.appendChild(top); }
     const fw = el('div', 'sfader'), cv = el('canvas'); cv.width = 22; cv.height = 170;
     const f = el('input'); f.type = 'range'; f.min = 0; f.max = 1.25; f.step = 0.005; f.value = get(); f.className = 'fader';
     const db = el('div', 'sdb', dbTxt(get()));
     f.oninput = () => { set(+f.value); db.textContent = dbTxt(+f.value); if (eng) eng.applyMix(); autoRec(isMaster ? 'm.vol' : 'i' + idx + '.vol', +f.value); };
     f.ondblclick = () => { f.value = 0.8; f.oninput(); };
     fw.append(cv, f); s.append(fw, db);
-    const mm = { cv, lv: [0, 0], idx: isMaster ? -1 : idx }; mixMeters.push(mm);
+    mixMeters.push({ cv, lv: [0, 0], idx: isMaster ? -1 : idx });
     if (!isMaster) {
-      const ins = song.inserts[idx], pan = el('input'); pan.type = 'range'; pan.min = -1; pan.max = 1; pan.step = 0.01; pan.value = ins.pan; pan.title = 'Panorama';
-      pan.oninput = () => { ins.pan = +pan.value; if (eng) eng.applyMix(); autoRec('i' + idx + '.pan', ins.pan); }; pan.ondblclick = () => { pan.value = 0; pan.oninput(); };
-      const row = el('div', 'row'), bm = el('button', 'm' + (ins.mute ? ' on' : ''), 'M'), bs = el('button', 's' + (ins.solo ? ' on' : ''), 'S');
-      bm.onclick = () => { ins.mute = !ins.mute; bm.classList.toggle('on', ins.mute); if (eng) eng.applyMix(); };
-      bs.onclick = () => { ins.solo = !ins.solo; bs.classList.toggle('on', ins.solo); if (eng) eng.applyMix(); };
-      const to = el('select'); to.title = 'Salida del insert'; const o0 = el('option', '', '→ Master'); o0.value = -1; to.appendChild(o0);
+      const ins = song.inserts[idx], to = el('select'); to.title = 'Salida del insert'; const o0 = el('option', '', '→ M'); o0.value = -1; to.appendChild(o0);
       for (let k = idx + 1; k < song.inserts.length; k++) { const o = el('option', '', '→ ' + (k + 1)); o.value = k; to.appendChild(o); }
-      to.value = ins.to !== undefined && ins.to > idx ? ins.to : -1; to.onchange = () => { ins.to = +to.value; if (eng) eng.applyMix(); };
-      row.append(bm, bs); s.append(pan, row, to);
-      const routed = song.tracks.filter(t => t.insert === idx).map(t => t.name);
-      s.appendChild(el('div', 'sroute', routed.length ? '← ' + routed.join(', ') : ''));
+      to.value = ins.to !== undefined && ins.to > idx ? ins.to : -1; to.onchange = () => { ins.to = +to.value; if (eng) eng.applyMix(); }; s.appendChild(to);
     }
+    const nm = el('div', 'sname', name); nm.onclick = sel;
+    if (!isMaster) { nm.ondblclick = () => { const n = prompt('Nombre del insert', name); if (n) { song.inserts[idx].name = n; renderMixer(); } };
+      const used = song.inserts[idx].fx.filter(Boolean).length; nm.title = (used ? used + ' efecto(s). ' : '') + 'Recibe: ' + (song.tracks.filter(t => t.insert === idx).map(t => t.name).join(', ') || '—'); }
+    s.appendChild(nm);
     return s;
   };
   strips.appendChild(mkStrip(-1, 'MASTER', '#ffb400', () => song.masterVol, v => song.masterVol = v, true));
