@@ -35,3 +35,33 @@ jobs:
           name: Xaza-FX-${{ matrix.category }}-VST3-Windows
           path: build/*_artefacts/Release/VST3/*.vst3
           if-no-files-found: error
+
+  installer:
+    needs: build-windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Descargar los .vst3 de todas las categorias
+        uses: actions/download-artifact@v4
+        with:
+          pattern: Xaza-FX-*-VST3-Windows
+          path: vst3
+          merge-multiple: true
+      - name: Contar plugins
+        shell: bash
+        run: |
+          n=$(find vst3 -maxdepth 1 -name "*.vst3" | wc -l)
+          echo "plugins: $n"
+          test "$n" -eq 90
+      - name: Instalar Inno Setup
+        run: choco install innosetup -y --no-progress
+      - name: Crear el instalador .exe
+        shell: bash
+        run: |
+          "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" "//DSrcDir=$PWD/vst3" Plugins90/installer.iss
+      - name: Subir el instalador
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xaza-FX-90-Instalador-Windows
+          path: Plugins90/Xaza-FX-90-Instalador.exe
+          if-no-files-found: error
