@@ -7,7 +7,7 @@ const SCENES = 8, NINS = 16, NSLOTS = 10;
 const clipNew = (bars = 1) => ({ bars, notes: [] });
 const defInst = (o = {}) => Object.assign({ wave: 'sawtooth', cutoff: 3000, res: 1, atk: 0.01, rel: 0.2 }, o);
 function trackNew(name, kind, color, inst, insert) {
-  return { name, kind, color, inst: kind === 'synth' ? defInst(inst) : null, insert: insert | 0, vol: 0.8, pan: 0, mute: false, solo: false,
+  return { name, kind, color, inst: kind === 'synth' ? defInst(inst) : null, insert: insert | 0, obj: { on: false, x: 0, y: 1, z: 0 }, vol: 0.8, pan: 0, mute: false, solo: false,
     clips: Array(SCENES).fill(null), autoVol: [], autoPan: [] };
 }
 function insertNew(i) {
@@ -65,6 +65,7 @@ function upgradeSong(s) {
   s.inserts.forEach(x => { x.fx = (x.fx || []).concat(Array(NSLOTS).fill(null)).slice(0, NSLOTS); x.vol = x.vol === undefined ? 0.8 : x.vol; x.pan = x.pan || 0; });
   s.tracks.forEach((t, i) => {
     t.insert = t.insert === undefined ? Math.min(i, NINS - 1) : t.insert; delete t.fx;
+    t.obj = t.obj || { on: false, x: 0, y: 1, z: 0 };
     t.autoVol = t.autoVol || []; t.autoPan = t.autoPan || []; delete t.auto;
     t.clips = (t.clips || []).concat(Array(SCENES).fill(null)).slice(0, SCENES);
   });

@@ -37,11 +37,11 @@ $('#btnMetro').onclick = e => { ensureEngine(); eng.metro = !eng.metro; e.target
 function setView(v) {
   if (eng && eng.playing) { eng.stop(); updatePlayBtn(); }
   view = v;
-  ['session', 'arr', 'mixer'].forEach(k => { $('#' + k).hidden = k !== v; });
-  $('#tabSession').classList.toggle('on', v === 'session'); $('#tabArr').classList.toggle('on', v === 'arr'); $('#tabMixer').classList.toggle('on', v === 'mixer');
+  ['session', 'arr', 'mixer', 'imm'].forEach(k => { $('#' + k).hidden = k !== v; });
+  $('#tabSession').classList.toggle('on', v === 'session'); $('#tabArr').classList.toggle('on', v === 'arr'); $('#tabMixer').classList.toggle('on', v === 'mixer'); $('#tabImm').classList.toggle('on', v === 'imm');
   renderAll();
 }
-$('#tabSession').onclick = () => setView('session'); $('#tabArr').onclick = () => setView('arr'); $('#tabMixer').onclick = () => setView('mixer');
+$('#tabSession').onclick = () => setView('session'); $('#tabArr').onclick = () => setView('arr'); $('#tabMixer').onclick = () => setView('mixer'); $('#tabImm').onclick = () => setView('imm');
 $('#tabClip').onclick = () => { bottomTab = 'clip'; renderBottom(); };
 $('#tabDev').onclick = () => { bottomTab = 'dev'; renderBottom(); };
 
@@ -120,7 +120,7 @@ function renderBottom() {
   const t = song.tracks[selTrack]; $('#selInfo').textContent = t.name + (curClip() ? ' — clip ' + (selSlot + 1) : '');
   if (bottomTab === 'clip') renderClipPane(); else renderDevPane();
 }
-function renderAll() { if (view === 'session') renderSession(); else if (view === 'arr') renderArr(); else renderMixer(); renderBottom(); }
+function renderAll() { if (view === 'session') renderSession(); else if (view === 'arr') renderArr(); else if (view === 'imm') renderImm(); else renderMixer(); renderBottom(); }
 
 // ------------------------------------------------------------------ guardar / abrir / exportar
 const download = (blob, name) => { const a = el('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); };
@@ -176,7 +176,7 @@ function frame() {
           c.classList.toggle('playing', eng.playing && eng.mode === 'session' && r.playing === s);
           c.classList.toggle('queued', eng.playing && r.queued === s); }
       });
-    } else if (view === 'arr') arrTick(st); else mixerTick();
+    } else if (view === 'arr') arrTick(st); else if (view === 'imm') immTick(); else mixerTick();
     meterDraw($('#masterMeter'), eng.masterAn);
     if (bottomTab === 'clip' && ROLL.cv) {
       const c = curClip(), r = eng.rt[selTrack]; let ps = -1;

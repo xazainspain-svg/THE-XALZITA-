@@ -108,3 +108,7 @@ input.fader{writing-mode:vertical-lr;direction:rtl;width:24px;height:170px;margi
 .phead{position:absolute;top:0;bottom:0;width:2px;background:var(--ok);pointer-events:none;z-index:6}
 .curmark{position:absolute;top:0;bottom:0;width:1px;background:rgba(255,180,0,.8);pointer-events:none;z-index:4}
 [hidden]{display:none!important}
+#imm{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}
+.immL canvas{display:block;border-radius:4px;max-width:100%}
+.immR{width:300px;background:var(--p1);padding:8px;border-radius:4px}.immR h3{margin:0 0 6px}
+.immR .shead{align-items:center}.immR .prm{display:grid;grid-template-columns:90px 1fr;gap:4px;align-items:center;margin:3px 0;color:var(--mut)}

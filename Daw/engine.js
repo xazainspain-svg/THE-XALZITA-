@@ -151,8 +151,23 @@ class Engine {
     this.routeTrack(o, t); return o;
   }
   routeTrack(o, t) {
-    try { o.pan.disconnect(); } catch (e) {}
-    o.pan.connect(o.an); o.pan.connect(this.ins[Math.max(0, Math.min(this.ins.length - 1, t.insert | 0))].in);
+    const idx = Math.max(0, Math.min(this.ins.length - 1, t.insert | 0)), obj = !!(t.obj && t.obj.on), key = idx + ':' + obj;
+    if (o.routeKey !== key) {
+      o.routeKey = key; try { o.pan.disconnect(); } catch (e) {}
+      o.pan.connect(o.an);
+      if (obj) {
+        if (!o.pn) {
+          o.pn = this.ctx.createPanner(); o.pn.panningModel = 'HRTF'; o.pn.distanceModel = 'inverse'; o.pn.refDistance = 1; o.pn.rolloffFactor = 0.8;
+          o.pg = this.ctx.createGain(); o.pg.gain.value = 1.7; o.pn.connect(o.pg);
+        }
+        try { o.pg.disconnect(); } catch (e) {}
+        o.pan.connect(o.pn); o.pg.connect(this.ins[idx].in);
+      } else o.pan.connect(this.ins[idx].in);
+    }
+    if (obj && o.pn) {                     // x: izquierda-derecha, y: atrás-adelante, z: altura (el oyente mira hacia -z)
+      const p = o.pn, X = t.obj.x * 2.5, Y = t.obj.z * 2.5, Z = -t.obj.y * 2.5;
+      if (p.positionX) { p.positionX.value = X; p.positionY.value = Y; p.positionZ.value = Z; } else p.setPosition(X, Y, Z);
+    }
   }
   buildInsert(ins) {
     const c = this.ctx, o = { in: c.createGain(), vol: c.createGain(), pan: c.createStereoPanner(), fx: [] };
