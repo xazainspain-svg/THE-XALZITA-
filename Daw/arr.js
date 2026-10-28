@@ -86,7 +86,7 @@ function renderArr() {
         ARR.range = { t: i, s: a, e: a }; ARR.drag = { type: 'rangeSel', t: i, a, rect: r, box }; ARR.cursor = a; moveCursor(); return;
       }
       if (e.target !== lane) return;
-      if (ARR.tool === 'draw' && e.button === 0) { place(e); return; }
+      if (ARR.tool === 'draw' && e.button === 0) { const s0 = aSnapF((e.clientX - lane.getBoundingClientRect().left) / z), slot = selSlot, len = patLen(slot); place(e); if (song.tracks.some(t => t.clips[slot])) ARR.drag = { type: 'paintPat', lane: i, pat: slot, len, last: s0, rect: lane.getBoundingClientRect() }; return; }
       ARR.cursor = aSnapF((e.clientX - lane.getBoundingClientRect().left) / z); arrSelect(null); moveCursor();
     };
     lane.ondblclick = null;
@@ -172,6 +172,11 @@ function paintClip(cv, it, t, c, z) {
 }
 window.addEventListener('mousemove', e => {
   const d = ARR.drag; if (!d) return;
+  if (d.type === 'paintPat') {
+    const x = Math.max(0, aSnapF((e.clientX - d.rect.left) / ARR.z));
+    while (x >= d.last + 2 * d.len && d.last + 2 * d.len <= ARR_STEPS) { d.last += d.len; const it = { lane: d.lane, pat: d.pat, s: d.last, l: d.len, off: 0 }; song.arr.push(it); resolveOverlap(it); d.painted = true; }
+    return;
+  }
   if (d.type === 'rangeSel') { const v = Math.max(0, Math.min(ARR_STEPS, aSnapR((e.clientX - d.rect.left) / ARR.z))); ARR.range = { t: d.t, s: Math.min(d.a, v), e: Math.max(d.a, v) }; d.box.style.left = ARR.range.s * ARR.z + 'px'; d.box.style.width = (ARR.range.e - ARR.range.s) * ARR.z + 'px'; return; }
   const z = ARR.z, dx = (e.clientX - d.x0) / z, it = d.it;
   const minL = ARR.snap > 0 ? ARR.snap : 1;
@@ -191,7 +196,7 @@ window.addEventListener('mousemove', e => {
 window.addEventListener('mouseup', () => {
   const d = ARR.drag; if (!d) return; ARR.drag = null;
   if (d.type.startsWith('loop')) { renderArr(); return; }
-  if (d.type === 'rangeSel') { renderArr(); return; }
+  if (d.type === 'rangeSel' || d.type === 'paintPat') { renderArr(); renderBottom(); return; }
   if (d.type === 'move' || d.type === 'resize' || d.type === 'trim') {
     if (ARR.mode === 'shuffle') shufflePack(laneOf(d.it)); else resolveOverlap(d.it); renderArr();
   }

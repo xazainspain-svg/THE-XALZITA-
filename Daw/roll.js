@@ -10,7 +10,7 @@ const SCALE_NAMES = { chromatic: 'Cromática', major: 'Mayor', minor: 'Menor', h
 const CHORDS = { none: [0], major: [0, 4, 7], minor: [0, 3, 7], sus4: [0, 5, 7], maj7: [0, 4, 7, 11], min7: [0, 3, 7, 10], dom7: [0, 4, 7, 10], octave: [0, 12] };
 const CHORD_NAMES = { none: 'Sin acorde', major: 'Mayor', minor: 'Menor', sus4: 'Sus4', maj7: 'Maj7', min7: 'Min7', dom7: 'Dom7', octave: 'Octava' };
 const SNAPS = [['Compás', 16], ['Tiempo', 4], ['1/2 tiempo', 2], ['Paso', 1], ['1/2 paso', 0.5], ['1/4 paso', 0.25], ['Sin snap', 0]];
-const TOOLS = [['draw', '✎', '1', 'Dibujar'], ['select', '▭', '2', 'Seleccionar'], ['del', '✕', '3', 'Borrar'], ['slice', '✂', '4', 'Cortar'], ['mute', '⊘', '5', 'Silenciar']];
+const TOOLS = [['draw', '✎', '1', 'Dibujar'], ['select', '▭', '2', 'Seleccionar'], ['del', '✕', '3', 'Borrar'], ['slice', '✂', '4', 'Cortar'], ['mute', '⊘', '5', 'Silenciar'], ['paint', '▮', '6', 'Pintar (arrastra para dibujar varias notas)']];
 const RK_W = 54, RULER_H = 20, VEL_H = 64;
 
 const isBlackKey = n => [1, 3, 6, 8, 10].includes(n % 12);
@@ -101,6 +101,12 @@ function bindRoll(t, c, R, nw) {
       return;
     }
     if (ROLL.tool === 'mute') { if (hit) { hit.m = !hit.m; drawRoll(); } return; }
+    if (ROLL.tool === 'paint') {
+      const sn = ROLL.snap > 0 ? ROLL.snap : 0.5; ROLL.drag = { type: 'paint', last: '', sn };
+      const put = pp => { const s0 = snapFloor(pp.stepF), key = s0 + ':' + pp.n; if (key === ROLL.drag.last || pp.n < R.lo || pp.n > R.hi || s0 < 0 || s0 >= L) return; ROLL.drag.last = key;
+        if (!c.notes.some(n => n.n === pp.n && Math.abs(n.s - s0) < 1e-6)) { c.notes.push({ s: s0, l: sn, n: pp.n, v: 0.8 }); previewNote(pp.n); } };
+      ROLL.drag.put = put; put(p); drawRoll(); return;
+    }
     if (ROLL.tool === 'del') { ROLL.drag = { type: 'del' }; if (hit) { c.notes.splice(c.notes.indexOf(hit), 1); ROLL.sel.delete(hit); drawRoll(); } return; }
     if (hit) {
       const right = (hit.s + hit.l) * ROLL.stepW, edge = !drums && right - p.x < 7 && hit.l * ROLL.stepW > 14;
@@ -134,6 +140,7 @@ function bindRoll(t, c, R, nw) {
     const d = ROLL.drag; if (!d || !ROLL.cv) return;
     if (d.type === 'vel') { velSet(e, d.note); return; }
     const p = rollPt(e, R), cl = curClip(); if (!cl) return;
+    if (d.type === 'paint') { d.put(p); drawRoll(); return; }
     if (d.type === 'del') { const h = noteAtPt(cl, p); if (h) { cl.notes.splice(cl.notes.indexOf(h), 1); ROLL.sel.delete(h); drawRoll(); } return; }
     if (d.type === 'marquee') { d.x1 = p.x; d.y1 = p.y; drawRoll(); return; }
     if (d.type === 'move') {
@@ -167,7 +174,7 @@ function bindRoll(t, c, R, nw) {
 function rollKey(e) {
   const c = curClip(); if (!c || !winOpen('roll') || !ROLL.cv) return false;
   const k = e.key, ctrl = e.ctrlKey || e.metaKey;
-  if (!ctrl && ['1', '2', '3', '4', '5'].includes(k)) { ROLL.tool = TOOLS[+k - 1][0]; renderClipPane(); return true; }
+  if (!ctrl && ['1', '2', '3', '4', '5', '6'].includes(k)) { ROLL.tool = TOOLS[+k - 1][0]; renderClipPane(); return true; }
   if (k === 'Delete' || k === 'Backspace') { if (!ROLL.sel.size) return false; c.notes = c.notes.filter(n => !ROLL.sel.has(n)); ROLL.sel.clear(); drawRoll(); return true; }
   if (ctrl && k.toLowerCase() === 'a') { ROLL.sel = new Set(c.notes); drawRoll(); return true; }
   if (k === 'Escape') { ROLL.sel.clear(); drawRoll(); return true; }

@@ -45,8 +45,8 @@ function winKey(e) {
 }
 
 // ----------------------------------------------------------------- perillas
-function makeKnob(label, min, max, val, def, onInput, size = 36) {
-  const w = el('div', 'knobw'), cv = el('canvas'); cv.width = cv.height = size; w.title = label; w.append(cv, el('span', '', label)); let v = val;
+function makeKnob(label, min, max, val, def, onInput, size = 36, target) {
+  const w = el('div', 'knobw'), cv = el('canvas'); if (target) w.dataset.auto = target; cv.width = cv.height = size; w.title = label; w.append(cv, el('span', '', label)); let v = val;
   const draw = () => {
     const g = cv.getContext('2d'), c = size / 2, r = c - 4, a0 = Math.PI * 0.75, a1 = Math.PI * 2.25, t = (v - min) / (max - min), a = a0 + (a1 - a0) * t;
     g.clearRect(0, 0, size, size); g.lineWidth = 3; g.lineCap = 'round';
@@ -68,7 +68,7 @@ function makeKnob(label, min, max, val, def, onInput, size = 36) {
 let KNOB = {};
 function initKnobs() {
   const g = $('#gKnobs'); g.innerHTML = '';
-  KNOB.vol = makeKnob('VOL', 0, 1.25, song.masterVol, 0.9, v => { song.masterVol = v; if (eng) eng.applyMix(); autoRec('m.vol', v); });
+  KNOB.vol = makeKnob('VOL', 0, 1.25, song.masterVol, 0.9, v => { song.masterVol = v; if (eng) eng.applyMix(); autoRec('m.vol', v); }, 36, 'm.vol');
   KNOB.swing = makeKnob('SWING', 0, 0.5, song.swing || 0, 0, v => { song.swing = v; $('#swing').value = v; });
   g.append(KNOB.vol.el, KNOB.swing.el);
 }
@@ -136,3 +136,18 @@ function initToolbar() {
   window.addEventListener('mousemove', e => { if (dragY === null) return; const nv = Math.max(40, Math.min(240, Math.round(v0 + (dragY - e.clientY) / 2))); if (nv !== song.bpm) { song.bpm = nv; bpm.value = nv; } });
   window.addEventListener('mouseup', () => { dragY = null; });
 }
+
+// ----------------------------------------------------------------- clips de automatización (clic derecho en un control)
+function createAutoClip(id) {
+  const T = autoInfo(id, song); if (!T) { status('Ese parámetro no se puede automatizar.'); return; }
+  let lane = song.autos.find(a => a.target === id);
+  if (!lane) { lane = { target: id, pts: [{ s: ARR.cursor, v: autoNorm(T, T.get()) }] }; song.autos.push(lane); }
+  setView('arr'); status('Clip de automatización creado para: ' + T.label + '. Dibuja la curva en el carril inferior del Playlist.', 6000);
+  setTimeout(() => { const m = $('main'); m.scrollTop = m.scrollHeight; }, 50);
+}
+document.addEventListener('contextmenu', e => {
+  const t = e.target.closest && e.target.closest('[data-auto]'); document.querySelectorAll('.ctxmenu').forEach(x => x.remove()); if (!t) return;
+  e.preventDefault(); const m = el('div', 'ctxmenu'), b = el('button', 'mitem', 'Crear clip de automatización'); b.onclick = () => { m.remove(); createAutoClip(t.dataset.auto); };
+  m.appendChild(b); m.style.left = e.clientX + 'px'; m.style.top = e.clientY + 'px'; document.body.appendChild(m);
+  const close = () => { m.remove(); document.removeEventListener('mousedown', close, true); }; setTimeout(() => document.addEventListener('mousedown', ev => { if (!m.contains(ev.target)) close(); }, true), 0);
+});

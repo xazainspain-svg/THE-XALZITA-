@@ -81,14 +81,14 @@ function renderSession() {
     bm.onclick = () => { t.mute = !t.mute; bm.classList.toggle('on', t.mute); if (eng) eng.applyMix(); };
     bs.onclick = () => { t.solo = !t.solo; renderSession(); if (eng) eng.applyMix(); };
     row.append(bm, bs); m.appendChild(row);
-    const vol = el('input'); vol.type = 'range'; vol.min = 0; vol.max = 1.2; vol.step = 0.01; vol.value = t.vol; vol.title = 'Volumen';
+    const vol = el('input'); vol.type = 'range'; vol.min = 0; vol.max = 1.2; vol.step = 0.01; vol.value = t.vol; vol.title = 'Volumen'; vol.dataset.auto = 't' + i + '.vol';
     vol.oninput = () => { t.vol = +vol.value; if (eng) eng.applyMix(); autoRec('t' + i + '.vol', t.vol); };
-    const pan = el('input'); pan.type = 'range'; pan.min = -1; pan.max = 1; pan.step = 0.01; pan.value = t.pan; pan.title = 'Panorama';
+    const pan = el('input'); pan.type = 'range'; pan.min = -1; pan.max = 1; pan.step = 0.01; pan.value = t.pan; pan.title = 'Panorama'; pan.dataset.auto = 't' + i + '.pan';
     pan.oninput = () => { t.pan = +pan.value; if (eng) eng.applyMix(); autoRec('t' + i + '.pan', t.pan); };
     const ins = el('select'); song.inserts.forEach((x, k) => { const o = el('option', '', 'Insert ' + (k + 1) + (x.name !== 'Insert ' + (k + 1) ? ' · ' + x.name : '')); o.value = k; ins.appendChild(o); });
     ins.value = t.insert; ins.title = 'Insert del mixer al que se envía esta pista'; ins.onchange = () => { t.insert = +ins.value; if (eng) eng.applyMix(); };
     const mkSend = (k, lab) => {
-      const box = el('div', 'sendrow'), r = el('input'); r.type = 'range'; r.min = 0; r.max = 1; r.step = 0.01; r.value = (t.sends && t.sends[k]) || 0; r.title = lab;
+      const box = el('div', 'sendrow'), r = el('input'); r.type = 'range'; r.min = 0; r.max = 1; r.step = 0.01; r.value = (t.sends && t.sends[k]) || 0; r.title = lab; r.dataset.auto = 't' + i + (k ? '.sb' : '.sa');
       r.oninput = () => { t.sends = t.sends || [0, 0]; t.sends[k] = +r.value; if (eng) eng.applyMix(); autoRec('t' + i + (k ? '.sb' : '.sa'), t.sends[k]); };
       const pl = el('label', 'pre'), pc = el('input'); pc.type = 'checkbox'; pc.checked = !!(t.preSend && t.preSend[k]); pc.title = 'Envío pre-fader';
       pc.onchange = () => { t.preSend = t.preSend || [false, false]; t.preSend[k] = pc.checked; if (eng) eng.applyMix(); }; pl.append(pc, 'pre'); box.append(r, pl); return box;
@@ -100,8 +100,8 @@ function renderSession() {
 }
 
 // ------------------------------------------------------------------ dispositivos (instrumento de la pista)
-function slider(parent, label, min, max, val, step, onInput, log) {
-  const row = el('div', 'prm'), lab = el('span', '', label), r = el('input'); r.type = 'range';
+function slider(parent, label, min, max, val, step, onInput, log, target) {
+  const row = el('div', 'prm'), lab = el('span', '', label), r = el('input'); r.type = 'range'; if (target) r.dataset.auto = target;
   if (log) { r.min = Math.log(min); r.max = Math.log(max); r.step = 0.001; r.value = Math.log(val); r.oninput = () => onInput(Math.exp(+r.value)); }
   else { r.min = min; r.max = max; r.step = step || (max - min) / 200; r.value = val; r.oninput = () => onInput(+r.value); }
   row.append(lab, r); parent.appendChild(row);
@@ -119,8 +119,8 @@ function renderDevPane() {
     sel('Onda 2', [['none', 'ninguna']].concat(W.map(w => [w, w])), t.inst.w2, v => t.inst.w2 = v);
     slider(inst, 'Desafinar 2', -50, 50, t.inst.d2, 1, v => t.inst.d2 = v);
     slider(inst, 'Sub (−1 oct)', 0, 1, t.inst.sub, 0.01, v => t.inst.sub = v);
-    slider(inst, 'Corte', 100, 12000, t.inst.cutoff, 0, v => { t.inst.cutoff = v; autoRec('t' + selTrack + '.cutoff', v); }, true);
-    slider(inst, 'Resonancia', 0.1, 18, t.inst.res, 0.1, v => { t.inst.res = v; autoRec('t' + selTrack + '.res', v); });
+    slider(inst, 'Corte', 100, 12000, t.inst.cutoff, 0, v => { t.inst.cutoff = v; autoRec('t' + selTrack + '.cutoff', v); }, true, 't' + selTrack + '.cutoff');
+    slider(inst, 'Resonancia', 0.1, 18, t.inst.res, 0.1, v => { t.inst.res = v; autoRec('t' + selTrack + '.res', v); }, false, 't' + selTrack + '.res');
     slider(inst, 'Env. filtro', 0, 1, t.inst.fe, 0.01, v => t.inst.fe = v);
     slider(inst, 'Decay filtro', 0.03, 2, t.inst.fd, 0.01, v => t.inst.fd = v);
     slider(inst, 'Ataque', 0.003, 1.5, t.inst.atk, 0.005, v => t.inst.atk = v);

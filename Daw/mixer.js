@@ -23,10 +23,10 @@ function renderMixer() {
       led.onclick = () => { ins.mute = !ins.mute; led.classList.toggle('on', !ins.mute); if (eng) eng.applyMix(); };
       const so = el('button', 'solo' + (ins.solo ? ' on' : ''), 'S'); so.title = 'Solo'; so.onclick = () => { ins.solo = !ins.solo; so.classList.toggle('on', ins.solo); if (eng) eng.applyMix(); };
       top.append(led, num, so);
-      const pk = makeKnob('PAN', -1, 1, ins.pan, 0, v => { ins.pan = v; if (eng) eng.applyMix(); autoRec('i' + idx + '.pan', v); }, 30); s.append(top, pk.el);
+      const pk = makeKnob('PAN', -1, 1, ins.pan, 0, v => { ins.pan = v; if (eng) eng.applyMix(); autoRec('i' + idx + '.pan', v); }, 30, 'i' + idx + '.pan'); s.append(top, pk.el);
     } else { top.append(num); s.appendChild(top); }
     const fw = el('div', 'sfader'), cv = el('canvas'); cv.width = 22; cv.height = 170;
-    const f = el('input'); f.type = 'range'; f.min = 0; f.max = 1.25; f.step = 0.005; f.value = get(); f.className = 'fader';
+    const f = el('input'); f.type = 'range'; f.min = 0; f.max = 1.25; f.step = 0.005; f.value = get(); f.className = 'fader'; f.dataset.auto = isMaster ? 'm.vol' : 'i' + idx + '.vol';
     const db = el('div', 'sdb', dbTxt(get()));
     f.oninput = () => { set(+f.value); db.textContent = dbTxt(+f.value); if (eng) eng.applyMix(); autoRec(isMaster ? 'm.vol' : 'i' + idx + '.vol', +f.value); };
     f.ondblclick = () => { f.value = 0.8; f.oninput(); };
@@ -86,7 +86,7 @@ function renderMixer() {
       pw.onclick = () => { f.on = f.on === false; if (eng) eng.rebuildInsert(mixSel); renderMixer(); }; head.appendChild(pw);
     }
     slot.appendChild(head);
-    if (f) FX_DEFS[f.type].params.forEach(d => slider(slot, d.n, d.min, d.max, f.p[d.k], d.step, v => { f.p[d.k] = v; const nodes = eng && eng.ins[mixSel].fx[k]; if (nodes) nodes.update(); autoRec('i' + mixSel + '.f' + k + '.' + d.k, v); }, d.log));
+    if (f) FX_DEFS[f.type].params.forEach(d => slider(slot, d.n, d.min, d.max, f.p[d.k], d.step, v => { f.p[d.k] = v; const nodes = eng && eng.ins[mixSel].fx[k]; if (nodes) nodes.update(); autoRec('i' + mixSel + '.f' + k + '.' + d.k, v); }, d.log, 'i' + mixSel + '.f' + k + '.' + d.k));
     panel.appendChild(slot);
   }
 }
@@ -117,7 +117,7 @@ function renderGroups(panel) {
     bm.onclick = () => { g.mute = !g.mute; if (eng) eng.applyMix(); renderMixer(); }; bs.onclick = () => { g.solo = !g.solo; if (eng) eng.applyMix(); renderMixer(); };
     dl.onclick = () => { song.groups.splice(k, 1); song.tracks.forEach(t => { if (t.group === k) t.group = -1; else if (t.group > k) t.group--; }); if (eng) eng.applyMix(); renderMixer(); };
     head.append(nm, bm, bs, dl); box.appendChild(head);
-    slider(box, 'VCA', 0, 1.25, g.vca, 0.01, v => { g.vca = v; if (eng) eng.applyMix(); autoRec('g' + k + '.vca', v); });
+    slider(box, 'VCA', 0, 1.25, g.vca, 0.01, v => { g.vca = v; if (eng) eng.applyMix(); autoRec('g' + k + '.vca', v); }, false, 'g' + k + '.vca');
     const mem = el('div', 'members');
     song.tracks.forEach((t, i) => { const l = el('label', ''), c = el('input'); c.type = 'checkbox'; c.checked = t.group === k; c.onchange = () => { t.group = c.checked ? k : (t.group === k ? -1 : t.group); if (eng) eng.applyMix(); renderMixer(); }; l.append(c, ' ' + t.name); mem.appendChild(l); });
     box.appendChild(mem); panel.appendChild(box);

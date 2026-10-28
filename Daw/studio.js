@@ -41,7 +41,7 @@ function renderRackPane() {
     if (t.kind === 'audio') return;
     const c = rackClip(ti, false), box = el('div', 'rackrow'), head = el('div', 'rh'); head.style.setProperty('--c', t.color);
     const led = el('button', 'led' + (t.mute ? '' : ' on')); led.title = 'Activar / silenciar canal'; led.onclick = () => { t.mute = !t.mute; led.classList.toggle('on', !t.mute); if (eng) eng.applyMix(); };
-    const kp = makeKnob('PAN', -1, 1, t.pan, 0, v => { t.pan = v; if (eng) eng.applyMix(); autoRec('t' + ti + '.pan', v); }, 26), kv = makeKnob('VOL', 0, 1.2, t.vol, 0.8, v => { t.vol = v; if (eng) eng.applyMix(); autoRec('t' + ti + '.vol', v); }, 26);
+    const kp = makeKnob('PAN', -1, 1, t.pan, 0, v => { t.pan = v; if (eng) eng.applyMix(); autoRec('t' + ti + '.pan', v); }, 26, 't' + ti + '.pan'), kv = makeKnob('VOL', 0, 1.2, t.vol, 0.8, v => { t.vol = v; if (eng) eng.applyMix(); autoRec('t' + ti + '.vol', v); }, 26, 't' + ti + '.vol');
     const nb = el('button', 'cname' + (ti === selTrack ? ' sel' : ''), t.name); nb.onclick = () => { selTrack = ti; renderAll(); }; nb.ondblclick = () => { selTrack = ti; openWin('roll'); renderAll(); };
     const ins = el('select', 'insel'); ins.title = 'Insert del mixer al que va este canal'; song.inserts.forEach((x, k) => { const o = el('option', '', String(k + 1)); o.value = k; ins.appendChild(o); }); ins.value = t.insert;
     ins.onchange = () => { t.insert = +ins.value; if (eng) eng.applyMix(); };
@@ -78,6 +78,13 @@ function groupByStart(notes) { const m = new Map(); notes.forEach(n => { const k
 function rollToolsRow(pane, c, t) {
   const row = el('div', 'rollbar'); row.appendChild(el('span', 'sep', 'Herramientas'));
   const act = (label, tip, fn) => { const b = el('button', '', label); b.title = tip; b.onclick = () => { fn(); drawRoll(); }; row.appendChild(b); };
+  act('Riff', 'Genera un riff aleatorio en la escala elegida (Ctrl+Z para volver)', () => {
+    const L = c.bars * 16, sc = SCALES[ROLL.scale] || SCALES.minor, drums = t.kind === 'drums', out = [];
+    if (drums) { for (let st = 0; st < L; st++) { if (st % 4 === 0) out.push({ s: st, l: 1, n: 0, v: 0.9 }); if (st % 8 === 4) out.push({ s: st, l: 1, n: 1, v: 0.85 }); if (Math.random() < 0.5 && st % 2 === 0) out.push({ s: st, l: 1, n: 2, v: 0.6 }); if (Math.random() < 0.08) out.push({ s: st, l: 1, n: 3 + Math.floor(Math.random() * 5), v: 0.6 }); } }
+    else { let deg = 0; for (let st = 0; st < L; st += 1) { if (Math.random() < 0.55) { deg = Math.max(-4, Math.min(11, deg + Math.floor(Math.random() * 5) - 2)); const oct = Math.floor(deg / sc.length), idx = ((deg % sc.length) + sc.length) % sc.length;
+        out.push({ s: st, l: Math.random() < 0.3 ? 2 : 1, n: 60 + ROLL.root + sc[idx] + 12 * oct - (ROLL.root > 6 ? 12 : 0), v: 0.6 + Math.random() * 0.35 }); } } }
+    out.forEach(n => { n.l = Math.min(n.l, L - n.s); }); c.notes = out; ROLL.sel.clear();
+  });
   act('Cuantizar', 'Ajusta inicio y duración al snap', () => { const sn = ROLL.snap > 0 ? ROLL.snap : 1; rollTargets(c).forEach(n => { n.s = Math.max(0, Math.round(n.s / sn) * sn); n.l = Math.max(sn, Math.round(n.l / sn) * sn); n.s = Math.min(n.s, c.bars * 16 - sn); n.l = Math.min(n.l, c.bars * 16 - n.s); }); });
   act('Humanizar', 'Variación aleatoria de tiempo y velocidad', () => rollTargets(c).forEach(n => { n.s = Math.max(0, Math.min(c.bars * 16 - n.l, n.s + (Math.random() - 0.5) * 0.3)); n.v = Math.max(0.2, Math.min(1, (n.v === undefined ? 0.8 : n.v) + (Math.random() - 0.5) * 0.3)); }));
   const pat = el('select'); [['up', 'Arp ↑'], ['down', 'Arp ↓'], ['updown', 'Arp ↑↓'], ['rand', 'Arp azar']].forEach(([v, l]) => { const o = el('option', '', l); o.value = v; pat.appendChild(o); }); pat.value = TOOLSET.arp; pat.onchange = () => { TOOLSET.arp = pat.value; };
