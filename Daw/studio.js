@@ -7,9 +7,17 @@ const RACK = { note: {} };
 function rackClip(ti, create) { const t = song.tracks[ti]; if (!t.clips[selSlot] && create) t.clips[selSlot] = clipNew(); return t.clips[selSlot]; }
 function renderRackPane() {
   const pane = $('#rackPane'); pane.innerHTML = '';
-  const hb = el('div', 'rollbar rackhead'), pv = el('button', 'mini', '◀'), nx = el('button', 'mini', '▶'), pn = el('span', 'lcd2', 'Patrón ' + (selSlot + 1));
+  const P = song.patterns[selSlot], hb = el('div', 'rollbar rackhead'), pv = el('button', 'mini', '◀'), nx = el('button', 'mini', '▶');
   pv.onclick = () => { selSlot = (selSlot + SCENES - 1) % SCENES; renderAll(); }; nx.onclick = () => { selSlot = (selSlot + 1) % SCENES; renderAll(); };
-  hb.append(pv, pn, nx); hb.title = 'Clic: activar/desactivar paso (arrastra para pintar) · Mayús+clic: acento'; pane.appendChild(hb);
+  const nm = el('input'); nm.type = 'text'; nm.value = P.name; nm.style.width = '120px'; nm.onchange = () => { P.name = nm.value || P.name; renderAll(); };
+  const col = el('input'); col.type = 'color'; col.value = P.color; col.style.cssText = 'width:26px;height:22px;padding:0;border:0;background:none'; col.onchange = () => { P.color = col.value; renderAll(); };
+  const cl = el('button', 'mini', 'Clonar'); cl.title = 'Copia este patrón en el siguiente patrón vacío';
+  cl.onclick = () => {
+    const to = Array.from({ length: SCENES }, (_, k) => (selSlot + 1 + k) % SCENES).find(k => k !== selSlot && !song.tracks.some(tt => tt.clips[k])); if (to === undefined) { status('No hay patrones vacíos.'); return; }
+    song.tracks.forEach(tt => { tt.clips[to] = tt.clips[selSlot] ? JSON.parse(JSON.stringify(tt.clips[selSlot])) : null; }); song.patterns[to] = { name: P.name + ' copia', color: P.color }; selSlot = to; renderAll(); status('Patrón clonado.');
+  };
+  const cr = el('button', 'mini', 'Limpiar'); cr.title = 'Vacía todos los canales de este patrón'; cr.onclick = () => { song.tracks.forEach(tt => { tt.clips[selSlot] = null; }); renderAll(); };
+  hb.append(pv, nm, nx, col, cl, cr); hb.title = 'Clic: activar/desactivar paso (arrastra para pintar) · Mayús+clic: acento'; pane.appendChild(hb);
   const wrap = el('div', 'rack'); pane.appendChild(wrap); let drag = null;
   const stepCell = (ti, pitchFn, c, s) => {
     const b = el('div', 'rs g' + (Math.floor(s / 4) % 2)); b.dataset.s = s;
@@ -34,8 +42,10 @@ function renderRackPane() {
     const c = rackClip(ti, false), box = el('div', 'rackrow'), head = el('div', 'rh'); head.style.setProperty('--c', t.color);
     const led = el('button', 'led' + (t.mute ? '' : ' on')); led.title = 'Activar / silenciar canal'; led.onclick = () => { t.mute = !t.mute; led.classList.toggle('on', !t.mute); if (eng) eng.applyMix(); };
     const kp = makeKnob('PAN', -1, 1, t.pan, 0, v => { t.pan = v; if (eng) eng.applyMix(); autoRec('t' + ti + '.pan', v); }, 26), kv = makeKnob('VOL', 0, 1.2, t.vol, 0.8, v => { t.vol = v; if (eng) eng.applyMix(); autoRec('t' + ti + '.vol', v); }, 26);
-    const nb = el('button', 'cname' + (ti === selTrack ? ' sel' : ''), t.name); nb.onclick = () => { selTrack = ti; renderAll(); }; nb.ondblclick = () => openWin('dev');
-    head.append(led, kp.el, kv.el, nb);
+    const nb = el('button', 'cname' + (ti === selTrack ? ' sel' : ''), t.name); nb.onclick = () => { selTrack = ti; renderAll(); }; nb.ondblclick = () => { selTrack = ti; openWin('roll'); renderAll(); };
+    const ins = el('select', 'insel'); ins.title = 'Insert del mixer al que va este canal'; song.inserts.forEach((x, k) => { const o = el('option', '', String(k + 1)); o.value = k; ins.appendChild(o); }); ins.value = t.insert;
+    ins.onchange = () => { t.insert = +ins.value; if (eng) eng.applyMix(); };
+    head.append(led, kp.el, kv.el, nb, ins);
     if (!c) { const mk = el('button', '', '+ crear patrón'); mk.onclick = () => { rackClip(ti, true); renderRackPane(); }; head.appendChild(mk); box.appendChild(head); wrap.appendChild(box); return; }
     const L = c.bars * 16;
     if (t.kind === 'drums') {
@@ -124,7 +134,7 @@ function exportMidi() {
   tracks.push(chunk('MTrk', tempo));
   song.tracks.forEach((t, i) => {
     if (t.kind === 'audio') return;
-    const ev = [], items = song.arr.filter(a => a.t === i && t.clips[a.slot]);
+    const ev = [], items = song.arr.filter(a => (a.pat !== undefined ? t.clips[a.pat] : (a.t === i && t.clips[a.slot]))).map(a => (a.pat !== undefined ? { s: a.s, l: a.l, slot: a.pat, off: a.off } : a));
     const place = (c, base, len, off) => { const L = c.bars * 16; for (let rep = -1; rep * L < len + L; rep++) c.notes.forEach(n => { const s = rep * L + n.s - off; if (s >= 0 && s < len) ev.push([base + s, Math.min(n.l, len - s), n.n, n.v === undefined ? 0.8 : n.v]); }); };
     if (items.length) items.forEach(it => place(t.clips[it.slot], it.s, it.l, it.off || 0)); else { const c = t.clips[selSlot]; if (c) place(c, 0, c.bars * 16, 0); }
     if (!ev.length) return;
@@ -175,7 +185,7 @@ $('#btnMidiIn').onclick = () => $('#midiIn').click(); $('#btnMidiOut').onclick =
 // ----------------------------------------------------------------- stems
 $('#btnStems').onclick = async () => {
   try {
-    const used = song.tracks.map((t, i) => i).filter(i => song.arr.some(a => a.t === i)); if (!used.length) throw new Error('El Arrangement está vacío.');
+    const used = song.tracks.map((t, i) => i).filter(i => song.arr.some(a => a.t === i || (a.pat !== undefined && song.tracks[i].clips[a.pat]))); if (!used.length) throw new Error('El Arrangement está vacío.');
     for (const i of used) {
       status('Renderizando stem: ' + song.tracks[i].name + '…', 0);
       const s = JSON.parse(JSON.stringify(song)); s.tracks.forEach((t, k) => { t.mute = k !== i; t.solo = false; });

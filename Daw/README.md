@@ -25,6 +25,7 @@ Se abre en el navegador, sin instalar: abre `Daw/index.html` (o `python3 -m http
 - **Marcadores y mapa de tempo**: marcadores en la regla (clic para ir, clic derecho para borrar); el mapa de tempo es un carril de automatización de BPM.
 - **Grupos y VCA**: grupos de pistas con VCA, mute y solo; envíos pre-fader o post-fader.
 - **Automatización en vivo**: modos Leer, Touch, Latch y Escribir sobre cualquier control durante la reproducción del Arrangement.
+- **Flujo de patrones (FL)**: 8 patrones con nombre y color; el Playlist tiene 16 pistas genéricas donde se colocan patrones completos (suenan todos sus canales), se mueven, recortan, cortan y silencian. Se pueden arrastrar desde el Navegador (patrones y samples). Clonar y limpiar patrón, salida de cada canal a un insert desde el Channel Rack y selector de patrón en la barra superior.
 - **Instrumentos**: sintetizador (onda, corte, resonancia, ataque, release) y caja de ritmos sintetizada (8 sonidos).
 - **Efectos**: filtro, delay, reverb, distorsión, chorus, compresor, EQ 3 bandas.
 - **Proyecto**: Guardar/Abrir (JSON), Exportar WAV (render offline del Arrangement).

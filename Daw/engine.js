@@ -449,6 +449,14 @@ class Engine {
       const anySolo = s.tracks.some(t => t.solo);
       (s.autos || []).forEach(au => { if (au.pts && au.pts.length) this.applyAuto(au, step, time, sd); });
       s.arr.forEach(it => {
+        if (it.pat !== undefined) {                                   // patrón completo: suenan todos los canales
+          if (it.m || step < it.s || step >= it.s + it.l || (s.lanes && s.lanes[it.lane] && s.lanes[it.lane].mute)) return;
+          let patLen = 16; s.tracks.forEach(tt => { const cc = tt.clips[it.pat]; if (cc) patLen = Math.max(patLen, cc.bars * 16); });
+          const lp = (step - it.s + (it.off || 0)) % patLen;
+          s.tracks.forEach((tt, ti) => { const cc = tt.clips[it.pat]; if (!cc || lp >= cc.bars * 16) return; this.fire(tt, ti, cc, lp, time, sd, step === it.s, it.s + it.l - step, null); });
+          return;
+        }
+        if (s.lanes && s.lanes[it.lane !== undefined ? it.lane : it.t] && s.lanes[it.lane !== undefined ? it.lane : it.t].mute) return;
         const t = s.tracks[it.t]; let c = t && t.clips[it.slot];
         if (!c || it.m || step < it.s || step >= it.s + it.l) return;
         if (c.audio && it.take !== undefined && c.takes && c.takes[it.take]) c = Object.assign({}, c, { audio: c.takes[it.take] });
@@ -516,7 +524,7 @@ class Engine {
 // ---- exportar a WAV (render offline de la vista Arrangement)
 async function renderWav(song) {
   let steps = 0;
-  song.arr.forEach(it => { if (song.tracks[it.t] && song.tracks[it.t].clips[it.slot]) steps = Math.max(steps, it.s + it.l); });
+  song.arr.forEach(it => { if (it.pat !== undefined ? song.tracks.some(t => t.clips[it.pat]) : (song.tracks[it.t] && song.tracks[it.t].clips[it.slot])) steps = Math.max(steps, it.s + it.l); });
   if (!steps) throw new Error('El Arrangement está vacío.');
   const sr = 44100, sd = 60 / song.bpm / 4, len = Math.ceil((steps * sd + 2.5) * sr);
   const off = new OfflineAudioContext(2, len, sr), eng = new Engine(off, song);

@@ -2,7 +2,10 @@
 // Modelo de datos de Xaza Live (canción, pistas, inserts del mixer, clips, arrangement).
 
 const COLORS = ['#ff6b6b', '#ffb400', '#f4e04d', '#4fd37a', '#35c9c9', '#6d8cff', '#b784ff', '#ff7ac8'];
-const SCENES = 8, NINS = 16, NSLOTS = 10;
+const SCENES = 8, NINS = 16, NSLOTS = 10, NLANES = 16;
+const PAT_COLORS = ['#f6921e', '#6d8cff', '#4fd37a', '#ff6b6b', '#b784ff', '#35c9c9', '#f4e04d', '#ff7ac8'];
+const defPatterns = () => Array.from({ length: SCENES }, (_, i) => ({ name: 'Patrón ' + (i + 1), color: PAT_COLORS[i % PAT_COLORS.length] }));
+const defLanes = () => Array.from({ length: NLANES }, (_, i) => ({ name: 'Pista ' + (i + 1), mute: false }));
 
 const clipNew = (bars = 1) => ({ bars, notes: [] });
 const defInst = (o = {}) => Object.assign({ wave: 'sawtooth', cutoff: 3000, res: 1, atk: 0.01, rel: 0.2, w2: 'none', d2: 12, sub: 0, fe: 0, fd: 0.25 }, o);
@@ -54,10 +57,10 @@ function demoSong() {
   T.forEach((t, i) => { inserts[i].name = t.name; });
   inserts[2].fx[0] = fxNew('delay'); inserts[3].fx[0] = fxNew('chorus'); inserts[3].fx[1] = fxNew('reverb');
   inserts[0].fx[0] = fxNew('comp');
-  const arr = [], put = (t, from, to, slot) => { arr.push({ t, s: from * 16, l: (to - from) * 16, slot, off: 0 }); };
-  put(0, 0, 8, 0); put(0, 8, 16, 1); put(1, 2, 16, 0); put(3, 0, 16, 0); put(2, 4, 16, 0);
+  T[1].clips[1].bars = 1; T[2].clips[1] = clipNew(1); T[3].clips[1] = null;
+  const arr = [{ lane: 0, pat: 0, s: 0, l: 8 * 16, off: 0 }, { lane: 0, pat: 1, s: 8 * 16, l: 8 * 16, off: 0 }, { lane: 1, pat: 0, s: 8 * 16, l: 8 * 16, off: 0 }];
   T[3].sends = [0.35, 0]; T[2].sends = [0, 0.25];
-  return { groups: [], markers: [{ s: 0, name: 'Inicio' }, { s: 64, name: 'Estribillo' }], punch: { on: false, start: 0, end: 16, pre: 1 }, bpm: 118, swing: 0, masterVol: 0.9, tracks: T, inserts, returns: defReturns(), autos: [{ target: 't3.vol', pts: [{ s: 0, v: 0.16 }, { s: 64, v: 0.8 }, { s: 224, v: 0.8 }, { s: 256, v: 0.24 }] }], arr, loop: { on: false, start: 0, end: 64 } };
+  return { patterns: defPatterns(), lanes: defLanes(), groups: [], markers: [{ s: 0, name: 'Inicio' }, { s: 64, name: 'Estribillo' }], punch: { on: false, start: 0, end: 16, pre: 1 }, bpm: 118, swing: 0, masterVol: 0.9, tracks: T, inserts, returns: defReturns(), autos: [{ target: 't3.vol', pts: [{ s: 0, v: 0.16 }, { s: 64, v: 0.8 }, { s: 224, v: 0.8 }, { s: 256, v: 0.24 }] }], arr, loop: { on: false, start: 0, end: 64 } };
 }
 
 // Acepta proyectos antiguos (formato por compases / efectos por pista) y completa lo que falte.
@@ -86,6 +89,7 @@ function upgradeSong(s) {
   s.loop = s.loop || { on: false, start: 0, end: 64 }; s.swing = s.swing || 0;
   if (!Array.isArray(s.returns) || s.returns.length < 2) s.returns = defReturns();
   s.tracks.forEach(t => { t.sends = t.sends || [0, 0]; t.preSend = t.preSend || [false, false]; t.group = t.group === undefined ? -1 : t.group; });
+  s.patterns = (s.patterns || []).concat(defPatterns().slice((s.patterns || []).length)).slice(0, SCENES); s.lanes = (s.lanes || []).concat(defLanes().slice((s.lanes || []).length)).slice(0, NLANES);
   s.groups = s.groups || []; s.markers = s.markers || []; s.punch = s.punch || { on: false, start: 0, end: 16, pre: 1 };
   return s;
 }

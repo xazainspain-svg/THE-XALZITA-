@@ -8,7 +8,9 @@ const ARR = { z: 6, snap: 4, sel: null, cursor: 0, follow: true, autoOpen: {}, a
 const LANE_H = 62, AUTO_H = 72, HEAD_W = 150, RULER_H2 = 26, ARR_STEPS = ARR_BARS * 16;
 const ARR_SNAPS = [['Compás', 16], ['Tiempo', 4], ['1/2 tiempo', 2], ['Paso', 1], ['Sin snap', 0]];
 
-const itemClip = it => { const t = song.tracks[it.t]; return t && t.clips[it.slot]; };
+const laneOf = it => it.lane !== undefined ? it.lane : it.t;
+const patLen = slot => { let L = 16; song.tracks.forEach(t => { const c = t.clips[slot]; if (c) L = Math.max(L, c.bars * 16); }); return L; };
+const itemClip = it => { if (it.pat !== undefined) return { bars: patLen(it.pat) / 16, notes: [], pattern: true }; const t = song.tracks[it.t]; return t && t.clips[it.slot]; };
 const itemLoopLen = it => { const c = itemClip(it); return c ? c.bars * 16 : 16; };
 const aSn = () => ARR.mode === 'grid' ? (ARR.snap || 4) : ARR.snap;
 const aSnapF = v => aSn() > 0 ? Math.floor(v / aSn() + 1e-9) * aSn() : v;
@@ -16,9 +18,9 @@ const aSnapR = v => aSn() > 0 ? Math.round(v / aSn()) * aSn() : v;
 
 function resolveOverlap(it) {
   const e = it.s + it.l;
-  song.arr = song.arr.filter(o => o === it || o.t !== it.t || !(o.s >= it.s && o.s + o.l <= e));
+  song.arr = song.arr.filter(o => o === it || laneOf(o) !== laneOf(it) || !(o.s >= it.s && o.s + o.l <= e));
   [...song.arr].forEach(o => {
-    if (o === it || o.t !== it.t) return;
+    if (o === it || laneOf(o) !== laneOf(it)) return;
     const oe = o.s + o.l, ll = itemLoopLen(o);
     if (o.s < it.s && oe > it.s) {
       if (oe > e) song.arr.push(Object.assign({}, o, { s: e, l: oe - e, off: ((o.off || 0) + (e - o.s)) % ll }));
@@ -29,7 +31,7 @@ function resolveOverlap(it) {
 
 function arrSelect(it) {
   ARR.sel = it;
-  if (it) { selTrack = it.t; selSlot = it.slot; }
+  if (it) { if (it.pat !== undefined) selSlot = it.pat; else { selTrack = it.t; selSlot = it.slot; } }
   document.querySelectorAll('.aclip').forEach(d => d.classList.toggle('sel', d._it === it));
   renderBottom();
 }
@@ -42,7 +44,7 @@ function renderArr() {
   zr.onchange = () => { ARR.z = +zr.value; renderArr(); };
   const sn = el('select'); ARR_SNAPS.forEach(([l, v]) => { const o = el('option', '', l); o.value = v; sn.appendChild(o); }); sn.value = ARR.snap; sn.onchange = () => { ARR.snap = +sn.value; };
   const loop = el('button', song.loop.on ? 'on' : '', '⟲ Loop'); loop.onclick = () => { song.loop.on = !song.loop.on; renderArr(); };
-  const cap = el('button', '', 'Volcar escenas →'); cap.title = 'Coloca las escenas de Session una tras otra desde el cursor'; cap.onclick = captureScenes;
+  const cap = el('button', '', 'Colocar patrones →'); cap.title = 'Coloca todos los patrones con contenido, uno tras otro, desde el cursor en la pista seleccionada'; cap.onclick = captureScenes;
   const dup = el('button', '', 'Duplicar'); dup.title = 'Ctrl+D'; dup.onclick = arrDuplicate;
   const spl = el('button', '', 'Dividir'); spl.title = 'Ctrl+E (en el cursor)'; spl.onclick = arrSplit;
   const del = el('button', '', 'Borrar'); del.title = 'Supr'; del.onclick = arrDelete;
@@ -60,22 +62,23 @@ function renderArr() {
   const rcv = el('canvas'); rcv.width = W; rcv.height = RULER_H2; rcv.className = 'arrruler'; board.appendChild(rcv);
   drawRuler(rcv); bindRuler(rcv);
 
-  song.tracks.forEach((t, i) => {
-    const head = el('div', 'arrhead'); head.style.setProperty('--c', t.color); head.style.height = LANE_H + 'px';
-    const top = el('div', 'hrow'), nm = el('b', '', t.name); nm.style.cursor = 'pointer'; nm.onclick = () => { selTrack = i; renderBottom(); };
-    const led = el('button', 'led' + (t.mute ? '' : ' on')); led.title = 'Activar / silenciar pista (clic derecho: solo)';
-    led.onclick = () => { t.mute = !t.mute; led.classList.toggle('on', !t.mute); if (eng) eng.applyMix(); };
-    led.oncontextmenu = e => { e.preventDefault(); t.solo = !t.solo; led.style.outline = t.solo ? '2px solid #f6921e' : ''; if (eng) eng.applyMix(); };
-    top.append(led, nm); head.appendChild(top);
-    const row2 = el('div', 'hrow'), sl = el('select'); const slots = t.clips.map((c, k) => c ? k : -1).filter(k => k >= 0);
-    slots.forEach(k => { const o = el('option', '', 'Clip ' + (k + 1)); o.value = k; sl.appendChild(o); });
-    if (!slots.length) { const o = el('option', '', '(sin clips)'); o.value = -1; sl.appendChild(o); }
-    sl.value = ARR.slotSel[i] !== undefined && slots.includes(ARR.slotSel[i]) ? ARR.slotSel[i] : (slots[0] !== undefined ? slots[0] : -1);
-    sl.onchange = () => { ARR.slotSel[i] = +sl.value; };
-    if (false) row2.append(sl); board.appendChild(head);
+  song.lanes.forEach((ln, i) => {
+    const head = el('div', 'arrhead'); head.style.setProperty('--c', '#5d6a75'); head.style.height = LANE_H + 'px';
+    const top = el('div', 'hrow'), nm = el('b', '', ln.name); nm.style.cursor = 'pointer'; nm.title = 'Doble clic: cambiar el nombre'; ARR.lane = ARR.lane || 0; if (ARR.lane === i) head.classList.add('sel');
+    nm.onclick = () => { ARR.lane = i; renderArr(); };
+    nm.ondblclick = () => { const inp = el('input'); inp.type = 'text'; inp.value = ln.name; inp.style.width = '80px'; nm.replaceWith(inp); inp.focus(); inp.onblur = inp.onchange = () => { ln.name = inp.value || ln.name; renderArr(); }; };
+    const led = el('button', 'led' + (ln.mute ? '' : ' on')); led.title = 'Activar / silenciar pista';
+    led.onclick = () => { ln.mute = !ln.mute; led.classList.toggle('on', !ln.mute); };
+    top.append(led, nm); head.appendChild(top); board.appendChild(head);
 
     const lane = el('div', 'arrlane'); lane.style.height = LANE_H + 'px'; lane.style.width = W + 'px';
     lane.style.backgroundSize = (16 * z) + 'px 100%, ' + (4 * z) + 'px 100%';
+    const place = (e, pat, extra) => {
+      const r = lane.getBoundingClientRect(), slot = pat === undefined ? selSlot : pat;
+      if (!song.tracks.some(t => t.clips[slot])) { status('El ' + song.patterns[slot].name + ' está vacío. Dibuja notas en el Channel Rack o el Piano roll primero.'); }
+      const len = patLen(slot), s0 = Math.max(0, Math.min(ARR_STEPS - Math.min(len, ARR_STEPS), aSnapF((e.clientX - r.left) / z)));
+      const it = Object.assign({ lane: i, pat: slot, s: s0, l: len, off: 0 }, extra || {}); song.arr.push(it); resolveOverlap(it); ARR.sel = it; ARR.lane = i; selSlot = slot; renderArr(); renderBottom();
+    };
     lane.onmousedown = e => {
       if (ARR.tool === 'select' && (e.target === lane || e.target.classList.contains('aclip') || e.target.parentNode.classList.contains('aclip'))) {
         const r = lane.getBoundingClientRect(), a = Math.max(0, aSnapF((e.clientX - r.left) / z)), box = el('div', 'rangesel');
@@ -87,16 +90,19 @@ function renderArr() {
       ARR.cursor = aSnapF((e.clientX - lane.getBoundingClientRect().left) / z); arrSelect(null); moveCursor();
     };
     lane.ondblclick = null;
-    const place = e => {
-      const r = lane.getBoundingClientRect(), slot = selSlot;
-      if (!t.clips[slot]) { if (t.kind === 'audio') { status('Esta pista de audio no tiene clip en el patrón ' + (slot + 1) + '. Impórtalo desde Session o el Navegador.'); return; } t.clips[slot] = clipNew(); }
-      const len = t.clips[slot].bars * 16, s0 = Math.max(0, Math.min(ARR_STEPS - len, aSnapF((e.clientX - r.left) / z)));
-      const it = { t: i, s: s0, l: len, slot, off: 0 }; song.arr.push(it); resolveOverlap(it); ARR.sel = it; selTrack = i; renderArr(); renderBottom();
+    lane.ondragover = e => { e.preventDefault(); };
+    lane.ondrop = e => {                                  // arrastrar desde el navegador: patrón o sample
+      e.preventDefault(); const pat = e.dataTransfer.getData('xaza/pat'), smp = e.dataTransfer.getData('xaza/sample');
+      if (pat !== '') place(e, +pat); else if (smp) {
+        const id = smp, a2 = AUDIO[id]; if (!a2) return; const n = song.tracks.length; if (n >= 16) { status('Máximo 16 pistas.'); return; }
+        const t = trackNew(a2.name, 'audio', COLORS[n % COLORS.length], null, Math.min(n, NINS - 1)); t.clips[selSlot] = audioClipFromId(id); song.tracks.push(t); rebuildEngine();
+        const r = lane.getBoundingClientRect(), L = t.clips[selSlot].bars * 16, s0 = Math.max(0, aSnapF((e.clientX - r.left) / z)), it = { lane: i, t: n, slot: selSlot, s: s0, l: L, off: 0 };
+        song.arr.push(it); resolveOverlap(it); renderAll(); status('Sample colocado en el Playlist (nuevo canal de audio ' + t.name + ').');
+      }
     };
-    song.arr.filter(it => it.t === i && itemClip(it)).forEach(it => lane.appendChild(makeClip(it, t, z)));
+    song.arr.filter(it => laneOf(it) === i && itemClip(it)).forEach(it => lane.appendChild(makeClip(it, it.pat !== undefined ? null : song.tracks[it.t], z)));
     if (ARR.range && ARR.range.t === i) { const rb = el('div', 'rangesel'); rb.style.left = ARR.range.s * z + 'px'; rb.style.width = (ARR.range.e - ARR.range.s) * z + 'px'; lane.appendChild(rb); }
     board.appendChild(lane);
-
   });
   song.autos.forEach((au, k) => {                     // carriles de automatización de cualquier parámetro
     const T = autoInfo(au.target, song), ah = el('div', 'arrhead auto'); ah.style.height = AUTO_H + 'px'; ah.style.setProperty('--c', '#ffb400');
@@ -114,12 +120,13 @@ function moveCursor() { if (ARR.cur) ARR.cur.style.left = (HEAD_W + ARR.cursor *
 // ----------------------------------------------------------------- clips
 function makeClip(it, t, z) {
   const c = itemClip(it), d = el('div', 'aclip' + (ARR.sel === it ? ' sel' : ''));
-  d._it = it; if (it.m) d.classList.add('muted'); d.style.left = (it.s * z) + 'px'; d.style.width = Math.max(4, it.l * z - 1) + 'px'; d.style.background = t.color;
+  const P = it.pat !== undefined ? song.patterns[it.pat] : null;
+  d._it = it; if (it.m) d.classList.add('muted'); d.style.left = (it.s * z) + 'px'; d.style.width = Math.max(4, it.l * z - 1) + 'px'; d.style.background = P ? P.color : t.color;
   const cv = el('canvas'); cv.width = Math.min(4096, Math.ceil(it.l * z)); cv.height = LANE_H - 18; d.appendChild(cv);
   paintClip(cv, it, t, c, z);
   if (c.audio) { const f = el('canvas'); f.width = Math.min(4096, Math.ceil(it.l * z)); f.height = LANE_H; f.style.cssText = 'position:absolute;left:0;top:0;pointer-events:none'; d.appendChild(f); const g = f.getContext('2d'); g.fillStyle = 'rgba(0,0,0,.45)';
     const fi = (it.fi || 0) * z, fo = (it.fo || 0) * z, W = f.width, H = f.height; if (fi > 1) { g.beginPath(); g.moveTo(0, 0); g.lineTo(fi, 0); g.lineTo(0, H); g.fill(); } if (fo > 1) { g.beginPath(); g.moveTo(W, 0); g.lineTo(W - fo, 0); g.lineTo(W, H); g.fill(); } }
-  d.appendChild(el('span', 'lbl', c.name || ('Clip ' + (it.slot + 1))));
+  d.appendChild(el('span', 'lbl', P ? P.name : (c.name || ('Clip ' + (it.slot + 1)))));
   d.onmousedown = e => {
     if (ARR.tool !== 'select') e.stopPropagation();
     if (e.button === 2 || ARR.tool === 'del') { song.arr.splice(song.arr.indexOf(it), 1); if (ARR.sel === it) ARR.sel = null; renderArr(); return; }
@@ -136,7 +143,18 @@ function makeClip(it, t, z) {
   d.ondblclick = e => { e.stopPropagation(); openWin('roll'); };
   return d;
 }
+function paintPattern(cv, it, z) {
+  const g = cv.getContext('2d'), H = cv.height, L = patLen(it.pat), chans = song.tracks.filter(t => t.clips[it.pat] && t.kind !== 'audio'); let lo = 127, hi = 0;
+  chans.forEach(t => { if (t.kind === 'drums') return; t.clips[it.pat].notes.forEach(n => { lo = Math.min(lo, n.n); hi = Math.max(hi, n.n); }); }); if (hi < lo) { lo = 36; hi = 60; } const span = Math.max(hi - lo, 12);
+  for (let rep = -1; rep * L < it.l + L; rep++) {
+    const base = rep * L - (it.off || 0); if (base > 0 && base < it.l) { g.fillStyle = 'rgba(0,0,0,.35)'; g.fillRect(base * z, 0, 1, H); }
+    g.fillStyle = 'rgba(0,0,0,.55)';
+    chans.forEach(t => { const c = t.clips[it.pat]; c.notes.forEach(n => { const x = (base + n.s) * z, w = Math.max(1.5, n.l * z - 0.5); if (x + w < 0 || x > it.l * z || n.s >= c.bars * 16) return;
+      const y = t.kind === 'drums' ? H - 4 - (n.n % 8) * 1.2 : (1 - (n.n - lo) / (span + 1)) * (H - 3); g.fillRect(Math.max(0, x), y, Math.min(w, it.l * z - x), 2); }); });
+  }
+}
 function paintClip(cv, it, t, c, z) {
+  if (c.pattern) { paintPattern(cv, it, z); return; }
   if (c.audio) { drawWave(cv, c.audio.id, (it.off || 0) * stepSec(), it.l * stepSec(), 'rgba(0,0,0,.6)'); return; }
   const g = cv.getContext('2d'), len = c.bars * 16; let lo = 127, hi = 0;
   c.notes.forEach(n => { lo = Math.min(lo, n.n); hi = Math.max(hi, n.n); });
@@ -175,7 +193,7 @@ window.addEventListener('mouseup', () => {
   if (d.type.startsWith('loop')) { renderArr(); return; }
   if (d.type === 'rangeSel') { renderArr(); return; }
   if (d.type === 'move' || d.type === 'resize' || d.type === 'trim') {
-    if (ARR.mode === 'shuffle') shufflePack(d.it.t); else resolveOverlap(d.it); renderArr();
+    if (ARR.mode === 'shuffle') shufflePack(laneOf(d.it)); else resolveOverlap(d.it); renderArr();
   }
 });
 
@@ -194,14 +212,12 @@ function arrSplit() {
   it.l = first; song.arr.push(tail); ARR.sel = tail; renderArr();
 }
 function captureScenes() {
-  let pos = aSnapF(ARR.cursor), n = 0;
+  let pos = aSnapF(ARR.cursor), n = 0; const lane = ARR.lane || 0;
   for (let s = 0; s < SCENES; s++) {
-    const cl = song.tracks.map((t, i) => t.clips[s] ? [i, t.clips[s]] : null).filter(Boolean); if (!cl.length) continue;
-    const len = Math.max(...cl.map(x => x[1].bars)) * 16; if (pos + len > ARR_STEPS) { status('Se llenó el Arrangement.'); break; }
-    cl.forEach(([i]) => { const it = { t: i, s: pos, l: len, slot: s, off: 0 }; song.arr.push(it); resolveOverlap(it); });
-    pos += len; n++;
+    if (!song.tracks.some(t => t.clips[s])) continue; const len = patLen(s); if (pos + len > ARR_STEPS) { status('Se llenó el Playlist.'); break; }
+    const it = { lane, pat: s, s: pos, l: len, off: 0 }; song.arr.push(it); resolveOverlap(it); pos += len; n++;
   }
-  status(n + ' escena(s) volcadas al Arrangement.'); renderArr();
+  status(n + ' patrón(es) colocados en el Playlist.'); renderArr();
 }
 function arrKey(e) {
   if (view !== 'arr') return false; const k = e.key, ctrl = e.ctrlKey || e.metaKey;
@@ -319,12 +335,12 @@ function arrBar2(root) {
   root.appendChild(bar);
 }
 function shufflePack(t) {
-  const it = song.arr.filter(a => a.t === t).sort((a, b) => a.s - b.s); if (!it.length) return; let pos = it[0].s;
+  const it = song.arr.filter(a => laneOf(a) === t).sort((a, b) => a.s - b.s); if (!it.length) return; let pos = it[0].s;
   it.forEach(o => { o.s = pos; pos += o.l; });
 }
 function deleteRange(t, s, e) {
   [...song.arr].forEach(o => {
-    if (o.t !== t) return; const oe = o.s + o.l, ll = itemLoopLen(o);
+    if (laneOf(o) !== t) return; const oe = o.s + o.l, ll = itemLoopLen(o);
     if (oe <= s || o.s >= e) return;
     if (o.s < s && oe > e) { song.arr.push(Object.assign({}, o, { s: e, l: oe - e, off: ((o.off || 0) + (e - o.s)) % ll })); o.l = s - o.s; }
     else if (o.s < s) o.l = s - o.s;

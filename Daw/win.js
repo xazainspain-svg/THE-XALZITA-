@@ -83,7 +83,7 @@ function buildMenus() {
       ['Exportar WAV', click('btnExport')], ['Exportar stems', click('btnStems')]]],
     ['Editar', [['Deshacer  Ctrl+Z', click('btnUndo')], ['Rehacer  Ctrl+Y', click('btnRedo')]]],
     ['Añadir', [['Sintetizador', click('btnAddM')], ['Sintetizador FM', click('btnAddF')], ['Sampler…', click('btnAddS')], ['Pista de audio', click('btnAddA')], ['Batería', () => addTrack('drums')]]],
-    ['Patrones', Array.from({ length: SCENES }, (_, i) => ['Patrón ' + (i + 1), () => { selSlot = i; renderAll(); }])],
+    ['Patrones', Array.from({ length: SCENES }, (_, i) => [song.patterns[i].name, () => { selSlot = i; renderAll(); }])],
     ['Ver', [['Playlist  F5', () => setView('arr')], ['Channel Rack  F6', () => toggleWin('rack')], ['Piano roll  F7', () => toggleWin('roll')], ['Navegador  F8', () => { $('#browser').hidden = !$('#browser').hidden; updateWinButtons(); }],
       ['Mixer  F9', () => toggleWin('mixer')], ['Instrumento  F10', () => toggleWin('dev')], null, ['Inmersivo 3D', () => toggleWin('imm')], ['Vista Session (clips)', () => setView('session')]]],
     ['Opciones', [['Metrónomo', click('btnMetro')], ['Tap tempo', click('btnTap')], ['Grabar con micrófono', click('btnMic')]]],
@@ -109,21 +109,21 @@ function renderBrowser() {
   };
   const item = (parent, text, color, on, dbl, sel) => { const d = el('div', 'bitem' + (sel ? ' sel' : ''), text); if (color) d.style.setProperty('--c', color); d.onclick = on; if (dbl) d.ondblclick = dbl; parent.appendChild(d); return d; };
   sec('Proyecto', b => song.tracks.forEach((t, i) => item(b, (t.kind === 'audio' ? '♫ ' : '') + t.name, t.color, () => { selTrack = i; renderAll(); }, () => { selTrack = i; openWin('dev'); }, i === selTrack)));
-  sec('Patrones', b => Array.from({ length: SCENES }, (_, s) => { const used = song.tracks.some(t => t.clips[s]); item(b, 'Patrón ' + (s + 1) + (used ? '' : ' (vacío)'), used ? '#f6921e' : '#555', () => { selSlot = s; renderAll(); }, () => { selSlot = s; renderAll(); openWin('roll'); }, s === selSlot); }));
+  sec('Patrones', b => Array.from({ length: SCENES }, (_, s) => { const used = song.tracks.some(t => t.clips[s]); const d = item(b, song.patterns[s].name + (used ? '' : ' (vacío)'), used ? song.patterns[s].color : '#555', () => { selSlot = s; renderAll(); }, () => { selSlot = s; renderAll(); openWin('roll'); }, s === selSlot); d.draggable = true; d.title = 'Arrástralo al Playlist'; d.ondragstart = e => { e.dataTransfer.setData('xaza/pat', String(s)); }; }));
   sec('Instrumentos', b => [['synth', 'Sintetizador'], ['fm', 'Sintetizador FM'], ['sampler', 'Sampler'], ['drums', 'Batería'], ['audio', 'Pista de audio']].forEach(([k, n]) => item(b, '＋ ' + n, '#6d8cff', () => status('Doble clic para añadir: ' + n), () => addTrack(k))));
   sec('Efectos', b => Object.keys(FX_DEFS).forEach(k => item(b, FX_DEFS[k].name, '#35c9c9', () => status('Doble clic para insertarlo en el insert de la pista seleccionada.'), () => {
     const ins = song.inserts[song.tracks[selTrack].insert], slot = ins.fx.findIndex(f => !f); if (slot < 0) { status('El insert no tiene ranuras libres.'); return; }
     ins.fx[slot] = fxNew(k); if (eng) eng.rebuildInsert(song.tracks[selTrack].insert); mixSel = song.tracks[selTrack].insert; MIXG = false; openWin('mixer'); status(FX_DEFS[k].name + ' añadido al ' + ins.name + '.'); })));
   sec('Samples', b => {
     const ids = Object.keys(AUDIO); if (!ids.length) b.appendChild(el('div', 'bnote', 'Sin samples. Importa uno.'));
-    ids.forEach(id => item(b, '♪ ' + AUDIO[id].name, '#9ecb6a', () => { ensureEngine(); const s = eng.ctx.createBufferSource(); s.buffer = AUDIO[id].buf; s.connect(eng.master); s.start(); },
-      () => { const t = song.tracks[selTrack]; if (t.kind === 'sampler') { t.inst.id = id; status('Sample asignado a ' + t.name); renderAll(); } else if (t.kind === 'audio') { t.clips[selSlot] = audioClipFromId(id); renderAll(); } else status('Selecciona una pista sampler o de audio.'); }));
+    ids.forEach(id => { const d0 = item(b, '♪ ' + AUDIO[id].name, '#9ecb6a', () => { ensureEngine(); const s = eng.ctx.createBufferSource(); s.buffer = AUDIO[id].buf; s.connect(eng.master); s.start(); },
+      () => { const t = song.tracks[selTrack]; if (t.kind === 'sampler') { t.inst.id = id; status('Sample asignado a ' + t.name); renderAll(); } else if (t.kind === 'audio') { t.clips[selSlot] = audioClipFromId(id); renderAll(); } else status('Selecciona una pista sampler o de audio.'); }); d0.draggable = true; d0.title = 'Clic: escuchar · arrástralo al Playlist'; d0.ondragstart = e => { e.dataTransfer.setData('xaza/sample', id); }; });
     const imp = el('button', 'bbtn', 'Importar sample…'); imp.onclick = () => importLibrary(); b.appendChild(imp);
   });
 }
 
 // ----------------------------------------------------------------- barra de herramientas
-function updatePatName() { const e = $('#patName'); if (e) e.textContent = String(selSlot + 1); }
+function updatePatName() { const e = $('#patName'); if (e) { e.textContent = song.patterns[selSlot].name; e.style.color = song.patterns[selSlot].color; } }
 function initToolbar() {
   $('#patPrev').onclick = () => { selSlot = (selSlot + SCENES - 1) % SCENES; renderAll(); };
   $('#patNext').onclick = () => { selSlot = (selSlot + 1) % SCENES; renderAll(); };

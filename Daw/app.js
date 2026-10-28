@@ -216,7 +216,7 @@ function frame() {
       if (c && eng.playing && st >= 0) {
         const L = c.bars * 16;
         if (eng.mode === 'session' && r.playing === selSlot) ps = (((st - r.launch) % L) + L) % L;
-        else if (eng.mode === 'arr') { const it = song.arr.find(a => a.t === selTrack && a.slot === selSlot && st >= a.s && st < a.s + a.l); if (it) ps = (st - it.s + (it.off || 0)) % L; }
+        else if (eng.mode === 'arr') { const it = song.arr.find(a => (a.pat === selSlot || (a.t === selTrack && a.slot === selSlot)) && st >= a.s && st < a.s + a.l); if (it) ps = (st - it.s + (it.off || 0)) % L; }
       }
       rollTick(ps);
     }
