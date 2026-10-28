@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Xaza Live</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="top">
+  <div class="logo">XAZA<span>live</span></div>
+  <button id="btnPlay" title="Reproducir / parar (Espacio)">▶</button>
+  <button id="btnStop" title="Parar">■</button>
+  <label class="bpm">BPM <input id="bpm" type="number" min="40" max="240" value="120"></label>
+  <button id="btnMetro" title="Metrónomo">Metro</button>
+  <span id="pos">1.1.1</span>
+  <nav>
+    <button id="tabSession" class="on">Session</button>
+    <button id="tabArr">Arrangement</button>
+  </nav>
+  <span class="grow"></span>
+  <canvas id="masterMeter" width="80" height="14"></canvas>
+  <button id="btnNew">Nuevo</button>
+  <button id="btnSave">Guardar</button>
+  <button id="btnLoad">Abrir…</button>
+  <button id="btnExport">Exportar WAV</button>
+  <input id="fileIn" type="file" accept=".json,application/json" hidden>
+</header>
+<div id="status"></div>
+<main>
+  <section id="session"></section>
+  <section id="arr" hidden></section>
+</main>
+<footer id="bottom">
+  <div class="tabs">
+    <button id="tabClip" class="on">Clip (piano roll)</button>
+    <button id="tabDev">Dispositivos</button>
+    <span id="selInfo"></span>
+  </div>
+  <div id="clipPane"></div>
+  <div id="devPane" hidden></div>
+</footer>
+<script src="engine.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
