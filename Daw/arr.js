@@ -3,14 +3,16 @@
 // región de loop, cursor de reproducción, volcado de escenas, dividir/duplicar/borrar y envolventes de automatización
 // (volumen y panorama) con puntos editables.
 
-const ARR = { z: 6, snap: 4, sel: null, cursor: 0, follow: true, autoOpen: {}, autoParam: {}, slotSel: {}, drag: null, ph: null };
+const ARR = { z: 6, snap: 4, sel: null, cursor: 0, follow: true, autoOpen: {}, autoParam: {}, slotSel: {}, drag: null, ph: null,
+  mode: 'slip', tool: 'grab', range: null, amode: 'read', fade: 2, silDb: -40, silMs: 150 };
 const LANE_H = 62, AUTO_H = 72, HEAD_W = 150, RULER_H2 = 26, ARR_STEPS = ARR_BARS * 16;
 const ARR_SNAPS = [['Compás', 16], ['Tiempo', 4], ['1/2 tiempo', 2], ['Paso', 1], ['Sin snap', 0]];
 
 const itemClip = it => { const t = song.tracks[it.t]; return t && t.clips[it.slot]; };
 const itemLoopLen = it => { const c = itemClip(it); return c ? c.bars * 16 : 16; };
-const aSnapF = v => ARR.snap > 0 ? Math.floor(v / ARR.snap + 1e-9) * ARR.snap : v;
-const aSnapR = v => ARR.snap > 0 ? Math.round(v / ARR.snap) * ARR.snap : v;
+const aSn = () => ARR.mode === 'grid' ? (ARR.snap || 4) : ARR.snap;
+const aSnapF = v => aSn() > 0 ? Math.floor(v / aSn() + 1e-9) * aSn() : v;
+const aSnapR = v => aSn() > 0 ? Math.round(v / aSn()) * aSn() : v;
 
 function resolveOverlap(it) {
   const e = it.s + it.l;
@@ -49,6 +51,7 @@ function renderArr() {
   bar.append(zl, zr, el('span', '', 'Snap'), sn, loop, cap, dup, spl, del, aa, fol,
     el('span', 'hint', 'Doble clic en una pista: insertar clip · arrastra el clip para moverlo · bordes: recortar / alargar (en bucle) · clic en la regla: cursor · Mayús+arrastrar en la regla: loop'));
 
+  arrBar2(root);
   const board = el('div', 'arrboard'); board.style.width = (HEAD_W + W) + 'px'; root.appendChild(board);
   const corner = el('div', 'arrcorner', 'Arrangement'); board.appendChild(corner);
   const rcv = el('canvas'); rcv.width = W; rcv.height = RULER_H2; rcv.className = 'arrruler'; board.appendChild(rcv);
@@ -71,6 +74,11 @@ function renderArr() {
     const lane = el('div', 'arrlane'); lane.style.height = LANE_H + 'px'; lane.style.width = W + 'px';
     lane.style.backgroundSize = (16 * z) + 'px 100%, ' + (4 * z) + 'px 100%';
     lane.onmousedown = e => {
+      if (ARR.tool === 'select' && (e.target === lane || e.target.classList.contains('aclip') || e.target.parentNode.classList.contains('aclip'))) {
+        const r = lane.getBoundingClientRect(), a = Math.max(0, aSnapF((e.clientX - r.left) / z)), box = el('div', 'rangesel');
+        lane.querySelectorAll('.rangesel').forEach(x => x.remove()); box.style.left = a * z + 'px'; box.style.width = '0px'; lane.appendChild(box);
+        ARR.range = { t: i, s: a, e: a }; ARR.drag = { type: 'rangeSel', t: i, a, rect: r, box }; ARR.cursor = a; moveCursor(); return;
+      }
       if (e.target !== lane) return;
       ARR.cursor = aSnapF((e.clientX - lane.getBoundingClientRect().left) / z); arrSelect(null); moveCursor();
     };
@@ -82,6 +90,7 @@ function renderArr() {
       const it = { t: i, s: s0, l: len, slot, off: 0 }; song.arr.push(it); resolveOverlap(it); ARR.sel = it; selTrack = i; selSlot = slot; renderArr(); renderBottom();
     };
     song.arr.filter(it => it.t === i && itemClip(it)).forEach(it => lane.appendChild(makeClip(it, t, z)));
+    if (ARR.range && ARR.range.t === i) { const rb = el('div', 'rangesel'); rb.style.left = ARR.range.s * z + 'px'; rb.style.width = (ARR.range.e - ARR.range.s) * z + 'px'; lane.appendChild(rb); }
     board.appendChild(lane);
 
   });
@@ -103,12 +112,16 @@ function makeClip(it, t, z) {
   const c = itemClip(it), d = el('div', 'aclip' + (ARR.sel === it ? ' sel' : ''));
   d._it = it; d.style.left = (it.s * z) + 'px'; d.style.width = Math.max(4, it.l * z - 1) + 'px'; d.style.background = t.color;
   const cv = el('canvas'); cv.width = Math.min(4096, Math.ceil(it.l * z)); cv.height = LANE_H - 18; d.appendChild(cv);
-  paintClip(cv, it, t, c, z); d.appendChild(el('span', 'lbl', c.name || ('Clip ' + (it.slot + 1))));
+  paintClip(cv, it, t, c, z);
+  if (c.audio) { const f = el('canvas'); f.width = Math.min(4096, Math.ceil(it.l * z)); f.height = LANE_H; f.style.cssText = 'position:absolute;left:0;top:0;pointer-events:none'; d.appendChild(f); const g = f.getContext('2d'); g.fillStyle = 'rgba(0,0,0,.45)';
+    const fi = (it.fi || 0) * z, fo = (it.fo || 0) * z, W = f.width, H = f.height; if (fi > 1) { g.beginPath(); g.moveTo(0, 0); g.lineTo(fi, 0); g.lineTo(0, H); g.fill(); } if (fo > 1) { g.beginPath(); g.moveTo(W, 0); g.lineTo(W - fo, 0); g.lineTo(W, H); g.fill(); } }
+  d.appendChild(el('span', 'lbl', c.name || ('Clip ' + (it.slot + 1))));
   d.onmousedown = e => {
-    e.stopPropagation();
+    if (ARR.tool !== 'select') e.stopPropagation();
     if (e.button === 2) { song.arr.splice(song.arr.indexOf(it), 1); if (ARR.sel === it) ARR.sel = null; renderArr(); return; }
-    const x = e.offsetX, w = d.offsetWidth, type = x > w - 7 ? 'resize' : (x < 7 ? 'trim' : 'move');
-    arrSelect(it); ARR.drag = { type, it, d, x0: e.clientX, s0: it.s, l0: it.l, off0: it.off || 0 };
+    const x = e.offsetX, w = d.offsetWidth; let type = x > w - 7 ? 'resize' : (x < 7 ? 'trim' : 'move');
+    if (ARR.tool === 'trim') type = x < w / 2 ? 'trim' : 'resize'; else if (ARR.tool === 'select') type = 'none';
+    arrSelect(it); if (type === 'none') return; ARR.drag = { type, it, d, x0: e.clientX, s0: it.s, l0: it.l, off0: it.off || 0 };
   };
   d.oncontextmenu = e => e.preventDefault();
   d.ondblclick = e => { e.stopPropagation(); bottomTab = 'clip'; renderBottom(); };
@@ -131,7 +144,9 @@ function paintClip(cv, it, t, c, z) {
   }
 }
 window.addEventListener('mousemove', e => {
-  const d = ARR.drag; if (!d) return; const z = ARR.z, dx = (e.clientX - d.x0) / z, it = d.it;
+  const d = ARR.drag; if (!d) return;
+  if (d.type === 'rangeSel') { const v = Math.max(0, Math.min(ARR_STEPS, aSnapR((e.clientX - d.rect.left) / ARR.z))); ARR.range = { t: d.t, s: Math.min(d.a, v), e: Math.max(d.a, v) }; d.box.style.left = ARR.range.s * ARR.z + 'px'; d.box.style.width = (ARR.range.e - ARR.range.s) * ARR.z + 'px'; return; }
+  const z = ARR.z, dx = (e.clientX - d.x0) / z, it = d.it;
   const minL = ARR.snap > 0 ? ARR.snap : 1;
   if (d.type === 'move') { it.s = Math.max(0, Math.min(ARR_STEPS - it.l, aSnapR(d.s0 + dx))); d.d.style.left = it.s * z + 'px'; }
   else if (d.type === 'resize') { const e2 = Math.max(it.s + minL, Math.min(ARR_STEPS, aSnapR(d.s0 + d.l0 + dx))); it.l = e2 - it.s; d.d.style.width = Math.max(4, it.l * z - 1) + 'px'; }
@@ -149,11 +164,16 @@ window.addEventListener('mousemove', e => {
 window.addEventListener('mouseup', () => {
   const d = ARR.drag; if (!d) return; ARR.drag = null;
   if (d.type.startsWith('loop')) { renderArr(); return; }
-  if (d.type === 'move' || d.type === 'resize' || d.type === 'trim') { resolveOverlap(d.it); renderArr(); }
+  if (d.type === 'rangeSel') { renderArr(); return; }
+  if (d.type === 'move' || d.type === 'resize' || d.type === 'trim') {
+    if (ARR.mode === 'shuffle') shufflePack(d.it.t); else resolveOverlap(d.it); renderArr();
+  }
 });
 
 // ----------------------------------------------------------------- acciones
-function arrDelete() { if (!ARR.sel) return; song.arr.splice(song.arr.indexOf(ARR.sel), 1); ARR.sel = null; renderArr(); }
+function arrDelete() {
+  if (ARR.tool === 'select' && ARR.range && ARR.range.e > ARR.range.s) { deleteRange(ARR.range.t, ARR.range.s, ARR.range.e); ARR.range = null; renderArr(); return; }
+  if (!ARR.sel) return; song.arr.splice(song.arr.indexOf(ARR.sel), 1); ARR.sel = null; renderArr(); }
 function arrDuplicate() {
   const it = ARR.sel; if (!it) return; if (it.s + it.l * 2 > ARR_STEPS) { status('No hay sitio a la derecha.'); return; }
   const cp = Object.assign({}, it, { s: it.s + it.l }); song.arr.push(cp); resolveOverlap(cp); ARR.sel = cp; renderArr();
@@ -188,15 +208,20 @@ function drawRuler(cv) {
   g.fillStyle = '#26262b'; g.fillRect(0, 0, W, RULER_H2);
   if (lp.end > lp.start) { g.fillStyle = lp.on ? 'rgba(255,180,0,.55)' : 'rgba(150,150,150,.3)'; g.fillRect(lp.start * z, 0, (lp.end - lp.start) * z, 8);
     g.fillStyle = lp.on ? '#ffb400' : '#888'; g.fillRect(lp.start * z, 0, 3, 12); g.fillRect(lp.end * z - 3, 0, 3, 12); }
+  const pn = song.punch; if (pn && pn.end > pn.start) { g.fillStyle = pn.on ? 'rgba(255,80,80,.5)' : 'rgba(150,150,150,.25)'; g.fillRect(pn.start * z, 12, (pn.end - pn.start) * z, 6); }
   g.font = '10px sans-serif';
+  song.markers.forEach(m => { const mx = m.s * z; g.fillStyle = '#6d8cff'; g.fillRect(mx, 0, 1, RULER_H2); g.beginPath(); g.moveTo(mx, 0); g.lineTo(mx + 7, 3); g.lineTo(mx, 6); g.fill(); g.fillStyle = '#9db4ff'; g.fillText(m.name, mx + 9, 8); });
   for (let s = 0; s <= ARR_STEPS; s += 4) {
     const x = Math.round(s * z) + 0.5; g.fillStyle = s % 16 === 0 ? '#bbb' : '#555'; g.fillRect(x, s % 16 === 0 ? 12 : 19, 1, RULER_H2);
     if (s % 16 === 0 && (z >= 4 || s % 64 === 0)) { g.fillStyle = '#ddd'; g.fillText(String(s / 16 + 1), x + 3, 22); }
   }
 }
 function bindRuler(cv) {
+  cv.oncontextmenu = e => e.preventDefault();
   cv.onmousedown = e => {
     const r = cv.getBoundingClientRect(), z = ARR.z, x = e.clientX - r.left, lp = song.loop, v = Math.max(0, Math.min(ARR_STEPS, aSnapR(x / z)));
+    const mk = song.markers.findIndex(m => Math.abs(m.s * z - x) < 6 && e.offsetY < 14);
+    if (mk >= 0) { if (e.button === 2) { song.markers.splice(mk, 1); renderArr(); } else { ARR.cursor = song.markers[mk].s; moveCursor(); } return; }
     if (e.shiftKey) { ARR.drag = { type: 'loopSet', rect: r, cv, a: v }; lp.start = v; lp.end = v + 1; return; }
     if (lp.end > lp.start && Math.abs(x - lp.start * z) < 6) { ARR.drag = { type: 'loopL', rect: r, cv }; return; }
     if (lp.end > lp.start && Math.abs(x - lp.end * z) < 6) { ARR.drag = { type: 'loopR', rect: r, cv }; return; }
@@ -241,4 +266,70 @@ function arrTick(st) {
   if (!playing) return;
   const x = HEAD_W + st * ARR.z; ARR.ph.style.left = x + 'px';
   if (ARR.follow) { const m = $('main'); if (x < m.scrollLeft + HEAD_W || x > m.scrollLeft + m.clientWidth - 60) m.scrollLeft = Math.max(0, x - HEAD_W - 100); }
+}
+
+// ----------------------------------------------------------------- estilo Pro Tools: modos, herramientas, fundidos, tomas, marcadores, punch
+function arrBar2(root) {
+  const bar = el('div', 'arrbar');
+  const sel = (label, opts, val, fn) => { const l = el('label', ''); l.append(label + ' '); const s = el('select'); opts.forEach(([v, t]) => { const o = el('option', '', t); o.value = v; s.appendChild(o); }); s.value = val; s.onchange = () => fn(s.value); l.appendChild(s); bar.appendChild(l); };
+  sel('Modo', [['slip', 'Slip'], ['shuffle', 'Shuffle'], ['grid', 'Grid']], ARR.mode, v => { ARR.mode = v; });
+  sel('Herramienta', [['grab', 'Grabber'], ['trim', 'Trim'], ['select', 'Selector']], ARR.tool, v => { ARR.tool = v; ARR.range = null; renderArr(); });
+  const num = (label, val, w, fn, min = 0, max = 99) => { const l = el('label', ''); l.append(label + ' '); const i = el('input'); i.type = 'number'; i.min = min; i.max = max; i.value = val; i.style.width = w; i.onchange = () => fn(+i.value); l.appendChild(i); bar.appendChild(l); };
+  num('Fundido (pasos)', ARR.fade, '46px', v => { ARR.fade = v; });
+  const act = (label, tip, fn) => { const b = el('button', '', label); b.title = tip; b.onclick = fn; bar.appendChild(b); };
+  const audioSel = () => { const it = ARR.sel, c = it && itemClip(it); if (!c || !c.audio) { status('Selecciona un clip de audio en el Arrangement.'); return null; } return it; };
+  act('Fade in', 'Fundido de entrada del clip de audio seleccionado', () => { const it = audioSel(); if (it) { it.fi = ARR.fade; renderArr(); } });
+  act('Fade out', 'Fundido de salida', () => { const it = audioSel(); if (it) { it.fo = ARR.fade; renderArr(); } });
+  act('Crossfade', 'Fundido cruzado con el clip anterior pegado a este', () => {
+    const it = audioSel(); if (!it) return; const prev = song.arr.find(o => o.t === it.t && o !== it && Math.abs(o.s + o.l - it.s) < 1.01);
+    if (!prev) { status('No hay un clip de audio pegado antes de este.'); return; } prev.fo = ARR.fade; it.fi = ARR.fade; renderArr(); status('Crossfade aplicado.');
+  });
+  num('Strip: umbral dB', ARR.silDb, '52px', v => { ARR.silDb = v; }, -90, -5); num('mín. ms', ARR.silMs, '52px', v => { ARR.silMs = v; }, 20, 2000);
+  act('Strip silence', 'Corta los silencios del clip de audio seleccionado', stripSilence);
+  const nm = el('input'); nm.type = 'text'; nm.placeholder = 'nombre marcador'; nm.style.width = '110px'; bar.appendChild(nm);
+  act('+ Marcador', 'Añade un marcador en el cursor', () => { song.markers.push({ s: ARR.cursor, name: nm.value || 'Marcador ' + (song.markers.length + 1) }); song.markers.sort((a, b) => a.s - b.s); renderArr(); });
+  const mk = el('select'); const m0 = el('option', '', 'Ir a marcador…'); m0.value = ''; mk.appendChild(m0);
+  song.markers.forEach((m, k) => { const o = el('option', '', m.name + ' (' + (Math.floor(m.s / 16) + 1) + ')'); o.value = k; mk.appendChild(o); });
+  mk.onchange = () => { if (mk.value === '') return; ARR.cursor = song.markers[+mk.value].s; moveCursor(); const m = $('main'); m.scrollLeft = Math.max(0, HEAD_W + ARR.cursor * ARR.z - 200); mk.value = ''; };
+  bar.appendChild(mk);
+  const pu = el('button', song.punch.on ? 'on' : '', '● Punch'); pu.title = 'Región de punch in/out para grabar audio'; pu.onclick = () => { song.punch.on = !song.punch.on; renderArr(); }; bar.appendChild(pu);
+  act('Punch = selección', 'Usa el clip o rango seleccionado como región de punch', () => {
+    const r = ARR.range ? { s: ARR.range.s, e: ARR.range.e } : ARR.sel ? { s: ARR.sel.s, e: ARR.sel.s + ARR.sel.l } : null; if (!r) { status('Selecciona un clip o un rango.'); return; }
+    song.punch.start = r.s; song.punch.end = r.e; song.punch.on = true; renderArr();
+  });
+  sel('Pre-roll', [[0, '0'], [1, '1 compás'], [2, '2 compases']], song.punch.pre, v => { song.punch.pre = +v; });
+  const it = ARR.sel, c = it && itemClip(it);
+  if (c && c.audio && c.takes && c.takes.length > 1) sel('Toma', c.takes.map((_, k) => [k, 'Toma ' + (k + 1)]), it.take !== undefined ? it.take : c.takes.length - 1, v => { it.take = +v; });
+  sel('Automatización', [['read', 'Leer'], ['touch', 'Touch'], ['latch', 'Latch'], ['write', 'Escribir']], ARR.amode, v => { ARR.amode = v; AREC.mode = v; status(v === 'read' ? 'Automatización: solo lectura.' : 'Automatización ' + v + ': mueve controles durante la reproducción del Arrangement para grabarla.', 5000); });
+  root.appendChild(bar);
+}
+function shufflePack(t) {
+  const it = song.arr.filter(a => a.t === t).sort((a, b) => a.s - b.s); if (!it.length) return; let pos = it[0].s;
+  it.forEach(o => { o.s = pos; pos += o.l; });
+}
+function deleteRange(t, s, e) {
+  [...song.arr].forEach(o => {
+    if (o.t !== t) return; const oe = o.s + o.l, ll = itemLoopLen(o);
+    if (oe <= s || o.s >= e) return;
+    if (o.s < s && oe > e) { song.arr.push(Object.assign({}, o, { s: e, l: oe - e, off: ((o.off || 0) + (e - o.s)) % ll })); o.l = s - o.s; }
+    else if (o.s < s) o.l = s - o.s;
+    else if (oe > e) { o.off = ((o.off || 0) + (e - o.s)) % ll; o.l = oe - e; o.s = e; }
+    else song.arr.splice(song.arr.indexOf(o), 1);
+  });
+}
+function stripSilence() {
+  const it = ARR.sel, c = it && itemClip(it); if (!c || !c.audio) { status('Selecciona un clip de audio en el Arrangement.'); return; }
+  const ca = it.take !== undefined && c.takes && c.takes[it.take] ? c.takes[it.take] : c.audio, buf = audioBuffer(ca, song.bpm); if (!buf) { status('El clip no tiene audio cargado.'); return; }
+  const sr = buf.sampleRate, W = Math.round(sr * 0.01), d = buf.getChannelData(0), thr = Math.pow(10, ARR.silDb / 20), minW = Math.max(1, Math.round(ARR.silMs / 10)), sd = stepSec();
+  const loud = []; for (let i = 0; i + W <= d.length; i += W) { let s2 = 0; for (let k = 0; k < W; k++) s2 += d[i + k] * d[i + k]; loud.push(Math.sqrt(s2 / W) > thr); }
+  const regs = []; let a = -1, quiet = 0;
+  loud.forEach((v, k) => { if (v) { if (a < 0) a = k; quiet = 0; } else if (a >= 0 && ++quiet >= minW) { regs.push([a, k - quiet + 1]); a = -1; quiet = 0; } });
+  if (a >= 0) regs.push([a, loud.length]);
+  const base = (it.off || 0) * sd, end = base + it.l * sd, out = [];
+  regs.forEach(([x, y]) => {
+    const t0 = Math.max(x * 0.01, base), t1 = Math.min(y * 0.01, end); if (t1 - t0 < sd) return;
+    out.push(Object.assign({}, it, { s: it.s + Math.round((t0 - base) / sd), l: Math.max(1, Math.round((t1 - t0) / sd)), off: Math.round(t0 / sd) }));
+  });
+  if (!out.length) { status('No se encontró audio por encima del umbral.'); return; }
+  song.arr.splice(song.arr.indexOf(it), 1, ...out); ARR.sel = out[0]; renderArr(); status('Strip silence: ' + out.length + ' fragmento(s).');
 }

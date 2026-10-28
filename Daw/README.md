@@ -18,9 +18,14 @@ Se abre en el navegador, sin instalar: abre `Daw/index.html` (o `python3 -m http
 - **Audio**: editor de samples (recorte, ganancia, invertir, normalizar, estirar al tempo con granular básico) y navegador de samples.
 - **Instrumentos extra**: sintetizador con onda 2, sub y envolvente de filtro; sintetizador FM de dos operadores; sampler cromático con nota raíz y bucle.
 - **MIDI y stems**: exportar el Arrangement (o la escena) a .mid, importar .mid al clip seleccionado y exportar un WAV por pista.
+- **Edición estilo Pro Tools**: modos Slip / Shuffle / Grid; herramientas Grabber / Trim / Selector (rango con Supr); fundidos de entrada y salida, crossfade y ganancia de clip; strip silence (los fragmentos se redondean al paso de 1/16).
+- **Grabación estilo Pro Tools**: región de punch in/out con pre-roll y tomas (comping): cada grabación nueva sobre un clip añade una toma, y se elige por tramo con el selector "Toma" y Ctrl+E.
+- **Marcadores y mapa de tempo**: marcadores en la regla (clic para ir, clic derecho para borrar); el mapa de tempo es un carril de automatización de BPM.
+- **Grupos y VCA**: grupos de pistas con VCA, mute y solo; envíos pre-fader o post-fader.
+- **Automatización en vivo**: modos Leer, Touch, Latch y Escribir sobre cualquier control durante la reproducción del Arrangement.
 - **Instrumentos**: sintetizador (onda, corte, resonancia, ataque, release) y caja de ritmos sintetizada (8 sonidos).
 - **Efectos**: filtro, delay, reverb, distorsión, chorus, compresor, EQ 3 bandas.
 - **Proyecto**: Guardar/Abrir (JSON), Exportar WAV (render offline del Arrangement).
 - Teclado: Espacio = play/stop; A-K tocan la pista seleccionada; Z/X cambian de octava.
 
-Limitaciones: sin compases distintos de 4/4, sin exportar MP3, el sidechain no se aplica en el render offline, sin grabación de audio ni importación de samples, sin plugins VST (los 90 de `Plugins90/` son VST3 de escritorio y no cargan aquí), sin deshacer.
+Limitaciones: no hay loop record, Elastic Audio ni Beat Detective; sin compases distintos de 4/4, sin exportar MP3, el sidechain no se aplica en el render offline, sin grabación de audio ni importación de samples, sin plugins VST (los 90 de `Plugins90/` son VST3 de escritorio y no cargan aquí), sin deshacer.

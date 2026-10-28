@@ -57,12 +57,13 @@ $('#btnMic').onclick = async () => {
   const t = song.tracks[selTrack];
   if (mic) { mic.rec.stop(); return; }
   if (t.kind !== 'audio') { status('Selecciona una pista de audio (o añade una con + Audio).'); return; }
+  if (view === 'arr' && song.punch.on) { try { await recordPunch(); } catch (err) { status('Micrófono no disponible aquí: ' + err.message, 8000); } return; }
   try {
     ensureEngine(); const stream = await navigator.mediaDevices.getUserMedia({ audio: true }), rec = new MediaRecorder(stream), chunks = [], slot = selSlot, ti = selTrack;
     rec.ondataavailable = ev => chunks.push(ev.data);
     rec.onstop = async () => {
       stream.getTracks().forEach(x => x.stop()); mic = null; $('#btnMic').classList.remove('on'); $('#btnMic').textContent = '● Mic';
-      try { const buf = await eng.ctx.decodeAudioData(await new Blob(chunks).arrayBuffer()); song.tracks[ti].clips[slot] = audioClip(buf, 'Grabación'); renderAll(); status('Grabación lista.'); }
+      try { const buf = await eng.ctx.decodeAudioData(await new Blob(chunks).arrayBuffer()); const had = song.tracks[ti].clips[slot] && song.tracks[ti].clips[slot].audio; addTake(ti, slot, buf, 'Grabación'); renderAll(); status(had ? 'Nueva toma añadida al clip.' : 'Grabación lista.'); }
       catch (err) { status('No se pudo procesar la grabación: ' + err.message, 6000); }
     };
     rec.start(); mic = { rec }; $('#btnMic').classList.add('on'); $('#btnMic').textContent = '■ Parar'; status('Grabando… pulsa ■ Parar para terminar.', 0);
@@ -91,10 +92,12 @@ function renderAudioPane(pane, c, t) {
   const refresh = () => { c.bars = Math.min(16, Math.max(1, Math.ceil(audioBuffer(au, song.bpm).duration / (stepSec() * 16)))); paint(); };
   paint();
   const mk = (label, min, max, step, get, set) => { const l = el('label', 'sep', label + ' '), r = el('input'); r.type = 'range'; r.min = min; r.max = max; r.step = step; r.value = get(); r.style.width = '120px'; r.oninput = () => { set(+r.value); refresh(); }; l.appendChild(r); return l; };
+  if (c.takes && c.takes.length > 1) { const tk = el('div', 'rollbar'); tk.appendChild(el('span', 'sep', 'Tomas:')); c.takes.forEach((tt, k) => { const b = el('button', c.audio === tt ? 'on' : '', 'Toma ' + (k + 1)); b.onclick = () => { c.audio = tt; renderClipPane(); }; tk.appendChild(b); }); pane.appendChild(tk); }
   const row = el('div', 'rollbar');
   row.append(mk('Inicio s', 0, a.buf.duration, 0.01, () => au.start || 0, v => { au.start = Math.min(v, (au.end || a.buf.duration) - 0.02); }),
     mk('Fin s', 0, a.buf.duration, 0.01, () => au.end || a.buf.duration, v => { au.end = Math.max(v, (au.start || 0) + 0.02); }),
-    mk('Ganancia', 0, 2, 0.01, () => au.gain === undefined ? 1 : au.gain, v => { au.gain = v; }));
+    mk('Ganancia', 0, 2, 0.01, () => au.gain === undefined ? 1 : au.gain, v => { au.gain = v; }),
+    mk('Fade in s', 0, 2, 0.01, () => au.fi === undefined ? 0.003 : au.fi, v => { au.fi = v; }), mk('Fade out s', 0, 2, 0.01, () => au.fo === undefined ? 0.003 : au.fo, v => { au.fo = v; }));
   const rv = el('label', 'sep'), rc = el('input'); rc.type = 'checkbox'; rc.checked = !!au.rev; rc.onchange = () => { au.rev = rc.checked; refresh(); }; rv.append(rc, ' Invertir');
   const wp = el('label', 'sep'), wc = el('input'); wc.type = 'checkbox'; wc.checked = !!au.warp; wc.onchange = () => { au.warp = wc.checked; au.ob = au.ob || song.bpm; refresh(); status(au.warp ? 'Estirado al tempo del proyecto (calidad granular básica).' : 'Sin estirar.'); }; wp.append(wc, ' Estirar al tempo · BPM original ');
   const ob = el('input'); ob.type = 'number'; ob.min = 40; ob.max = 240; ob.value = au.ob || song.bpm; ob.style.width = '56px'; ob.onchange = () => { au.ob = +ob.value || song.bpm; refresh(); }; wp.appendChild(ob);
@@ -177,10 +180,66 @@ function extrasKey(e) {
 const HELP = [['Espacio', 'Reproducir / parar'], ['A–K, W E T Y U', 'Tocar notas (Z / X cambian de octava)'], ['● Rec', 'Grabar notas en vivo en el clip seleccionado'],
   ['Ctrl+Z / Ctrl+Y', 'Deshacer / rehacer'], ['Ctrl+C / Ctrl+V', 'Copiar / pegar clip (Session)'], ['1–5', 'Herramientas del piano roll'],
   ['Ctrl+A, Supr, Ctrl+D, flechas', 'Seleccionar, borrar, duplicar, mover notas'], ['Ctrl+D / Ctrl+E / Supr', 'Arrangement: duplicar / dividir / borrar clip'],
-  ['Clic derecho', 'Borrar clip o nota'], ['Mayús + arrastrar (regla)', 'Región de loop'], ['Tap', 'Marcar el tempo con clics'], ['+ MIDI / Audio / FM / Sampler', 'Añadir pistas (máx. 16)'], ['Channel Rack', 'Step sequencer: clic y arrastra para pintar pasos, Mayús+clic = acento'], ['MIDI ↓ / ↑ , Stems', 'Exportar/importar MIDI y un WAV por pista']];
+  ['Clic derecho', 'Borrar clip o nota'], ['Mayús + arrastrar (regla)', 'Región de loop'], ['Tap', 'Marcar el tempo con clics'], ['+ MIDI / Audio / FM / Sampler', 'Añadir pistas (máx. 16)'], ['Channel Rack', 'Step sequencer: clic y arrastra para pintar pasos, Mayús+clic = acento'], ['MIDI ↓ / ↑ , Stems', 'Exportar/importar MIDI y un WAV por pista'], ['Arrangement: Modo y Herramienta', 'Slip / Shuffle / Grid; Grabber / Trim / Selector (rango + Supr)'], ['Fade in / out / Crossfade', 'Fundidos del clip de audio seleccionado'], ['● Punch + ● Mic', 'Grabar audio entre punch in y out con pre-roll; crea tomas para comping'], ['Automatización: Touch / Latch / Escribir', 'Mueve un control durante la reproducción del Arrangement para grabarla']];
 $('#btnHelp').onclick = () => {
   const h = $('#help'); h.hidden = !h.hidden; if (h.hidden) return; h.innerHTML = '';
   const box = el('div', 'helpbox'); box.appendChild(el('h3', '', 'Atajos y funciones'));
   HELP.forEach(([k, d]) => { const r = el('div', 'hrow2'); r.append(el('kbd', '', k), el('span', '', d)); box.appendChild(r); });
   const x = el('button', '', 'Cerrar'); x.onclick = () => { h.hidden = true; }; box.appendChild(x); h.appendChild(box);
 };
+
+// ----------------------------------------------------------------- grabación de automatización (Touch / Latch / Escribir)
+const AREC = { mode: 'read', act: new Map() };
+function autoRec(target, value) {
+  if (AREC.mode === 'read' || !eng || !eng.playing || eng.mode !== 'arr') return;
+  const T = autoInfo(target, song); if (!T) return; const st = Math.round(eng.currentStep()); if (st < 0) return;
+  let a = AREC.act.get(target);
+  if (!a) {
+    let lane = song.autos.find(x => x.target === target); if (!lane) { lane = { target, pts: [] }; song.autos.push(lane); }
+    a = { lane, start: st, backup: lane.pts.slice(), pts: [], last: -1, end: st }; AREC.act.set(target, a);
+  }
+  const v = autoNorm(T, value);
+  if (a.last === st && a.pts.length) a.pts[a.pts.length - 1].v = v; else { a.pts.push({ s: st, v }); a.last = st; }
+  a.end = st; a.lane.pts = a.backup.filter(p => p.s < a.start).concat(a.pts);
+}
+function autoRecEnd() {
+  AREC.act.forEach(a => {
+    const tail = AREC.mode === 'touch' ? a.backup.filter(p => p.s > a.end) : [];     // Touch vuelve a la curva anterior al soltar
+    a.lane.pts = a.backup.filter(p => p.s < a.start).concat(a.pts, tail).sort((x, y) => x.s - y.s);
+  });
+  const n = AREC.act.size; AREC.act.clear(); if (n && view === 'arr') renderArr();
+}
+document.addEventListener('pointerup', () => { if (AREC.mode === 'touch' && AREC.act.size) autoRecEnd(); }, true);
+
+// ----------------------------------------------------------------- tomas (comping) y punch in/out
+function addTake(ti, slot, buf, name) {
+  const t = song.tracks[ti], c = t.clips[slot], id = newId(); AUDIO[id] = { buf, name };
+  if (c && c.audio) { c.takes = c.takes || [c.audio]; const au = { id }; c.takes.push(au); c.audio = au; c.bars = Math.max(c.bars, Math.min(16, Math.ceil(buf.duration / (stepSec() * 16)))); return { clip: c, take: c.takes.length - 1 }; }
+  t.clips[slot] = { bars: Math.min(16, Math.max(1, Math.ceil(buf.duration / (stepSec() * 16)))), notes: [], audio: { id } }; return { clip: t.clips[slot], take: undefined };
+}
+async function recordPunch() {
+  const ti = selTrack, pn = song.punch, t = song.tracks[ti];
+  ensureEngine();
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true }), rec = new MediaRecorder(stream), chunks = [];
+  rec.ondataavailable = ev => chunks.push(ev.data);
+  rec.onstop = async () => {
+    stream.getTracks().forEach(x => x.stop()); clearInterval(mic && mic.poll); mic = null; $('#btnMic').classList.remove('on'); $('#btnMic').textContent = '● Mic'; if (eng) { eng.stop(); updatePlayBtn(); }
+    try {
+      const buf = await eng.ctx.decodeAudioData(await new Blob(chunks).arrayBuffer());
+      const it = ARR.sel && ARR.sel.t === ti && itemClip(ARR.sel) && itemClip(ARR.sel).audio ? ARR.sel : null;
+      if (it) { const r = addTake(ti, it.slot, buf, 'Toma'); it.take = r.take; status('Toma ' + (r.take + 1) + ' añadida al clip. Elígela en el selector "Toma".'); }
+      else {
+        let slot = t.clips.findIndex(c => !c); if (slot < 0) slot = SCENES - 1; const r = addTake(ti, slot, buf, 'Grabación');
+        song.arr.push({ t: ti, s: pn.start, l: Math.max(1, pn.end - pn.start), slot, off: 0 }); ARR.sel = song.arr[song.arr.length - 1]; status('Grabación colocada en la región de punch.');
+      }
+      renderAll();
+    } catch (err) { status('No se pudo procesar la grabación: ' + err.message, 6000); }
+  };
+  const start = Math.max(0, pn.start - pn.pre * 16); eng.play('arr', start); updatePlayBtn(); let on = false;
+  const poll = setInterval(() => {
+    const p = eng.posFloat(); if (p < 0) return;
+    if (!on && p >= pn.start) { on = true; rec.start(); }
+    if (on && (p >= pn.end || !eng.playing)) { clearInterval(poll); if (rec.state !== 'inactive') rec.stop(); }
+  }, 10);
+  mic = { rec, poll }; $('#btnMic').classList.add('on'); $('#btnMic').textContent = '■ Parar'; status('Pre-roll… la grabación empieza en el punch in y acaba en el punch out.', 6000);
+}

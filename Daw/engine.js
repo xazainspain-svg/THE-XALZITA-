@@ -197,6 +197,7 @@ function autoInfo(id, S) {
     return k === 'cutoff' ? { label: nm + ' · corte del filtro', min: 100, max: 12000, log: 1, js: true, get: () => t.inst.cutoff, set: v => { t.inst.cutoff = v; } }
                           : { label: nm + ' · resonancia', min: 0.1, max: 18, js: true, get: () => t.inst.res, set: v => { t.inst.res = v; } };
   }
+  if ((m = /^g(\d+)\.vca$/.exec(id))) { const g = S.groups[+m[1]]; if (!g) return null; return { label: g.name + ' · VCA', min: 0, max: 1.25, js: true, vca: true, get: () => g.vca, set: v => { g.vca = v; } }; }
   if ((m = /^i(\d+)\.(vol|pan)$/.exec(id))) { const x = S.inserts[+m[1]]; if (!x) return null; return m[2] === 'vol' ? { label: x.name + ' · volumen', min: 0, max: 1.25, get: () => x.vol } : { label: x.name + ' · panorama', min: -1, max: 1, get: () => x.pan }; }
   if ((m = /^r(\d+)\.vol$/.exec(id))) { const r = S.returns[+m[1]]; if (!r) return null; return { label: r.name + ' · volumen', min: 0, max: 1.25, get: () => r.vol }; }
   if ((m = /^i(\d+)\.f(\d+)\.(\w+)$/.exec(id))) {
@@ -218,6 +219,7 @@ function autoTargets(S) {                    // lista agrupada para el selector
     if (it.length > 2 || x.vol !== 0.8 || S.tracks.some(t => t.insert === k)) g.push({ group: 'Insert · ' + x.name, items: it });
   });
   S.returns.forEach((r, k) => g.push({ group: r.name, items: [['r' + k + '.vol', 'volumen']] }));
+  if (S.groups.length) g.push({ group: 'Grupos / VCA', items: S.groups.map((x, k) => ['g' + k + '.vca', x.name + ' · VCA']) });
   return g;
 }
 const autoMap = (T, v) => T.log ? T.min * Math.pow(T.max / T.min, v) : T.min + (T.max - T.min) * v;
@@ -269,14 +271,14 @@ class Engine {
   buildTrack(t) {
     const c = this.ctx, o = { in: c.createGain(), vol: c.createGain(), pan: c.createStereoPanner(), an: c.createAnalyser(), sends: [] };
     o.an.fftSize = 512; o.in.connect(o.vol); o.vol.connect(o.pan); o.pan.connect(o.an);
-    this.ret.forEach(r => { const g = c.createGain(); g.gain.value = 0; o.pan.connect(g); g.connect(r.in); o.sends.push(g); });
+    this.ret.forEach(r => { const g = c.createGain(); g.gain.value = 0; g.connect(r.in); o.sends.push(g); });
     this.routeTrack(o, t); return o;
   }
   routeTrack(o, t) {
-    const idx = Math.max(0, Math.min(this.ins.length - 1, t.insert | 0)), obj = !!(t.obj && t.obj.on), key = idx + ':' + obj;
+    const idx = Math.max(0, Math.min(this.ins.length - 1, t.insert | 0)), obj = !!(t.obj && t.obj.on), pre = t.preSend || [false, false], key = idx + ':' + obj + ':' + pre.join();
     if (o.routeKey !== key) {
       o.routeKey = key; try { o.pan.disconnect(); } catch (e) {}
-      o.pan.connect(o.an); o.sends.forEach(g => o.pan.connect(g));
+      o.pan.connect(o.an); o.sends.forEach((g, k) => { try { o.in.disconnect(g); } catch (e) {} (pre[k] ? o.in : o.pan).connect(g); });
       if (obj) {
         if (!o.pn) {
           o.pn = this.ctx.createPanner(); o.pn.panningModel = 'HRTF'; o.pn.distanceModel = 'inverse'; o.pn.refDistance = 1; o.pn.rolloffFactor = 0.8;
@@ -306,9 +308,11 @@ class Engine {
   }
   rebuildInsert(k) { this.rebuild(this.ins[k], this.song.inserts[k]); }
 
-  baseGain(t, anySolo) { return (t.mute || (anySolo && !t.solo)) ? 0 : t.vol; }
+  grp(t) { return t.group >= 0 && this.song.groups ? this.song.groups[t.group] : null; }
+  anySolo() { return this.song.tracks.some(t => t.solo || (this.grp(t) && this.grp(t).solo)); }
+  baseGain(t, anySolo) { const g = this.grp(t); return ((t.mute || (g && g.mute)) || (anySolo && !(t.solo || (g && g.solo)))) ? 0 : t.vol * (g ? g.vca : 1); }
   applyMix() {
-    const now = this.ctx.currentTime, S = this.song, anySolo = S.tracks.some(t => t.solo), insSolo = S.inserts.some(x => x.solo);
+    const now = this.ctx.currentTime, S = this.song, anySolo = this.anySolo(), insSolo = S.inserts.some(x => x.solo);
     S.tracks.forEach((t, i) => {
       const o = this.tr[i], g = o.vol.gain;
       g.cancelScheduledValues(now); g.setValueAtTime(this.baseGain(t, anySolo), now);
@@ -412,14 +416,18 @@ class Engine {
 
   // ---- secuenciador
   stepDur() { return 60 / this.song.bpm / 4; }
-  fire(t, i, clip, local, time, sd, isStart, remain) {
+  fire(t, i, clip, local, time, sd, isStart, remain, ex) {
     if (clip.audio) {                                   // clip de audio: se dispara al inicio del clip (o del tramo en el Arrangement)
       if (local !== 0 && !isStart) return;
-      const buf = audioBuffer(clip.audio, this.song.bpm); if (!buf) return;
+      const au = clip.audio, buf = audioBuffer(au, this.song.bpm); if (!buf) return;
       const off = local * sd; if (off >= buf.duration) return;
-      const src = this.ctx.createBufferSource(), g = this.ctx.createGain(); src.buffer = buf; g.gain.value = clip.audio.gain === undefined ? 1 : clip.audio.gain;
+      const src = this.ctx.createBufferSource(), g = this.ctx.createGain(), gain = au.gain === undefined ? 1 : au.gain; src.buffer = buf;
       src.connect(g); g.connect(this.tr[i].in);
       const left = Math.min(remain === undefined ? Infinity : remain * sd, buf.duration - off);
+      let fi = (au.fi === undefined ? 0.003 : au.fi) + ((ex && ex.fi) || 0) * sd, fo = (au.fo === undefined ? 0.003 : au.fo) + ((ex && ex.fo) || 0) * sd;
+      if (fi + fo > left) { const k = left / (fi + fo); fi *= k; fo *= k; }
+      g.gain.setValueAtTime(fi > 0 ? 0 : gain, time); if (fi > 0) g.gain.linearRampToValueAtTime(gain, time + fi);
+      if (fo > 0 && isFinite(left)) { g.gain.setValueAtTime(gain, time + left - fo); g.gain.linearRampToValueAtTime(0, time + left); }
       src.start(time, off, left); this.srcs.add(src); src.onended = () => this.srcs.delete(src); return;
     }
     const sw = (Math.floor(local + 1e-9) % 2 === 1) ? (this.song.swing || 0) * sd : 0;
@@ -441,10 +449,11 @@ class Engine {
       const anySolo = s.tracks.some(t => t.solo);
       (s.autos || []).forEach(au => { if (au.pts && au.pts.length) this.applyAuto(au, step, time, sd); });
       s.arr.forEach(it => {
-        const t = s.tracks[it.t], c = t && t.clips[it.slot];
+        const t = s.tracks[it.t]; let c = t && t.clips[it.slot];
         if (!c || step < it.s || step >= it.s + it.l) return;
+        if (c.audio && it.take !== undefined && c.takes && c.takes[it.take]) c = Object.assign({}, c, { audio: c.takes[it.take] });
         const len = c.bars * 16, local = (step - it.s + (it.off || 0)) % len;
-        this.fire(t, it.t, c, local, time, sd, step === it.s, it.s + it.l - step);
+        this.fire(t, it.t, c, local, time, sd, step === it.s, it.s + it.l - step, c.audio ? { fi: it.fi, fo: it.fo } : null);
       });
     }
     if (this.metro && step % 4 === 0) this.click(time, step % 16 === 0);
@@ -455,7 +464,7 @@ class Engine {
     const v0 = autoMap(T, envAt(au.pts, step, 0)), v1 = autoMap(T, envAt(au.pts, step + 1, 0)), m = /^(m|t(\d+)|i(\d+)|r(\d+))\.(\w+)$/.exec(au.target);
     if (T.js) {                                          // parámetros que se leen en JS: se restauran al parar
       this.bak = this.bak || new Map(); if (!this.bak.has(au.target)) this.bak.set(au.target, T.get());
-      T.set(v0); if (T.fx && this.ins[T.fx[0]].fx[T.fx[1]]) this.ins[T.fx[0]].fx[T.fx[1]].update(); return;
+      T.set(v0); if (T.fx && this.ins[T.fx[0]].fx[T.fx[1]]) this.ins[T.fx[0]].fx[T.fx[1]].update(); if (T.vca) this.applyMix(); return;
     }
     let ap = null;
     if (au.target === 'm.vol') ap = this.master.gain;
@@ -483,7 +492,7 @@ class Engine {
     this.playing = false; if (this.timer) clearInterval(this.timer); this.timer = null;
     this.rt.forEach(r => { r.playing = -1; r.queued = undefined; });
     this.srcs.forEach(x => { try { x.stop(); } catch (e) {} }); this.srcs.clear();
-    if (this.bak) { this.bak.forEach((v, id) => { const T = autoInfo(id, this.song); if (T && T.set) { T.set(v); if (T.fx && this.ins[T.fx[0]].fx[T.fx[1]]) this.ins[T.fx[0]].fx[T.fx[1]].update(); } }); this.bak = null; }
+    if (this.bak) { this.bak.forEach((v, id) => { const T = autoInfo(id, this.song); if (T && T.set) { T.set(v); if (T.vca) this.applyMix(); if (T.fx && this.ins[T.fx[0]].fx[T.fx[1]]) this.ins[T.fx[0]].fx[T.fx[1]].update(); } }); this.bak = null; }
     this.log = []; if (!noMix) this.applyMix();
   }
   currentStep() {

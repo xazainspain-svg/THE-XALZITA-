@@ -2,6 +2,7 @@
 // Mixer estilo FL Studio: inserts verticales (medidor estéreo en dB + fader), master, 10 ranuras de efectos por insert,
 // enrutado de pistas a inserts, panorama, mute y solo.
 
+let MIXG = false;               // true = panel de grupos / VCA
 let mixSel = 0;                 // insert seleccionado (-1 = master)
 let mixMeters = [];             // [{cv, an:[L,R], lv:[0,0]}]
 
@@ -24,13 +25,13 @@ function renderMixer() {
     const fw = el('div', 'sfader'), cv = el('canvas'); cv.width = 22; cv.height = 170;
     const f = el('input'); f.type = 'range'; f.min = 0; f.max = 1.25; f.step = 0.005; f.value = get(); f.className = 'fader';
     const db = el('div', 'sdb', dbTxt(get()));
-    f.oninput = () => { set(+f.value); db.textContent = dbTxt(+f.value); if (eng) eng.applyMix(); };
+    f.oninput = () => { set(+f.value); db.textContent = dbTxt(+f.value); if (eng) eng.applyMix(); autoRec(isMaster ? 'm.vol' : 'i' + idx + '.vol', +f.value); };
     f.ondblclick = () => { f.value = 0.8; f.oninput(); };
     fw.append(cv, f); s.append(fw, db);
     const mm = { cv, lv: [0, 0], idx: isMaster ? -1 : idx }; mixMeters.push(mm);
     if (!isMaster) {
       const ins = song.inserts[idx], pan = el('input'); pan.type = 'range'; pan.min = -1; pan.max = 1; pan.step = 0.01; pan.value = ins.pan; pan.title = 'Panorama';
-      pan.oninput = () => { ins.pan = +pan.value; if (eng) eng.applyMix(); }; pan.ondblclick = () => { pan.value = 0; pan.oninput(); };
+      pan.oninput = () => { ins.pan = +pan.value; if (eng) eng.applyMix(); autoRec('i' + idx + '.pan', ins.pan); }; pan.ondblclick = () => { pan.value = 0; pan.oninput(); };
       const row = el('div', 'row'), bm = el('button', 'm' + (ins.mute ? ' on' : ''), 'M'), bs = el('button', 's' + (ins.solo ? ' on' : ''), 'S');
       bm.onclick = () => { ins.mute = !ins.mute; bm.classList.toggle('on', ins.mute); if (eng) eng.applyMix(); };
       bs.onclick = () => { ins.solo = !ins.solo; bs.classList.toggle('on', ins.solo); if (eng) eng.applyMix(); };
@@ -51,10 +52,12 @@ function renderMixer() {
     s.append(nm, el('div', 'sdots', FX_DEFS[r.fx.type].name));
     const fw = el('div', 'sfader'), cv = el('canvas'); cv.width = 22; cv.height = 170;
     const f = el('input'); f.type = 'range'; f.min = 0; f.max = 1.25; f.step = 0.005; f.value = r.vol; f.className = 'fader';
-    const db = el('div', 'sdb', dbTxt(r.vol)); f.oninput = () => { r.vol = +f.value; db.textContent = dbTxt(r.vol); if (eng) eng.applyMix(); };
+    const db = el('div', 'sdb', dbTxt(r.vol)); f.oninput = () => { r.vol = +f.value; db.textContent = dbTxt(r.vol); if (eng) eng.applyMix(); autoRec('r' + k + '.vol', r.vol); };
     fw.append(cv, f); s.append(fw, db); mixMeters.push({ cv, lv: [0, 0], idx: idx }); strips.appendChild(s);
   });
 
+  const tg = el('div', 'shead'); [['Efectos', false], ['Grupos / VCA', true]].forEach(([l, v]) => { const b = el('button', MIXG === v ? 'on' : '', l); b.onclick = () => { MIXG = v; renderMixer(); }; tg.appendChild(b); });
+  panel.appendChild(tg); if (MIXG) { renderGroups(panel); return; }
   // ---- panel de ranuras de efectos
   if (mixSel <= -2) {
     const k = -2 - mixSel, r = song.returns[k]; panel.appendChild(el('h3', '', r.name));
@@ -84,7 +87,7 @@ function renderMixer() {
       pw.onclick = () => { f.on = f.on === false; if (eng) eng.rebuildInsert(mixSel); renderMixer(); }; head.appendChild(pw);
     }
     slot.appendChild(head);
-    if (f) FX_DEFS[f.type].params.forEach(d => slider(slot, d.n, d.min, d.max, f.p[d.k], d.step, v => { f.p[d.k] = v; const nodes = eng && eng.ins[mixSel].fx[k]; if (nodes) nodes.update(); }, d.log));
+    if (f) FX_DEFS[f.type].params.forEach(d => slider(slot, d.n, d.min, d.max, f.p[d.k], d.step, v => { f.p[d.k] = v; const nodes = eng && eng.ins[mixSel].fx[k]; if (nodes) nodes.update(); autoRec('i' + mixSel + '.f' + k + '.' + d.k, v); }, d.log));
     panel.appendChild(slot);
   }
 }
@@ -104,4 +107,21 @@ function meterPaint(m, an) {
 function mixerTick() {
   if (!eng) return;
   mixMeters.forEach(m => { const o = m.idx === -1 ? eng.masterM : m.idx <= -2 ? eng.ret[-2 - m.idx] : eng.ins[m.idx]; if (o) meterPaint(m, m.idx === -1 ? [o.anL, o.anR] : [o.anL, o.anR]); });
+}
+
+function renderGroups(panel) {
+  panel.appendChild(el('h3', '', 'Grupos y VCA'));
+  panel.appendChild(el('div', 'hint', 'Un grupo agrupa pistas: el VCA sube o baja el volumen de todas a la vez sin tocar sus faders, y M/S del grupo silencian o aíslan todas.'));
+  song.groups.forEach((g, k) => {
+    const box = el('div', 'slot used'), head = el('div', 'shead'), nm = el('input'); nm.type = 'text'; nm.value = g.name; nm.onchange = () => { g.name = nm.value; renderMixer(); };
+    const bm = el('button', g.mute ? 'on' : '', 'M'), bs = el('button', g.solo ? 'on' : '', 'S'), dl = el('button', '', '✕');
+    bm.onclick = () => { g.mute = !g.mute; if (eng) eng.applyMix(); renderMixer(); }; bs.onclick = () => { g.solo = !g.solo; if (eng) eng.applyMix(); renderMixer(); };
+    dl.onclick = () => { song.groups.splice(k, 1); song.tracks.forEach(t => { if (t.group === k) t.group = -1; else if (t.group > k) t.group--; }); if (eng) eng.applyMix(); renderMixer(); };
+    head.append(nm, bm, bs, dl); box.appendChild(head);
+    slider(box, 'VCA', 0, 1.25, g.vca, 0.01, v => { g.vca = v; if (eng) eng.applyMix(); autoRec('g' + k + '.vca', v); });
+    const mem = el('div', 'members');
+    song.tracks.forEach((t, i) => { const l = el('label', ''), c = el('input'); c.type = 'checkbox'; c.checked = t.group === k; c.onchange = () => { t.group = c.checked ? k : (t.group === k ? -1 : t.group); if (eng) eng.applyMix(); renderMixer(); }; l.append(c, ' ' + t.name); mem.appendChild(l); });
+    box.appendChild(mem); panel.appendChild(box);
+  });
+  const add = el('button', '', '+ Nuevo grupo'); add.onclick = () => { song.groups.push({ name: 'Grupo ' + (song.groups.length + 1), vca: 1, mute: false, solo: false }); renderMixer(); }; panel.appendChild(add);
 }

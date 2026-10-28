@@ -10,7 +10,7 @@ const defFm = (o = {}) => Object.assign({ ratio: 2, idx: 3, fdec: 0.4, atk: 0.00
 const defSampler = (o = {}) => Object.assign({ id: null, root: 60, rel: 0.15, loop: false }, o);
 const instFor = (kind, o) => kind === 'synth' ? defInst(o) : kind === 'fm' ? defFm(o) : kind === 'sampler' ? defSampler(o) : null;
 function trackNew(name, kind, color, inst, insert) {
-  return { name, kind, color, inst: instFor(kind, inst), insert: insert | 0, sends: [0, 0], obj: { on: false, x: 0, y: 1, z: 0 }, vol: 0.8, pan: 0, mute: false, solo: false,
+  return { name, kind, color, inst: instFor(kind, inst), insert: insert | 0, sends: [0, 0], preSend: [false, false], group: -1, obj: { on: false, x: 0, y: 1, z: 0 }, vol: 0.8, pan: 0, mute: false, solo: false,
     clips: Array(SCENES).fill(null) };
 }
 function insertNew(i) {
@@ -57,7 +57,7 @@ function demoSong() {
   const arr = [], put = (t, from, to, slot) => { arr.push({ t, s: from * 16, l: (to - from) * 16, slot, off: 0 }); };
   put(0, 0, 8, 0); put(0, 8, 16, 1); put(1, 2, 16, 0); put(3, 0, 16, 0); put(2, 4, 16, 0);
   T[3].sends = [0.35, 0]; T[2].sends = [0, 0.25];
-  return { bpm: 118, swing: 0, masterVol: 0.9, tracks: T, inserts, returns: defReturns(), autos: [{ target: 't3.vol', pts: [{ s: 0, v: 0.16 }, { s: 64, v: 0.8 }, { s: 224, v: 0.8 }, { s: 256, v: 0.24 }] }], arr, loop: { on: false, start: 0, end: 64 } };
+  return { groups: [], markers: [{ s: 0, name: 'Inicio' }, { s: 64, name: 'Estribillo' }], punch: { on: false, start: 0, end: 16, pre: 1 }, bpm: 118, swing: 0, masterVol: 0.9, tracks: T, inserts, returns: defReturns(), autos: [{ target: 't3.vol', pts: [{ s: 0, v: 0.16 }, { s: 64, v: 0.8 }, { s: 224, v: 0.8 }, { s: 256, v: 0.24 }] }], arr, loop: { on: false, start: 0, end: 64 } };
 }
 
 // Acepta proyectos antiguos (formato por compases / efectos por pista) y completa lo que falte.
@@ -85,6 +85,7 @@ function upgradeSong(s) {
   s.autos = (s.autos || []).filter(a => a && a.target && Array.isArray(a.pts));
   s.loop = s.loop || { on: false, start: 0, end: 64 }; s.swing = s.swing || 0;
   if (!Array.isArray(s.returns) || s.returns.length < 2) s.returns = defReturns();
-  s.tracks.forEach(t => { t.sends = t.sends || [0, 0]; });
+  s.tracks.forEach(t => { t.sends = t.sends || [0, 0]; t.preSend = t.preSend || [false, false]; t.group = t.group === undefined ? -1 : t.group; });
+  s.groups = s.groups || []; s.markers = s.markers || []; s.punch = s.punch || { on: false, start: 0, end: 16, pre: 1 };
   return s;
 }
