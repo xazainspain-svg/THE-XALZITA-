@@ -23,6 +23,7 @@ function renderClipPane() {
   const t = song.tracks[selTrack], c = curClip();
   if (!c) { pane.appendChild(el('div', '', 'Selecciona un clip en la vista Session (o haz clic en una celda vacía para crear uno). Clic derecho en un clip: borrarlo.')); ROLL.cv = null; return; }
   if (ROLL.scrollT === null && ROLL.cv) { ROLL.scrollL = ROLL.cv.parentNode.scrollLeft; ROLL.scrollT = ROLL.cv.parentNode.scrollTop; }
+  if (c.audio) { renderAudioPane(pane, c, t); ROLL.cv = null; return; }
   const drums = t.kind === 'drums';
 
   const bar = el('div', 'rollbar');

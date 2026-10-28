@@ -7,7 +7,7 @@ const SCENES = 8, NINS = 16, NSLOTS = 10;
 const clipNew = (bars = 1) => ({ bars, notes: [] });
 const defInst = (o = {}) => Object.assign({ wave: 'sawtooth', cutoff: 3000, res: 1, atk: 0.01, rel: 0.2 }, o);
 function trackNew(name, kind, color, inst, insert) {
-  return { name, kind, color, inst: kind === 'synth' ? defInst(inst) : null, insert: insert | 0, obj: { on: false, x: 0, y: 1, z: 0 }, vol: 0.8, pan: 0, mute: false, solo: false,
+  return { name, kind, color, inst: kind === 'synth' ? defInst(inst) : null, insert: insert | 0, sends: [0, 0], obj: { on: false, x: 0, y: 1, z: 0 }, vol: 0.8, pan: 0, mute: false, solo: false,
     clips: Array(SCENES).fill(null), autoVol: [], autoPan: [] };
 }
 function insertNew(i) {
@@ -15,6 +15,10 @@ function insertNew(i) {
 }
 function fxNew(type) {
   const p = {}; FX_DEFS[type].params.forEach(d => p[d.k] = d.v); return { type, p, on: true };
+}
+function defReturns() {
+  const r = fxNew('reverb'), d = fxNew('delay'); r.p.mix = 1; d.p.mix = 1; d.p.fb = 0.45;
+  return [{ name: 'Retorno A · Reverb', vol: 0.8, fx: r }, { name: 'Retorno B · Delay', vol: 0.8, fx: d }];
 }
 const nt = (s, l, n, v) => ({ s, l, n, v: v === undefined ? 0.8 : v });
 
@@ -50,7 +54,8 @@ function demoSong() {
   const arr = [], put = (t, from, to, slot) => { arr.push({ t, s: from * 16, l: (to - from) * 16, slot, off: 0 }); };
   put(0, 0, 8, 0); put(0, 8, 16, 1); put(1, 2, 16, 0); put(3, 0, 16, 0); put(2, 4, 16, 0);
   T[3].autoVol = [{ s: 0, v: 0.2 }, { s: 64, v: 1 }, { s: 224, v: 1 }, { s: 256, v: 0.3 }];
-  return { bpm: 118, masterVol: 0.9, tracks: T, inserts, arr, loop: { on: false, start: 0, end: 64 } };
+  T[3].sends = [0.35, 0]; T[2].sends = [0, 0.25];
+  return { bpm: 118, swing: 0, masterVol: 0.9, tracks: T, inserts, returns: defReturns(), arr, loop: { on: false, start: 0, end: 64 } };
 }
 
 // Acepta proyectos antiguos (formato por compases / efectos por pista) y completa lo que falte.
@@ -72,6 +77,8 @@ function upgradeSong(s) {
   s.arr = (s.arr || []).map(it => it.bar !== undefined
     ? { t: it.t, s: it.bar * 16, l: ((s.tracks[it.t] && s.tracks[it.t].clips[it.slot] && s.tracks[it.t].clips[it.slot].bars) || 1) * 16, slot: it.slot, off: 0 }
     : it);
-  s.loop = s.loop || { on: false, start: 0, end: 64 };
+  s.loop = s.loop || { on: false, start: 0, end: 64 }; s.swing = s.swing || 0;
+  if (!Array.isArray(s.returns) || s.returns.length < 2) s.returns = defReturns();
+  s.tracks.forEach(t => { t.sends = t.sends || [0, 0]; });
   return s;
 }

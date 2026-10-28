@@ -13,6 +13,9 @@
   <button id="btnStop" title="Parar">■</button>
   <label class="bpm">BPM <input id="bpm" type="number" min="40" max="240" value="120"></label>
   <button id="btnMetro" title="Metrónomo">Metro</button>
+  <button id="btnRec" title="Grabar notas en vivo (clip seleccionado)">● Rec</button>
+  <button id="btnTap" title="Tap tempo">Tap</button>
+  <label class="bpm">Swing <input id="swing" type="range" min="0" max="0.5" step="0.01" value="0" style="width:60px"></label>
   <span id="pos">1.1.1</span>
   <nav>
     <button id="tabSession" class="on">Session</button>
@@ -21,14 +24,21 @@
     <button id="tabImm">Inmersivo 3D</button>
   </nav>
   <span class="grow"></span>
+  <canvas id="spec" width="110" height="24" title="Espectro del master"></canvas>
   <canvas id="masterMeter" width="80" height="14"></canvas>
+  <button id="btnUndo" title="Deshacer (Ctrl+Z)">↶</button><button id="btnRedo" title="Rehacer (Ctrl+Y)">↷</button>
+  <button id="btnAddM" title="Añadir pista MIDI">+ MIDI</button><button id="btnAddA" title="Añadir pista de audio">+ Audio</button>
+  <button id="btnMic" title="Grabar audio del micrófono en el clip seleccionado">● Mic</button>
+  <button id="btnHelp" title="Atajos">?</button>
   <button id="btnNew">Nuevo</button>
   <button id="btnSave">Guardar</button>
   <button id="btnLoad">Abrir…</button>
   <button id="btnExport">Exportar WAV</button>
   <input id="fileIn" type="file" accept=".json,application/json" hidden>
+  <input id="audioIn" type="file" accept="audio/*" hidden>
 </header>
 <div id="status"></div>
+<div id="help" hidden></div>
 <main>
   <section id="session"></section>
   <section id="arr" hidden></section>
@@ -51,6 +61,7 @@
 <script src="mixer.js"></script>
 <script src="arr.js"></script>
 <script src="imm.js"></script>
+<script src="extras.js"></script>
 <script src="start.js"></script>
 </body>
 </html>

@@ -2,6 +2,7 @@
 // Motor de audio de Xaza Live (Web Audio). Funciona con AudioContext y con OfflineAudioContext (exportar WAV).
 
 const ARR_BARS = 64;
+const AUDIO = {};   // id -> {buf: AudioBuffer, name}  (las muestras no se guardan en el JSON del proyecto)
 const DRUM_NAMES = ['Bombo', 'Caja', 'Hi-hat', 'Hi-hat ab.', 'Palmas', 'Tom', 'Rim', 'Cencerro'];
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
@@ -68,13 +69,13 @@ function makeFx(ctx, type, p, eng) {
     case 'delay': {
       const d = ctx.createDelay(1.5), fb = ctx.createGain(), m = mixer();
       I.connect(m.d); I.connect(d); d.connect(fb); fb.connect(d); d.connect(m.w);
-      upd = () => { d.delayTime.value = p.time; fb.gain.value = p.fb; m.w.gain.value = p.mix; m.d.gain.value = 1; };
+      upd = () => { d.delayTime.value = p.time; fb.gain.value = p.fb; m.w.gain.value = p.mix; m.d.gain.value = p.ret ? 0 : 1; };
       break;
     }
     case 'reverb': {
       const c = ctx.createConvolver(), m = mixer(); c.buffer = eng.ir;
       I.connect(m.d); I.connect(c); c.connect(m.w);
-      upd = () => { m.w.gain.value = p.mix * 1.5; m.d.gain.value = 1 - p.mix * 0.4; };
+      upd = () => { m.w.gain.value = p.mix * 1.5; m.d.gain.value = p.ret ? 0 : 1 - p.mix * 0.4; };
       break;
     }
     case 'dist': {
@@ -131,6 +132,9 @@ class Engine {
     this.masterM = this.meterTap(this.limiter);
     this.master.connect(this.limiter); this.limiter.connect(ctx.destination);
     this.masterAn = this.masterM.anL;
+    this.spec = ctx.createAnalyser(); this.spec.fftSize = 1024; this.spec.smoothingTimeConstant = 0.8; this.limiter.connect(this.spec);
+    this.srcs = new Set();
+    this.ret = (song.returns || []).map(r => this.buildReturn(r));
     this.ins = song.inserts.map(ins => this.buildInsert(ins));
     this.tr = song.tracks.map(t => this.buildTrack(t));
     this.rt = song.tracks.map(() => ({ playing: -1, queued: undefined, launch: 0 }));
@@ -145,16 +149,22 @@ class Engine {
     anL.fftSize = anR.fftSize = 512; node.connect(sp); sp.connect(anL, 0); sp.connect(anR, 1);
     return { anL, anR };
   }
+  buildReturn(r) {
+    const c = this.ctx, o = { in: c.createGain(), vol: c.createGain() };
+    r.fx.p.ret = true; o.fx = makeFx(c, r.fx.type, r.fx.p, this);
+    o.in.connect(o.fx.in); o.fx.out.connect(o.vol); o.vol.connect(this.master); Object.assign(o, this.meterTap(o.vol)); return o;
+  }
   buildTrack(t) {
-    const c = this.ctx, o = { in: c.createGain(), vol: c.createGain(), pan: c.createStereoPanner(), an: c.createAnalyser() };
+    const c = this.ctx, o = { in: c.createGain(), vol: c.createGain(), pan: c.createStereoPanner(), an: c.createAnalyser(), sends: [] };
     o.an.fftSize = 512; o.in.connect(o.vol); o.vol.connect(o.pan); o.pan.connect(o.an);
+    this.ret.forEach(r => { const g = c.createGain(); g.gain.value = 0; o.pan.connect(g); g.connect(r.in); o.sends.push(g); });
     this.routeTrack(o, t); return o;
   }
   routeTrack(o, t) {
     const idx = Math.max(0, Math.min(this.ins.length - 1, t.insert | 0)), obj = !!(t.obj && t.obj.on), key = idx + ':' + obj;
     if (o.routeKey !== key) {
       o.routeKey = key; try { o.pan.disconnect(); } catch (e) {}
-      o.pan.connect(o.an);
+      o.pan.connect(o.an); o.sends.forEach(g => o.pan.connect(g));
       if (obj) {
         if (!o.pn) {
           o.pn = this.ctx.createPanner(); o.pn.panningModel = 'HRTF'; o.pn.distanceModel = 'inverse'; o.pn.refDistance = 1; o.pn.rolloffFactor = 0.8;
@@ -191,7 +201,9 @@ class Engine {
       const o = this.tr[i], g = o.vol.gain;
       g.cancelScheduledValues(now); g.setValueAtTime(this.baseGain(t, anySolo), now);
       o.pan.pan.setValueAtTime(t.pan, now); this.routeTrack(o, t);
+      o.sends.forEach((g, k) => g.gain.setValueAtTime((t.sends && t.sends[k]) || 0, now));
     });
+    this.ret.forEach((o, k) => o.vol.gain.setValueAtTime(S.returns[k].vol, now));
     S.inserts.forEach((x, k) => {
       const o = this.ins[k];
       o.vol.gain.setValueAtTime((x.mute || (insSolo && !x.solo)) ? 0 : x.vol, now); o.pan.pan.setValueAtTime(x.pan, now);
@@ -262,10 +274,19 @@ class Engine {
 
   // ---- secuenciador
   stepDur() { return 60 / this.song.bpm / 4; }
-  fire(t, i, clip, local, time, sd) {
+  fire(t, i, clip, local, time, sd, isStart, remain) {
+    if (clip.audio) {                                   // clip de audio: se dispara al inicio del clip (o del tramo en el Arrangement)
+      if (local !== 0 && !isStart) return;
+      const a = AUDIO[clip.audio.id]; if (!a) return;
+      const off = local * sd; if (off >= a.buf.duration) return;
+      const src = this.ctx.createBufferSource(); src.buffer = a.buf; src.connect(this.tr[i].in);
+      const left = Math.min(remain === undefined ? Infinity : remain * sd, a.buf.duration - off);
+      src.start(time, off, left); this.srcs.add(src); src.onended = () => this.srcs.delete(src); return;
+    }
+    const sw = (Math.floor(local + 1e-9) % 2 === 1) ? (this.song.swing || 0) * sd : 0;
     for (const n of clip.notes) {
       if (n.m || Math.floor(n.s + 1e-9) !== local) continue;
-      this.note(t, i, n.n, time + (n.s - local) * sd, n.l * sd, n.v === undefined ? 0.8 : n.v);
+      this.note(t, i, n.n, time + sw + (n.s - local) * sd, n.l * sd, n.v === undefined ? 0.8 : n.v);
     }
   }
   scheduleStep(step, time, mode) {
@@ -275,7 +296,7 @@ class Engine {
       s.tracks.forEach((t, i) => {
         const r = this.rt[i]; if (r.playing < 0) return;
         const c = t.clips[r.playing]; if (!c) return;
-        this.fire(t, i, c, (step - r.launch) % (c.bars * 16), time, sd);
+        const L = c.bars * 16, lc = (step - r.launch) % L; this.fire(t, i, c, lc, time, sd, false, L - lc);
       });
     } else {
       const anySolo = s.tracks.some(t => t.solo);
@@ -294,7 +315,7 @@ class Engine {
         const t = s.tracks[it.t], c = t && t.clips[it.slot];
         if (!c || step < it.s || step >= it.s + it.l) return;
         const len = c.bars * 16, local = (step - it.s + (it.off || 0)) % len;
-        this.fire(t, it.t, c, local, time, sd);
+        this.fire(t, it.t, c, local, time, sd, step === it.s, it.s + it.l - step);
       });
     }
     if (this.metro && step % 4 === 0) this.click(time, step % 16 === 0);
@@ -318,12 +339,18 @@ class Engine {
   stop() {
     this.playing = false; if (this.timer) clearInterval(this.timer); this.timer = null;
     this.rt.forEach(r => { r.playing = -1; r.queued = undefined; });
+    this.srcs.forEach(x => { try { x.stop(); } catch (e) {} }); this.srcs.clear();
     this.log = []; this.applyMix();
   }
   currentStep() {
     const now = this.ctx.currentTime;
     while (this.log.length > 1 && this.log[1][0] <= now) this.log.shift();
     return this.log.length && this.log[0][0] <= now ? this.log[0][1] : -1;
+  }
+  posFloat() {                                 // posición actual en pasos (con decimales)
+    const now = this.ctx.currentTime; let e = this.log[0];
+    for (const x of this.log) if (x[0] <= now) e = x; else break;
+    return e && e[0] <= now ? e[1] + (now - e[0]) / this.stepDur() : -1;
   }
   launch(i, slot) {
     if (!this.playing || this.mode !== 'session') this.play('session');

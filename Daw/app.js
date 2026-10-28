@@ -15,10 +15,14 @@ function ensureEngine() {
   if (eng.ctx.state === 'suspended') eng.ctx.resume();
   return eng;
 }
-function setSong(s) {
-  const metro = eng && eng.metro;
+function setSong(s, keepSel) {
+  const metro = eng && eng.metro, st = selTrack, ss = selSlot;
   if (eng) { eng.dispose(); const ctx = eng.ctx; song = s; eng = new Engine(ctx, song); eng.metro = metro; eng.onEnd = () => updatePlayBtn(); } else song = s;
-  selTrack = 0; selSlot = 0; ARR.sel = null; ROLL.sel.clear(); $('#bpm').value = song.bpm; renderAll();
+  selTrack = keepSel ? Math.min(st, song.tracks.length - 1) : 0; selSlot = keepSel ? ss : 0; ARR.sel = null; ROLL.sel.clear();
+  $('#bpm').value = song.bpm; $('#swing').value = song.swing || 0; renderAll();
+}
+function rebuildEngine() {
+  if (!eng) return; const metro = eng.metro, ctx = eng.ctx; eng.dispose(); eng = new Engine(ctx, song); eng.metro = metro; eng.onEnd = () => updatePlayBtn(); updatePlayBtn();
 }
 const status = (m, ms = 3500) => { $('#status').textContent = m; if (ms) setTimeout(() => { if ($('#status').textContent === m) $('#status').textContent = ''; }, ms); };
 const curClip = () => { const t = song.tracks[selTrack]; return t && t.clips[selSlot]; };
@@ -48,8 +52,10 @@ $('#tabDev').onclick = () => { bottomTab = 'dev'; renderBottom(); };
 // ------------------------------------------------------------------ vista Session
 function renderSession() {
   const root = $('#session'); root.innerHTML = ''; cells = []; meters = [];
+  root.style.gridTemplateColumns = 'repeat(' + song.tracks.length + ',116px) 76px';
   song.tracks.forEach((t, i) => {
-    const h = el('div', 'th' + (i === selTrack ? ' sel' : ''), t.name); h.style.setProperty('--c', t.color);
+    const h = el('div', 'th' + (i === selTrack ? ' sel' : ''), (t.kind === 'audio' ? '♫ ' : '') + t.name); h.style.setProperty('--c', t.color);
+    const x = el('span', 'tx', '✕'); x.title = 'Quitar pista'; x.onclick = e => { e.stopPropagation(); removeTrack(i); }; h.appendChild(x);
     h.onclick = () => { selTrack = i; renderAll(); }; h.ondblclick = () => { const n = prompt('Nombre de la pista', t.name); if (n) { t.name = n; renderAll(); } };
     root.appendChild(h);
   });
@@ -58,9 +64,10 @@ function renderSession() {
     song.tracks.forEach((t, i) => {
       const c = t.clips[s], d = el('div', 'cell ' + (c ? 'has' : 'empty') + (i === selTrack && s === selSlot ? ' sel' : ''));
       d.style.setProperty('--c', t.color);
-      d.appendChild(el('div', 'pl', c ? '▶' : '+')); if (c) d.appendChild(el('span', 'nm', c.bars + (c.bars > 1 ? ' compases' : ' compás')));
+      d.appendChild(el('div', 'pl', c ? '▶' : (t.kind === 'audio' ? '♫' : '+'))); if (c) d.appendChild(el('span', 'nm', c.audio ? ((AUDIO[c.audio.id] && AUDIO[c.audio.id].name) || 'sin audio') : c.bars + (c.bars > 1 ? ' compases' : ' compás')));
       d.onclick = () => {
         selTrack = i; selSlot = s; ROLL.sel.clear();
+        if (!t.clips[s] && t.kind === 'audio') { importAudio(i, s); return; }
         if (!t.clips[s]) { t.clips[s] = clipNew(); bottomTab = 'clip'; } else { ensureEngine(); eng.launch(i, s); updatePlayBtn(); }
         renderAll();
       };
@@ -85,8 +92,10 @@ function renderSession() {
     pan.oninput = () => { t.pan = +pan.value; if (eng) eng.applyMix(); };
     const ins = el('select'); song.inserts.forEach((x, k) => { const o = el('option', '', 'Insert ' + (k + 1) + (x.name !== 'Insert ' + (k + 1) ? ' · ' + x.name : '')); o.value = k; ins.appendChild(o); });
     ins.value = t.insert; ins.title = 'Insert del mixer al que se envía esta pista'; ins.onchange = () => { t.insert = +ins.value; if (eng) eng.applyMix(); };
+    const mkSend = (k, lab) => { const r = el('input'); r.type = 'range'; r.min = 0; r.max = 1; r.step = 0.01; r.value = (t.sends && t.sends[k]) || 0; r.title = lab;
+      r.oninput = () => { t.sends = t.sends || [0, 0]; t.sends[k] = +r.value; if (eng) eng.applyMix(); }; return r; };
     const cv = el('canvas'); cv.width = 100; cv.height = 10; meters[i] = cv;
-    m.append(el('label', '', 'Vol'), vol, el('label', '', 'Pan'), pan, el('label', '', 'Insert'), ins, cv); root.appendChild(m);
+    m.append(el('label', '', 'Vol'), vol, el('label', '', 'Pan'), pan, el('label', '', 'Envío A (reverb)'), mkSend(0, 'Envío al retorno A'), el('label', '', 'Envío B (delay)'), mkSend(1, 'Envío al retorno B'), el('label', '', 'Insert'), ins, cv); root.appendChild(m);
   });
   root.appendChild(el('div'));
 }
@@ -101,7 +110,8 @@ function slider(parent, label, min, max, val, step, onInput, log) {
 function renderDevPane() {
   const pane = $('#devPane'); pane.innerHTML = ''; const t = song.tracks[selTrack], wrap = el('div', 'dev'); pane.appendChild(wrap);
   const inst = el('div', 'card'); inst.appendChild(el('h4', '', t.kind === 'drums' ? 'Caja de ritmos' : 'Sintetizador'));
-  if (t.kind === 'drums') inst.appendChild(el('div', '', 'Sonidos: ' + DRUM_NAMES.join(', ') + '.'));
+  if (t.kind === 'audio') { inst.firstChild.textContent = 'Pista de audio'; inst.appendChild(el('div', '', 'Haz clic en una celda vacía para importar un archivo de audio, o usa ● Audio para grabar con el micrófono. Los samples suenan a su velocidad original.')); }
+  else if (t.kind === 'drums') inst.appendChild(el('div', '', 'Sonidos: ' + DRUM_NAMES.join(', ') + '.'));
   else {
     const row = el('div', 'prm'), ws = el('select'); ['sawtooth', 'square', 'triangle', 'sine'].forEach(w => { const o = el('option', '', w); o.value = w; ws.appendChild(o); });
     ws.value = t.inst.wave; ws.onchange = () => t.inst.wave = ws.value; row.append(el('span', '', 'Onda'), ws); inst.appendChild(row);
@@ -146,15 +156,18 @@ document.addEventListener('keydown', e => {
   if (e.target.matches('input,select,textarea') && e.target.type !== 'range' && e.target.type !== 'checkbox') return;
   if (e.code === 'Space') { e.preventDefault(); togglePlay(); return; }
   if (arrKey(e) || (view !== 'mixer' && rollKey(e))) { e.preventDefault(); return; }
+  if (extrasKey(e)) { e.preventDefault(); return; }
   if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
   const k = e.key.toLowerCase();
   if (k === 'z') { octave = Math.max(1, octave - 1); status('Octava ' + octave); return; }
   if (k === 'x') { octave = Math.min(7, octave + 1); status('Octava ' + octave); return; }
   const i = KEYMAP.indexOf(k); if (i < 0) return;
-  ensureEngine(); const t = song.tracks[selTrack];
+  const t = song.tracks[selTrack]; if (t.kind === 'audio') return;
   const n = t.kind === 'drums' ? 'asdfghjk'.indexOf(k) : (octave + 1) * 12 + i;
-  if (n < 0) return; eng.note(t, selTrack, n, eng.ctx.currentTime, 0.25, 0.8);
+  if (n < 0) return; held[k] = n; liveOn(n, 0.8);
 });
+const held = {};
+document.addEventListener('keyup', e => { const k = e.key.toLowerCase(); if (held[k] !== undefined) { liveOff(held[k]); delete held[k]; } });
 
 // ------------------------------------------------------------------ animación
 function meterDraw(cv, an) {
@@ -177,7 +190,7 @@ function frame() {
           c.classList.toggle('queued', eng.playing && r.queued === s); }
       });
     } else if (view === 'arr') arrTick(st); else if (view === 'imm') immTick(); else mixerTick();
-    meterDraw($('#masterMeter'), eng.masterAn);
+    meterDraw($('#masterMeter'), eng.masterAn); extrasTick();
     if (bottomTab === 'clip' && ROLL.cv) {
       const c = curClip(), r = eng.rt[selTrack]; let ps = -1;
       if (c && eng.playing && st >= 0) {

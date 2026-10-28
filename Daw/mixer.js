@@ -42,8 +42,23 @@ function renderMixer() {
   };
   strips.appendChild(mkStrip(-1, 'MASTER', '#ffb400', () => song.masterVol, v => song.masterVol = v, true));
   song.inserts.forEach((ins, i) => strips.appendChild(mkStrip(i, ins.name, '#6d8cff', () => ins.vol, v => ins.vol = v, false)));
+  song.returns.forEach((r, k) => {
+    const idx = -2 - k, s = el('div', 'strip ret' + (mixSel === idx ? ' sel' : '')); s.style.setProperty('--c', '#35c9c9');
+    const nm = el('div', 'sname', k ? 'Retorno B' : 'Retorno A'); nm.onclick = () => { mixSel = idx; renderMixer(); };
+    s.append(nm, el('div', 'sdots', FX_DEFS[r.fx.type].name));
+    const fw = el('div', 'sfader'), cv = el('canvas'); cv.width = 22; cv.height = 170;
+    const f = el('input'); f.type = 'range'; f.min = 0; f.max = 1.25; f.step = 0.005; f.value = r.vol; f.className = 'fader';
+    const db = el('div', 'sdb', dbTxt(r.vol)); f.oninput = () => { r.vol = +f.value; db.textContent = dbTxt(r.vol); if (eng) eng.applyMix(); };
+    fw.append(cv, f); s.append(fw, db); mixMeters.push({ cv, lv: [0, 0], idx: idx }); strips.appendChild(s);
+  });
 
   // ---- panel de ranuras de efectos
+  if (mixSel <= -2) {
+    const k = -2 - mixSel, r = song.returns[k]; panel.appendChild(el('h3', '', r.name));
+    panel.appendChild(el('div', 'hint', 'Las pistas envían señal aquí con los potenciómetros "Envío" de la vista Session. Salida 100% efecto.'));
+    const slot = el('div', 'slot used'); FX_DEFS[r.fx.type].params.forEach(d => slider(slot, d.n, d.min, d.max, r.fx.p[d.k], d.step, v => { r.fx.p[d.k] = v; if (eng && eng.ret[k]) eng.ret[k].fx.update(); }, d.log));
+    panel.appendChild(slot); return;
+  }
   if (mixSel < 0) { panel.appendChild(el('h3', '', 'Master')); panel.appendChild(el('div', 'hint', 'El master lleva un limitador fijo (-3 dB) para evitar saturación digital. Los efectos se insertan en cada insert.')); return; }
   const ins = song.inserts[mixSel];
   panel.appendChild(el('h3', '', ins.name + ' — ranuras de efectos'));
@@ -80,5 +95,5 @@ function meterPaint(m, an) {
 }
 function mixerTick() {
   if (!eng) return;
-  mixMeters.forEach(m => meterPaint(m, m.idx < 0 ? [eng.masterM.anL, eng.masterM.anR] : [eng.ins[m.idx].anL, eng.ins[m.idx].anR]));
+  mixMeters.forEach(m => { const o = m.idx === -1 ? eng.masterM : m.idx <= -2 ? eng.ret[-2 - m.idx] : eng.ins[m.idx]; if (o) meterPaint(m, m.idx === -1 ? [o.anL, o.anR] : [o.anL, o.anR]); });
 }

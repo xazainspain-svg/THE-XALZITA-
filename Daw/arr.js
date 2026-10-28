@@ -116,6 +116,7 @@ function makeClip(it, t, z) {
   return d;
 }
 function paintClip(cv, it, t, c, z) {
+  if (c.audio) { drawWave(cv, c.audio.id, (it.off || 0) * stepSec(), it.l * stepSec(), 'rgba(0,0,0,.6)'); return; }
   const g = cv.getContext('2d'), len = c.bars * 16; let lo = 127, hi = 0;
   c.notes.forEach(n => { lo = Math.min(lo, n.n); hi = Math.max(hi, n.n); });
   if (hi < lo) { lo = 0; hi = 1; } const span = Math.max(hi - lo, 7), H = cv.height;
