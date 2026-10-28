@@ -1,7 +1,7 @@
 'use strict';
 // Motor de audio de Xaza Live (Web Audio). Funciona con AudioContext y con OfflineAudioContext (exportar WAV).
 
-const ARR_BARS = 32;
+const ARR_BARS = 64;
 const DRUM_NAMES = ['Bombo', 'Caja', 'Hi-hat', 'Hi-hat ab.', 'Palmas', 'Tom', 'Rim', 'Cencerro'];
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
@@ -110,16 +110,28 @@ function makeFx(ctx, type, p, eng) {
   return { in: I, out: O, update: upd, stop() { extra.forEach(o => { try { o.stop(); } catch (e) {} }); } };
 }
 
+// valor de una envolvente [{s, v}] (ordenada por s) en el paso x; interpola linealmente
+function envAt(env, x, def) {
+  if (!env || !env.length) return def;
+  if (x <= env[0].s) return env[0].v;
+  for (let i = 1; i < env.length; i++) if (x <= env[i].s) {
+    const a = env[i - 1], b = env[i]; return b.s === a.s ? b.v : a.v + (b.v - a.v) * (x - a.s) / (b.s - a.s);
+  }
+  return env[env.length - 1].v;
+}
+
 class Engine {
   constructor(ctx, song) {
     this.ctx = ctx; this.song = song;
     this.noise = makeNoiseBuf(ctx); this.ir = makeIR(ctx);
-    this.master = ctx.createGain(); this.master.gain.value = 0.9;
+    this.master = ctx.createGain();
     this.limiter = ctx.createDynamicsCompressor();
     this.limiter.threshold.value = -3; this.limiter.knee.value = 0; this.limiter.ratio.value = 20;
     this.limiter.attack.value = 0.003; this.limiter.release.value = 0.1;
-    this.masterAn = ctx.createAnalyser(); this.masterAn.fftSize = 1024;
-    this.master.connect(this.limiter); this.limiter.connect(ctx.destination); this.limiter.connect(this.masterAn);
+    this.masterM = this.meterTap(this.limiter);
+    this.master.connect(this.limiter); this.limiter.connect(ctx.destination);
+    this.masterAn = this.masterM.anL;
+    this.ins = song.inserts.map(ins => this.buildInsert(ins));
     this.tr = song.tracks.map(t => this.buildTrack(t));
     this.rt = song.tracks.map(() => ({ playing: -1, queued: undefined, launch: 0 }));
     this.playing = false; this.metro = false; this.log = []; this.mode = 'session';
@@ -127,29 +139,49 @@ class Engine {
   }
   dispose() { this.stop(); try { this.master.disconnect(); } catch (e) {} }
 
-  buildTrack(t) {
-    const c = this.ctx, o = { in: c.createGain(), vol: c.createGain(), pan: c.createStereoPanner(), an: c.createAnalyser(), fx: [] };
-    o.an.fftSize = 512; o.vol.connect(o.pan); o.pan.connect(this.master); o.pan.connect(o.an);
-    this.rebuild(o, t); return o;
+  // medidor estéreo (dos analizadores) colgado de un nodo
+  meterTap(node) {
+    const c = this.ctx, sp = c.createChannelSplitter(2), anL = c.createAnalyser(), anR = c.createAnalyser();
+    anL.fftSize = anR.fftSize = 512; node.connect(sp); sp.connect(anL, 0); sp.connect(anR, 1);
+    return { anL, anR };
   }
-  rebuild(o, t) {
+  buildTrack(t) {
+    const c = this.ctx, o = { in: c.createGain(), vol: c.createGain(), pan: c.createStereoPanner(), an: c.createAnalyser() };
+    o.an.fftSize = 512; o.in.connect(o.vol); o.vol.connect(o.pan); o.pan.connect(o.an);
+    this.routeTrack(o, t); return o;
+  }
+  routeTrack(o, t) {
+    try { o.pan.disconnect(); } catch (e) {}
+    o.pan.connect(o.an); o.pan.connect(this.ins[Math.max(0, Math.min(this.ins.length - 1, t.insert | 0))].in);
+  }
+  buildInsert(ins) {
+    const c = this.ctx, o = { in: c.createGain(), vol: c.createGain(), pan: c.createStereoPanner(), fx: [] };
+    o.vol.connect(o.pan); o.pan.connect(this.master); Object.assign(o, this.meterTap(o.pan));
+    this.rebuild(o, ins); return o;
+  }
+  rebuild(o, ins) {
     o.in.disconnect();
-    o.fx.forEach(f => { try { f.out.disconnect(); f.stop(); } catch (e) {} });
-    o.fx = t.fx.map(x => makeFx(this.ctx, x.type, x.p, this));
+    o.fx.forEach(f => { if (f) { try { f.out.disconnect(); f.stop(); } catch (e) {} } });
+    o.fx = ins.fx.map(x => (x && x.on !== false) ? makeFx(this.ctx, x.type, x.p, this) : null);
     let prev = o.in;
-    o.fx.forEach(f => { prev.connect(f.in); prev = f.out; });
+    o.fx.forEach(f => { if (f) { prev.connect(f.in); prev = f.out; } });
     prev.connect(o.vol);
   }
-  rebuildTrack(i) { this.rebuild(this.tr[i], this.song.tracks[i]); }
+  rebuildInsert(k) { this.rebuild(this.ins[k], this.song.inserts[k]); }
 
   baseGain(t, anySolo) { return (t.mute || (anySolo && !t.solo)) ? 0 : t.vol; }
   applyMix() {
-    const now = this.ctx.currentTime, anySolo = this.song.tracks.some(t => t.solo);
-    this.song.tracks.forEach((t, i) => {
+    const now = this.ctx.currentTime, S = this.song, anySolo = S.tracks.some(t => t.solo), insSolo = S.inserts.some(x => x.solo);
+    S.tracks.forEach((t, i) => {
       const o = this.tr[i], g = o.vol.gain;
       g.cancelScheduledValues(now); g.setValueAtTime(this.baseGain(t, anySolo), now);
-      o.pan.pan.setValueAtTime(t.pan, now);
+      o.pan.pan.setValueAtTime(t.pan, now); this.routeTrack(o, t);
     });
+    S.inserts.forEach((x, k) => {
+      const o = this.ins[k];
+      o.vol.gain.setValueAtTime((x.mute || (insSolo && !x.solo)) ? 0 : x.vol, now); o.pan.pan.setValueAtTime(x.pan, now);
+    });
+    this.master.gain.setValueAtTime(S.masterVol === undefined ? 0.9 : S.masterVol, now);
   }
 
   // ---- instrumentos
@@ -216,7 +248,10 @@ class Engine {
   // ---- secuenciador
   stepDur() { return 60 / this.song.bpm / 4; }
   fire(t, i, clip, local, time, sd) {
-    for (const n of clip.notes) if (n.s === local) this.note(t, i, n.n, time, n.l * sd, n.v || 0.8);
+    for (const n of clip.notes) {
+      if (n.m || Math.floor(n.s + 1e-9) !== local) continue;
+      this.note(t, i, n.n, time + (n.s - local) * sd, n.l * sd, n.v === undefined ? 0.8 : n.v);
+    }
   }
   scheduleStep(step, time, mode) {
     const s = this.song, sd = this.stepDur();
@@ -228,30 +263,40 @@ class Engine {
         this.fire(t, i, c, (step - r.launch) % (c.bars * 16), time, sd);
       });
     } else {
-      const bar = Math.floor(step / 16), anySolo = s.tracks.some(t => t.solo);
-      if (step % 16 === 0) s.tracks.forEach((t, i) => {
-        const a = t.auto && t.auto[bar] !== undefined ? t.auto[bar] : 1;
-        this.tr[i].vol.gain.setValueAtTime(this.baseGain(t, anySolo) * a, time);
+      const anySolo = s.tracks.some(t => t.solo);
+      s.tracks.forEach((t, i) => {            // envolventes de automatización (volumen / panorama)
+        const o = this.tr[i];
+        if (t.autoVol && t.autoVol.length) {
+          const g = o.vol.gain; g.setValueAtTime(this.baseGain(t, anySolo) * envAt(t.autoVol, step, 1), time);
+          g.linearRampToValueAtTime(this.baseGain(t, anySolo) * envAt(t.autoVol, step + 1, 1), time + sd);
+        }
+        if (t.autoPan && t.autoPan.length) {
+          const p = o.pan.pan; p.setValueAtTime(envAt(t.autoPan, step, t.pan), time);
+          p.linearRampToValueAtTime(envAt(t.autoPan, step + 1, t.pan), time + sd);
+        }
       });
       s.arr.forEach(it => {
         const t = s.tracks[it.t], c = t && t.clips[it.slot];
-        if (!c || bar < it.bar || bar >= it.bar + c.bars) return;
-        this.fire(t, it.t, c, step - it.bar * 16, time, sd);
+        if (!c || step < it.s || step >= it.s + it.l) return;
+        const len = c.bars * 16, local = (step - it.s + (it.off || 0)) % len;
+        this.fire(t, it.t, c, local, time, sd);
       });
     }
     if (this.metro && step % 4 === 0) this.click(time, step % 16 === 0);
   }
 
-  play(mode) {
+  play(mode, startStep = 0) {
     if (this.playing) this.stop();
-    this.mode = mode; this.playing = true; this.step = 0; this.nextTime = this.ctx.currentTime + 0.08; this.log = [];
-    this.timer = setInterval(() => this.tick(), 25); this.tick();
+    this.mode = mode; this.playing = true; this.step = mode === 'arr' ? startStep : 0; this.nextTime = this.ctx.currentTime + 0.08; this.log = [];
+    this.timer = setInterval(() => this.tick(), 25);
   }
   tick() {
     while (this.playing && this.nextTime < this.ctx.currentTime + 0.12) {
       this.scheduleStep(this.step, this.nextTime, this.mode);
       this.log.push([this.nextTime, this.step]);
       this.step++; this.nextTime += this.stepDur();
+      const lp = this.song.loop;
+      if (this.mode === 'arr' && lp && lp.on && this.step >= lp.end) this.step = lp.start;
       if (this.mode === 'arr' && this.step >= ARR_BARS * 16) { setTimeout(() => this.onEnd && this.onEnd(), 600); this.playing = false; clearInterval(this.timer); this.timer = null; break; }
     }
   }
@@ -275,12 +320,12 @@ class Engine {
 
 // ---- exportar a WAV (render offline de la vista Arrangement)
 async function renderWav(song) {
-  let bars = 0;
-  song.arr.forEach(it => { const c = song.tracks[it.t] && song.tracks[it.t].clips[it.slot]; if (c) bars = Math.max(bars, it.bar + c.bars); });
-  if (!bars) throw new Error('El Arrangement está vacío.');
-  const sr = 44100, sd = 60 / song.bpm / 4, len = Math.ceil((bars * 16 * sd + 2.5) * sr);
+  let steps = 0;
+  song.arr.forEach(it => { if (song.tracks[it.t] && song.tracks[it.t].clips[it.slot]) steps = Math.max(steps, it.s + it.l); });
+  if (!steps) throw new Error('El Arrangement está vacío.');
+  const sr = 44100, sd = 60 / song.bpm / 4, len = Math.ceil((steps * sd + 2.5) * sr);
   const off = new OfflineAudioContext(2, len, sr), eng = new Engine(off, song);
-  for (let s = 0; s < bars * 16; s++) eng.scheduleStep(s, s * sd, 'arr');
+  for (let s = 0; s < steps; s++) eng.scheduleStep(s, s * sd, 'arr');
   return encodeWav(await off.startRendering());
 }
 function encodeWav(buf) {

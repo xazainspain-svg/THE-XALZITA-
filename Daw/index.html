@@ -17,6 +17,7 @@
   <nav>
     <button id="tabSession" class="on">Session</button>
     <button id="tabArr">Arrangement</button>
+    <button id="tabMixer">Mixer</button>
   </nav>
   <span class="grow"></span>
   <canvas id="masterMeter" width="80" height="14"></canvas>
@@ -30,6 +31,7 @@
 <main>
   <section id="session"></section>
   <section id="arr" hidden></section>
+  <section id="mixer" hidden></section>
 </main>
 <footer id="bottom">
   <div class="tabs">
@@ -41,6 +43,11 @@
   <div id="devPane" hidden></div>
 </footer>
 <script src="engine.js"></script>
+<script src="model.js"></script>
 <script src="app.js"></script>
+<script src="roll.js"></script>
+<script src="mixer.js"></script>
+<script src="arr.js"></script>
+<script src="start.js"></script>
 </body>
 </html>
