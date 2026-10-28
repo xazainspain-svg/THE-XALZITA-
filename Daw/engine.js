@@ -33,6 +33,25 @@ const FX_DEFS = {
     { k: 'high', n: 'Agudos dB', min: -18, max: 18, v: 0 }] },
 };
 
+FX_DEFS.peq = { name: 'EQ paramétrico', params: [
+  { k: 'f1', n: 'Graves Hz', min: 30, max: 500, v: 100, log: 1 }, { k: 'g1', n: 'Graves dB', min: -18, max: 18, v: 0 },
+  { k: 'f2', n: 'Medio 1 Hz', min: 200, max: 3000, v: 500, log: 1 }, { k: 'g2', n: 'Medio 1 dB', min: -18, max: 18, v: 0 }, { k: 'q2', n: 'Medio 1 Q', min: 0.2, max: 10, v: 1 },
+  { k: 'f3', n: 'Medio 2 Hz', min: 1000, max: 10000, v: 3000, log: 1 }, { k: 'g3', n: 'Medio 2 dB', min: -18, max: 18, v: 0 }, { k: 'q3', n: 'Medio 2 Q', min: 0.2, max: 10, v: 1 },
+  { k: 'f4', n: 'Agudos Hz', min: 3000, max: 16000, v: 8000, log: 1 }, { k: 'g4', n: 'Agudos dB', min: -18, max: 18, v: 0 }] };
+FX_DEFS.duck = { name: 'Sidechain (ducking)', params: [
+  { k: 'src', n: 'Fuente (insert)', min: 1, max: 16, v: 1, step: 1 }, { k: 'depth', n: 'Profundidad', min: 0, max: 1, v: 0.8 }, { k: 'rel', n: 'Release ms', min: 30, max: 600, v: 150 }] };
+const FX_PRESETS = {
+  reverb: { 'Sala': { mix: 0.2 }, 'Catedral': { mix: 0.6 } },
+  delay: { 'Eco 1/8': { time: 0.25, fb: 0.35, mix: 0.3 }, 'Eco largo': { time: 0.5, fb: 0.55, mix: 0.35 }, 'Slapback': { time: 0.09, fb: 0.1, mix: 0.3 } },
+  dist: { 'Suave': { drive: 4, mix: 0.4 }, 'Fuzz': { drive: 35, mix: 0.8 } },
+  filter: { 'Paso bajo': { freq: 800, q: 1, type: 0 }, 'Paso alto': { freq: 300, q: 1, type: 1 }, 'Resonante': { freq: 1200, q: 10, type: 0 } },
+  comp: { 'Suave': { thr: -18, ratio: 2.5 }, 'Aplastar': { thr: -32, ratio: 12 } },
+  eq: { 'Brillo': { low: -2, mid: 0, high: 5 }, 'Calidez': { low: 4, mid: 1, high: -2 } },
+  chorus: { 'Ancho': { rate: 0.8, depth: 0.006, mix: 0.5 }, 'Lento': { rate: 0.3, depth: 0.008, mix: 0.4 } },
+  peq: { 'Voz clara': { g1: -4, f1: 120, g2: 2, f2: 800, q2: 1, g3: 3, f3: 4000, q3: 1.2, g4: 2, f4: 10000 }, 'Bajo grueso': { g1: 5, f1: 80, g2: -2, f2: 400, q2: 1, g3: 2, f3: 2000, q3: 1, g4: 0, f4: 8000 } },
+  duck: { 'Bombo (pump)': { src: 1, depth: 0.85, rel: 180 }, 'Sutil': { src: 1, depth: 0.4, rel: 120 } },
+};
+
 const midiFreq = n => 440 * Math.pow(2, (n - 69) / 12);
 const noteName = n => NOTE_NAMES[n % 12] + (Math.floor(n / 12) - 1);
 
@@ -98,6 +117,27 @@ function makeFx(ctx, type, p, eng) {
       upd = () => { c.threshold.value = p.thr; c.ratio.value = p.ratio; };
       break;
     }
+    case 'peq': {
+      const mk = (type, fr, q) => { const b = ctx.createBiquadFilter(); b.type = type; b.frequency.value = fr; b.Q.value = q; return b; };
+      const b1 = mk('lowshelf', 100, 0.7), b2 = mk('peaking', 500, 1), b3 = mk('peaking', 3000, 1), b4 = mk('highshelf', 8000, 0.7);
+      I.connect(b1); b1.connect(b2); b2.connect(b3); b3.connect(b4); b4.connect(O);
+      upd = () => { b1.frequency.value = p.f1; b1.gain.value = p.g1; b2.frequency.value = p.f2; b2.gain.value = p.g2; b2.Q.value = p.q2;
+        b3.frequency.value = p.f3; b3.gain.value = p.g3; b3.Q.value = p.q3; b4.frequency.value = p.f4; b4.gain.value = p.g4; };
+      break;
+    }
+    case 'duck': {        // sidechain: baja este insert según el nivel de otro (se mide con un analizador cada 16 ms)
+      const g = ctx.createGain(), buf = new Float32Array(512); let env = 0; I.connect(g); g.connect(O);
+      if (typeof OfflineAudioContext === 'undefined' || !(ctx instanceof OfflineAudioContext)) {
+        const timer = setInterval(() => {
+          const src = eng.ins && eng.ins[Math.max(0, Math.min(15, Math.round(p.src) - 1))]; if (!src) return;
+          src.anL.getFloatTimeDomainData(buf); let pk = 0; for (let i = 0; i < buf.length; i++) pk = Math.max(pk, Math.abs(buf[i]));
+          env = Math.max(pk, env * Math.exp(-16 / Math.max(10, p.rel)));
+          g.gain.setTargetAtTime(1 - p.depth * Math.min(1, env * 4), ctx.currentTime, 0.008);
+        }, 16);
+        extra.push({ stop() { clearInterval(timer); } });
+      }
+      break;
+    }
     case 'eq': {
       const lo = ctx.createBiquadFilter(), mi = ctx.createBiquadFilter(), hi = ctx.createBiquadFilter();
       lo.type = 'lowshelf'; lo.frequency.value = 200; mi.type = 'peaking'; mi.frequency.value = 1000; mi.Q.value = 1;
@@ -110,6 +150,78 @@ function makeFx(ctx, type, p, eng) {
   upd();
   return { in: I, out: O, update: upd, stop() { extra.forEach(o => { try { o.stop(); } catch (e) {} }); } };
 }
+
+// ---- audio: buffer derivado (recorte + invertir + estirar al tempo) con caché
+function sliceBuf(buf, start, end, rev) {
+  const sr = buf.sampleRate, i0 = Math.max(0, Math.floor(start * sr)), i1 = Math.min(buf.length, Math.floor(end * sr)), len = Math.max(1, i1 - i0);
+  const out = new AudioBuffer({ length: len, sampleRate: sr, numberOfChannels: buf.numberOfChannels });
+  for (let c = 0; c < buf.numberOfChannels; c++) { const src = buf.getChannelData(c), dst = out.getChannelData(c); for (let i = 0; i < len; i++) dst[i] = src[rev ? i1 - 1 - i : i0 + i]; }
+  return out;
+}
+function stretchBuf(buf, ratio) {            // estiramiento granular (mantiene el tono); ratio = duración de salida / entrada
+  const sr = buf.sampleRate, G = Math.max(256, Math.round(0.06 * sr)), Hs = G >> 2, Ha = Hs / ratio, outLen = Math.max(1, Math.round(buf.length * ratio));
+  const out = new AudioBuffer({ length: outLen, sampleRate: sr, numberOfChannels: buf.numberOfChannels }), win = new Float32Array(G);
+  for (let i = 0; i < G; i++) win[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / G);
+  for (let c = 0; c < buf.numberOfChannels; c++) {
+    const src = buf.getChannelData(c), dst = out.getChannelData(c);
+    for (let k = 0, o = 0; o < outLen; k++, o = k * Hs) {
+      const p = Math.round(k * Ha); if (p >= src.length) break;
+      for (let i = 0; i < G && o + i < outLen && p + i < src.length; i++) dst[o + i] += src[p + i] * win[i] / 2;
+    }
+  }
+  return out;
+}
+function audioBuffer(au, bpm) {
+  const a = AUDIO[au.id]; if (!a) return null;
+  const start = au.start || 0, end = au.end || a.buf.duration, ratio = au.warp ? (au.ob || 120) / bpm : 1;
+  const key = [start.toFixed(3), end.toFixed(3), au.rev ? 1 : 0, ratio.toFixed(3)].join('|'); a.cache = a.cache || {};
+  if (!a.cache[key]) {
+    const keys = Object.keys(a.cache); if (keys.length > 6) delete a.cache[keys[0]];
+    let b = (start > 0 || au.end || au.rev) ? sliceBuf(a.buf, start, end, au.rev) : a.buf;
+    a.cache[key] = Math.abs(ratio - 1) > 0.01 ? stretchBuf(b, ratio) : b;
+  }
+  return a.cache[key];
+}
+
+// ---- automatización de cualquier parámetro
+function autoInfo(id, S) {
+  let m;
+  if (id === 'm.vol') return { label: 'Master · volumen', min: 0, max: 1.25, get: () => S.masterVol, set: v => { S.masterVol = v; } };
+  if (id === 'bpm') return { label: 'Tempo (BPM)', min: 40, max: 240, js: true, get: () => S.bpm, set: v => { S.bpm = v; } };
+  if ((m = /^t(\d+)\.(vol|pan|sa|sb|cutoff|res)$/.exec(id))) {
+    const i = +m[1], t = S.tracks[i]; if (!t) return null; const k = m[2], nm = t.name;
+    if (k === 'vol') return { label: nm + ' · volumen', min: 0, max: 1.25, get: () => t.vol };
+    if (k === 'pan') return { label: nm + ' · panorama', min: -1, max: 1, get: () => t.pan };
+    if (k === 'sa' || k === 'sb') return { label: nm + ' · envío ' + (k === 'sa' ? 'A' : 'B'), min: 0, max: 1, get: () => (t.sends || [0, 0])[k === 'sa' ? 0 : 1] };
+    if (!t.inst) return null;
+    return k === 'cutoff' ? { label: nm + ' · corte del filtro', min: 100, max: 12000, log: 1, js: true, get: () => t.inst.cutoff, set: v => { t.inst.cutoff = v; } }
+                          : { label: nm + ' · resonancia', min: 0.1, max: 18, js: true, get: () => t.inst.res, set: v => { t.inst.res = v; } };
+  }
+  if ((m = /^i(\d+)\.(vol|pan)$/.exec(id))) { const x = S.inserts[+m[1]]; if (!x) return null; return m[2] === 'vol' ? { label: x.name + ' · volumen', min: 0, max: 1.25, get: () => x.vol } : { label: x.name + ' · panorama', min: -1, max: 1, get: () => x.pan }; }
+  if ((m = /^r(\d+)\.vol$/.exec(id))) { const r = S.returns[+m[1]]; if (!r) return null; return { label: r.name + ' · volumen', min: 0, max: 1.25, get: () => r.vol }; }
+  if ((m = /^i(\d+)\.f(\d+)\.(\w+)$/.exec(id))) {
+    const x = S.inserts[+m[1]], f = x && x.fx[+m[2]]; if (!f) return null; const d = FX_DEFS[f.type].params.find(q => q.k === m[3]); if (!d) return null;
+    return { label: x.name + ' · ' + FX_DEFS[f.type].name + ' · ' + d.n, min: d.min, max: d.max, log: d.log, js: true, fx: [+m[1], +m[2]], get: () => f.p[d.k], set: v => { f.p[d.k] = v; } };
+  }
+  return null;
+}
+function autoTargets(S) {                    // lista agrupada para el selector
+  const g = [{ group: 'General', items: [['m.vol', 'Master · volumen'], ['bpm', 'Tempo (BPM)']] }];
+  S.tracks.forEach((t, i) => {
+    const it = [['t' + i + '.vol', 'volumen'], ['t' + i + '.pan', 'panorama'], ['t' + i + '.sa', 'envío A'], ['t' + i + '.sb', 'envío B']];
+    if (t.inst && t.inst.cutoff !== undefined) it.push(['t' + i + '.cutoff', 'corte del filtro'], ['t' + i + '.res', 'resonancia']);
+    g.push({ group: 'Pista · ' + t.name, items: it });
+  });
+  S.inserts.forEach((x, k) => {
+    const it = [['i' + k + '.vol', 'volumen'], ['i' + k + '.pan', 'panorama']];
+    x.fx.forEach((f, sl) => { if (f) FX_DEFS[f.type].params.forEach(d => it.push(['i' + k + '.f' + sl + '.' + d.k, FX_DEFS[f.type].name + ' · ' + d.n])); });
+    if (it.length > 2 || x.vol !== 0.8 || S.tracks.some(t => t.insert === k)) g.push({ group: 'Insert · ' + x.name, items: it });
+  });
+  S.returns.forEach((r, k) => g.push({ group: r.name, items: [['r' + k + '.vol', 'volumen']] }));
+  return g;
+}
+const autoMap = (T, v) => T.log ? T.min * Math.pow(T.max / T.min, v) : T.min + (T.max - T.min) * v;
+const autoNorm = (T, x) => Math.max(0, Math.min(1, T.log ? Math.log(x / T.min) / Math.log(T.max / T.min) : (x - T.min) / (T.max - T.min)));
 
 // valor de una envolvente [{s, v}] (ordenada por s) en el paso x; interpola linealmente
 function envAt(env, x, def) {
@@ -141,13 +253,13 @@ class Engine {
     this.playing = false; this.metro = false; this.log = []; this.mode = 'session';
     this.applyMix();
   }
-  dispose() { this.stop(); try { this.master.disconnect(); } catch (e) {} }
+  dispose() { this.stop(true); try { this.master.disconnect(); } catch (e) {} }
 
   // medidor estéreo (dos analizadores) colgado de un nodo
   meterTap(node) {
     const c = this.ctx, sp = c.createChannelSplitter(2), anL = c.createAnalyser(), anR = c.createAnalyser();
     anL.fftSize = anR.fftSize = 512; node.connect(sp); sp.connect(anL, 0); sp.connect(anR, 1);
-    return { anL, anR };
+    return { anL, anR, split: sp };
   }
   buildReturn(r) {
     const c = this.ctx, o = { in: c.createGain(), vol: c.createGain() };
@@ -181,7 +293,7 @@ class Engine {
   }
   buildInsert(ins) {
     const c = this.ctx, o = { in: c.createGain(), vol: c.createGain(), pan: c.createStereoPanner(), fx: [] };
-    o.vol.connect(o.pan); o.pan.connect(this.master); Object.assign(o, this.meterTap(o.pan));
+    o.vol.connect(o.pan); o.pan.connect(this.master); Object.assign(o, this.meterTap(o.pan)); o.routeKey = 'm';
     this.rebuild(o, ins); return o;
   }
   rebuild(o, ins) {
@@ -205,28 +317,54 @@ class Engine {
     });
     this.ret.forEach((o, k) => o.vol.gain.setValueAtTime(S.returns[k].vol, now));
     S.inserts.forEach((x, k) => {
-      const o = this.ins[k];
+      const o = this.ins[k], to = (x.to !== undefined && x.to > k && x.to < this.ins.length) ? x.to : -1, key = String(to);
+      if (o.routeKey !== key) { o.routeKey = key; try { o.pan.disconnect(); } catch (e) {} o.pan.connect(to < 0 ? this.master : this.ins[to].in); o.pan.connect(o.split); }
       o.vol.gain.setValueAtTime((x.mute || (insSolo && !x.solo)) ? 0 : x.vol, now); o.pan.pan.setValueAtTime(x.pan, now);
     });
     this.master.gain.setValueAtTime(S.masterVol === undefined ? 0.9 : S.masterVol, now);
   }
 
   // ---- instrumentos
-  note(t, i, n, when, dur, vel) {
-    const dest = this.tr[i].in;
-    if (t.kind === 'drums') this.drum(n % 8, when, vel, dest); else this.synth(t.inst, n, when, dur, vel, dest);
+  note(t, i, n, when, dur, vel, ex) {
+    let dest = this.tr[i].in;
+    if (ex && ex.pan) { const p = this.ctx.createStereoPanner(); p.pan.value = Math.max(-1, Math.min(1, ex.pan)); p.connect(dest); dest = p; }
+    const fine = (ex && ex.fine) || 0;
+    if (t.kind === 'drums') this.drum(n % 8, when, vel, dest);
+    else if (t.kind === 'fm') this.fm(t.inst, n, when, dur, vel, dest, fine);
+    else if (t.kind === 'sampler') this.sampler(t.inst, n, when, dur, vel, dest, fine);
+    else this.synth(t.inst, n, when, dur, vel, dest, fine);
   }
-  synth(inst, n, when, dur, vel, dest) {
+  synth(inst, n, when, dur, vel, dest, fine = 0) {
     const c = this.ctx, f = midiFreq(n), flt = c.createBiquadFilter(), env = c.createGain();
-    flt.type = 'lowpass'; flt.frequency.value = inst.cutoff; flt.Q.value = inst.res;
+    flt.type = 'lowpass'; flt.Q.value = inst.res;
     const a = Math.max(0.003, inst.atk), peak = 0.2 * vel, end = when + Math.max(dur, a), stop = end + inst.rel;
+    if (inst.fe > 0) {                                  // envolvente de filtro
+      const top = Math.min(18000, inst.cutoff * Math.pow(2, inst.fe * 4));
+      flt.frequency.setValueAtTime(top, when); flt.frequency.exponentialRampToValueAtTime(Math.max(40, inst.cutoff), when + Math.max(0.02, inst.fd || 0.25));
+    } else flt.frequency.value = inst.cutoff;
     env.gain.setValueAtTime(0, when); env.gain.linearRampToValueAtTime(peak, when + a);
     env.gain.setValueAtTime(peak, end); env.gain.linearRampToValueAtTime(0, stop);
     flt.connect(env); env.connect(dest);
-    [-7, 7].forEach(det => {
-      const o = c.createOscillator(); o.type = inst.wave; o.frequency.value = f; o.detune.value = det;
-      o.connect(flt); o.start(when); o.stop(stop + 0.05);
-    });
+    const osc = (type, freq, det) => { const o = c.createOscillator(); o.type = type; o.frequency.value = freq; o.detune.value = det + fine; o.connect(flt); o.start(when); o.stop(stop + 0.05); };
+    osc(inst.wave, f, -7); osc(inst.wave, f, 7);
+    if (inst.w2 && inst.w2 !== 'none') osc(inst.w2, f, inst.d2 === undefined ? 12 : inst.d2);
+    if (inst.sub > 0) { const so = c.createOscillator(), sg = c.createGain(); so.type = 'sine'; so.frequency.value = f / 2; so.detune.value = fine; sg.gain.value = inst.sub; so.connect(sg); sg.connect(env); so.start(when); so.stop(stop + 0.05); }
+  }
+  fm(inst, n, when, dur, vel, dest, fine = 0) {
+    const c = this.ctx, f = midiFreq(n), car = c.createOscillator(), mod = c.createOscillator(), mg = c.createGain(), env = c.createGain();
+    const a = Math.max(0.003, inst.atk), peak = 0.25 * vel, end = when + Math.max(dur, a), stop = end + inst.rel;
+    car.frequency.value = f; mod.frequency.value = f * inst.ratio; car.detune.value = fine; mod.detune.value = fine;
+    mg.gain.setValueAtTime(inst.idx * f, when); mg.gain.exponentialRampToValueAtTime(Math.max(0.01, inst.idx * f * 0.05), when + Math.max(0.03, inst.fdec));
+    mod.connect(mg); mg.connect(car.frequency); car.connect(env); env.connect(dest);
+    env.gain.setValueAtTime(0, when); env.gain.linearRampToValueAtTime(peak, when + a); env.gain.setValueAtTime(peak, end); env.gain.linearRampToValueAtTime(0, stop);
+    car.start(when); mod.start(when); car.stop(stop + 0.05); mod.stop(stop + 0.05);
+  }
+  sampler(inst, n, when, dur, vel, dest, fine = 0) {
+    const a = inst.id && AUDIO[inst.id]; if (!a) return;
+    const c = this.ctx, src = c.createBufferSource(), env = c.createGain(), end = when + Math.max(dur, 0.02), stop = end + (inst.rel || 0.15);
+    src.buffer = a.buf; src.loop = !!inst.loop; src.playbackRate.value = Math.pow(2, (n - (inst.root || 60) + fine / 100) / 12);
+    env.gain.setValueAtTime(0.9 * vel, when); if (inst.loop || dur > 0) { env.gain.setValueAtTime(0.9 * vel, end); env.gain.linearRampToValueAtTime(0, stop); }
+    src.connect(env); env.connect(dest); src.start(when); src.stop(stop + 0.05);
   }
   hit(dest, when, peak, decay) {
     const g = this.ctx.createGain();
@@ -277,16 +415,17 @@ class Engine {
   fire(t, i, clip, local, time, sd, isStart, remain) {
     if (clip.audio) {                                   // clip de audio: se dispara al inicio del clip (o del tramo en el Arrangement)
       if (local !== 0 && !isStart) return;
-      const a = AUDIO[clip.audio.id]; if (!a) return;
-      const off = local * sd; if (off >= a.buf.duration) return;
-      const src = this.ctx.createBufferSource(); src.buffer = a.buf; src.connect(this.tr[i].in);
-      const left = Math.min(remain === undefined ? Infinity : remain * sd, a.buf.duration - off);
+      const buf = audioBuffer(clip.audio, this.song.bpm); if (!buf) return;
+      const off = local * sd; if (off >= buf.duration) return;
+      const src = this.ctx.createBufferSource(), g = this.ctx.createGain(); src.buffer = buf; g.gain.value = clip.audio.gain === undefined ? 1 : clip.audio.gain;
+      src.connect(g); g.connect(this.tr[i].in);
+      const left = Math.min(remain === undefined ? Infinity : remain * sd, buf.duration - off);
       src.start(time, off, left); this.srcs.add(src); src.onended = () => this.srcs.delete(src); return;
     }
     const sw = (Math.floor(local + 1e-9) % 2 === 1) ? (this.song.swing || 0) * sd : 0;
     for (const n of clip.notes) {
       if (n.m || Math.floor(n.s + 1e-9) !== local) continue;
-      this.note(t, i, n.n, time + sw + (n.s - local) * sd, n.l * sd, n.v === undefined ? 0.8 : n.v);
+      this.note(t, i, n.n, time + sw + (n.s - local) * sd, n.l * sd, n.v === undefined ? 0.8 : n.v, (n.pan || n.fine) ? { pan: n.pan, fine: n.fine } : null);
     }
   }
   scheduleStep(step, time, mode) {
@@ -300,17 +439,7 @@ class Engine {
       });
     } else {
       const anySolo = s.tracks.some(t => t.solo);
-      s.tracks.forEach((t, i) => {            // envolventes de automatización (volumen / panorama)
-        const o = this.tr[i];
-        if (t.autoVol && t.autoVol.length) {
-          const g = o.vol.gain; g.setValueAtTime(this.baseGain(t, anySolo) * envAt(t.autoVol, step, 1), time);
-          g.linearRampToValueAtTime(this.baseGain(t, anySolo) * envAt(t.autoVol, step + 1, 1), time + sd);
-        }
-        if (t.autoPan && t.autoPan.length) {
-          const p = o.pan.pan; p.setValueAtTime(envAt(t.autoPan, step, t.pan), time);
-          p.linearRampToValueAtTime(envAt(t.autoPan, step + 1, t.pan), time + sd);
-        }
-      });
+      (s.autos || []).forEach(au => { if (au.pts && au.pts.length) this.applyAuto(au, step, time, sd); });
       s.arr.forEach(it => {
         const t = s.tracks[it.t], c = t && t.clips[it.slot];
         if (!c || step < it.s || step >= it.s + it.l) return;
@@ -321,6 +450,20 @@ class Engine {
     if (this.metro && step % 4 === 0) this.click(time, step % 16 === 0);
   }
 
+  applyAuto(au, step, time, sd) {
+    const T = autoInfo(au.target, this.song); if (!T) return;
+    const v0 = autoMap(T, envAt(au.pts, step, 0)), v1 = autoMap(T, envAt(au.pts, step + 1, 0)), m = /^(m|t(\d+)|i(\d+)|r(\d+))\.(\w+)$/.exec(au.target);
+    if (T.js) {                                          // parámetros que se leen en JS: se restauran al parar
+      this.bak = this.bak || new Map(); if (!this.bak.has(au.target)) this.bak.set(au.target, T.get());
+      T.set(v0); if (T.fx && this.ins[T.fx[0]].fx[T.fx[1]]) this.ins[T.fx[0]].fx[T.fx[1]].update(); return;
+    }
+    let ap = null;
+    if (au.target === 'm.vol') ap = this.master.gain;
+    else if (m && m[2] !== undefined) { const o = this.tr[+m[2]]; ap = m[5] === 'vol' ? o.vol.gain : m[5] === 'pan' ? o.pan.pan : o.sends[m[5] === 'sa' ? 0 : 1].gain; }
+    else if (m && m[3] !== undefined) { const o = this.ins[+m[3]]; ap = m[5] === 'vol' ? o.vol.gain : o.pan.pan; }
+    else if (m && m[4] !== undefined) ap = this.ret[+m[4]].vol.gain;
+    if (ap) { ap.setValueAtTime(v0, time); ap.linearRampToValueAtTime(v1, time + sd); }
+  }
   play(mode, startStep = 0) {
     if (this.playing) this.stop();
     this.mode = mode; this.playing = true; this.step = mode === 'arr' ? startStep : 0; this.nextTime = this.ctx.currentTime + 0.08; this.log = [];
@@ -336,11 +479,12 @@ class Engine {
       if (this.mode === 'arr' && this.step >= ARR_BARS * 16) { setTimeout(() => this.onEnd && this.onEnd(), 600); this.playing = false; clearInterval(this.timer); this.timer = null; break; }
     }
   }
-  stop() {
+  stop(noMix) {
     this.playing = false; if (this.timer) clearInterval(this.timer); this.timer = null;
     this.rt.forEach(r => { r.playing = -1; r.queued = undefined; });
     this.srcs.forEach(x => { try { x.stop(); } catch (e) {} }); this.srcs.clear();
-    this.log = []; this.applyMix();
+    if (this.bak) { this.bak.forEach((v, id) => { const T = autoInfo(id, this.song); if (T && T.set) { T.set(v); if (T.fx && this.ins[T.fx[0]].fx[T.fx[1]]) this.ins[T.fx[0]].fx[T.fx[1]].update(); } }); this.bak = null; }
+    this.log = []; if (!noMix) this.applyMix();
   }
   currentStep() {
     const now = this.ctx.currentTime;

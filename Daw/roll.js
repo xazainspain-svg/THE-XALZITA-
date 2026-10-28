@@ -53,10 +53,11 @@ function renderClipPane() {
   const mx = el('button', ROLL.big ? 'on' : '', '⤢'); mx.title = 'Maximizar / restaurar panel'; mx.onclick = () => { ROLL.big = !ROLL.big; $('#bottom').classList.toggle('big', ROLL.big); renderClipPane(); };
   bar.appendChild(mx);
   pane.appendChild(bar);
+  rollToolsRow(pane, c, t);
 
   const R = rollGeom(t), sw = ROLL.stepW, W = clipLen(c) * sw, H = (R.hi - R.lo + 1) * R.h;
   const grid = el('div', 'roll'); pane.appendChild(grid);
-  grid.style.height = Math.max(150, pane.clientHeight - bar.offsetHeight - 14) + 'px';
+  grid.style.height = Math.max(130, pane.clientHeight - bar.offsetHeight * 2 - 20) + 'px';
   const cell = (cls, child) => { const d = el('div', cls); if (child) d.appendChild(child); grid.appendChild(d); return d; };
   const mk = (w, h) => { const cv = el('canvas'); cv.width = w; cv.height = h; return cv; };
   ROLL.rcv = mk(W, RULER_H); ROLL.kcv = mk(RK_W, H); ROLL.cv = mk(W, H); ROLL.vcv = mk(W, VEL_H);

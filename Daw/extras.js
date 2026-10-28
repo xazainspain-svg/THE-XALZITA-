@@ -23,15 +23,15 @@ $('#btnUndo').onclick = undo; $('#btnRedo').onclick = redo; updateUndoBtns();
 // ----------------------------------------------------------------- pistas: añadir / quitar
 function addTrack(kind) {
   if (song.tracks.length >= 16) { status('Máximo 16 pistas.'); return; }
-  const n = song.tracks.length, t = trackNew(kind === 'audio' ? 'Audio ' + (n + 1) : 'Synth ' + (n + 1), kind, COLORS[n % COLORS.length], null, Math.min(n, NINS - 1));
-  song.tracks.push(t); rebuildEngine(); selTrack = n; renderAll(); status('Pista añadida.');
+  const n = song.tracks.length, t = trackNew(({ audio: 'Audio ', fm: 'FM ', sampler: 'Sampler ', synth: 'Synth ' }[kind]) + (n + 1), kind, COLORS[n % COLORS.length], null, Math.min(n, NINS - 1));
+  song.tracks.push(t); rebuildEngine(); selTrack = n; renderAll(); status('Pista añadida.'); if (kind === 'sampler') importSamplerFor(n);
 }
 function removeTrack(i) {
   if (song.tracks.length <= 1) { status('Debe quedar al menos una pista.'); return; }
   song.tracks.splice(i, 1); song.arr = song.arr.filter(a => a.t !== i).map(a => (a.t > i ? Object.assign({}, a, { t: a.t - 1 }) : a));
   selTrack = Math.min(selTrack, song.tracks.length - 1); ARR.sel = null; rebuildEngine(); renderAll(); status('Pista quitada.');
 }
-$('#btnAddM').onclick = () => addTrack('synth'); $('#btnAddA').onclick = () => addTrack('audio');
+$('#btnAddM').onclick = () => addTrack('synth'); $('#btnAddA').onclick = () => addTrack('audio'); $('#btnAddF').onclick = () => addTrack('fm'); $('#btnAddS').onclick = () => addTrack('sampler');
 
 // ----------------------------------------------------------------- audio: importar, grabar, forma de onda
 const newId = () => 'a' + Math.random().toString(36).slice(2, 10);
@@ -39,12 +39,15 @@ function audioClip(buf, name) {
   const id = newId(); AUDIO[id] = { buf, name };
   return { bars: Math.min(16, Math.max(1, Math.ceil(buf.duration / (stepSec() * 16)))), notes: [], audio: { id } };
 }
-let pendingImport = null;
-function importAudio(i, s) { pendingImport = [i, s]; $('#audioIn').click(); }
+let pendingImport = null, pendingSampler = null;
+function importAudio(i, s) { pendingImport = [i, s]; pendingSampler = null; $('#audioIn').click(); }
+function importSamplerFor(i) { pendingSampler = i; pendingImport = null; $('#audioIn').click(); }
 $('#audioIn').onchange = async e => {
-  const f = e.target.files[0], tgt = pendingImport; e.target.value = ''; if (!f || !tgt) return;
+  const f = e.target.files[0], tgt = pendingImport, smp = pendingSampler; e.target.value = ''; if (!f) return;
   try {
     ensureEngine(); const buf = await eng.ctx.decodeAudioData(await f.arrayBuffer());
+    if (smp !== null) { const id = newId(); AUDIO[id] = { buf, name: f.name.replace(/\.[^.]+$/, '') }; song.tracks[smp].inst.id = id; renderAll(); status('Sample cargado: ' + AUDIO[id].name); return; }
+    if (!tgt) { const id = newId(); AUDIO[id] = { buf, name: f.name.replace(/\.[^.]+$/, '') }; renderBottom(); status('Sample añadido a la biblioteca.'); return; }
     song.tracks[tgt[0]].clips[tgt[1]] = audioClip(buf, f.name.replace(/\.[^.]+$/, '')); selTrack = tgt[0]; selSlot = tgt[1]; renderAll();
     status('Audio importado: ' + f.name + ' (' + buf.duration.toFixed(1) + ' s). Suena a su velocidad original.');
   } catch (err) { status('No se pudo leer el audio: ' + err.message, 6000); }
@@ -76,12 +79,30 @@ function drawWave(cv, id, off, dur, color) {
   }
 }
 function renderAudioPane(pane, c, t) {
-  const a = AUDIO[c.audio.id];
+  const au = c.audio, a = AUDIO[au.id];
   pane.appendChild(el('div', 'rollbar', 'Clip de audio: ' + (a ? a.name + ' — ' + a.buf.duration.toFixed(2) + ' s, ' + a.buf.sampleRate + ' Hz, ' + a.buf.numberOfChannels + ' canal(es)' : 'sin audio cargado (los samples no se guardan en el proyecto)')));
-  const cv = el('canvas'); cv.width = 1100; cv.height = 150; cv.style.cssText = 'width:100%;max-width:1100px;background:#111;border-radius:3px'; pane.appendChild(cv);
-  if (a) drawWave(cv, c.audio.id, 0, a.buf.duration, t.color);
-  const row = el('div', 'rollbar'), rp = el('button', '', 'Reemplazar…'); rp.onclick = () => importAudio(selTrack, selSlot);
-  const dl = el('button', '', 'Quitar audio'); dl.onclick = () => { t.clips[selSlot] = null; renderAll(); }; row.append(rp, dl); pane.appendChild(row);
+  if (!a) return;
+  const cv = el('canvas'); cv.width = 1100; cv.height = 130; cv.style.cssText = 'width:100%;max-width:1100px;background:#111;border-radius:3px'; pane.appendChild(cv);
+  const paint = () => {
+    drawWave(cv, au.id, 0, a.buf.duration, t.color); const g = cv.getContext('2d'), s = (au.start || 0) / a.buf.duration, e = (au.end || a.buf.duration) / a.buf.duration;
+    g.fillStyle = 'rgba(0,0,0,.6)'; g.fillRect(0, 0, s * cv.width, cv.height); g.fillRect(e * cv.width, 0, cv.width, cv.height);
+    g.fillStyle = '#ffb400'; g.fillRect(s * cv.width, 0, 2, cv.height); g.fillRect(e * cv.width - 2, 0, 2, cv.height);
+  };
+  const refresh = () => { c.bars = Math.min(16, Math.max(1, Math.ceil(audioBuffer(au, song.bpm).duration / (stepSec() * 16)))); paint(); };
+  paint();
+  const mk = (label, min, max, step, get, set) => { const l = el('label', 'sep', label + ' '), r = el('input'); r.type = 'range'; r.min = min; r.max = max; r.step = step; r.value = get(); r.style.width = '120px'; r.oninput = () => { set(+r.value); refresh(); }; l.appendChild(r); return l; };
+  const row = el('div', 'rollbar');
+  row.append(mk('Inicio s', 0, a.buf.duration, 0.01, () => au.start || 0, v => { au.start = Math.min(v, (au.end || a.buf.duration) - 0.02); }),
+    mk('Fin s', 0, a.buf.duration, 0.01, () => au.end || a.buf.duration, v => { au.end = Math.max(v, (au.start || 0) + 0.02); }),
+    mk('Ganancia', 0, 2, 0.01, () => au.gain === undefined ? 1 : au.gain, v => { au.gain = v; }));
+  const rv = el('label', 'sep'), rc = el('input'); rc.type = 'checkbox'; rc.checked = !!au.rev; rc.onchange = () => { au.rev = rc.checked; refresh(); }; rv.append(rc, ' Invertir');
+  const wp = el('label', 'sep'), wc = el('input'); wc.type = 'checkbox'; wc.checked = !!au.warp; wc.onchange = () => { au.warp = wc.checked; au.ob = au.ob || song.bpm; refresh(); status(au.warp ? 'Estirado al tempo del proyecto (calidad granular básica).' : 'Sin estirar.'); }; wp.append(wc, ' Estirar al tempo · BPM original ');
+  const ob = el('input'); ob.type = 'number'; ob.min = 40; ob.max = 240; ob.value = au.ob || song.bpm; ob.style.width = '56px'; ob.onchange = () => { au.ob = +ob.value || song.bpm; refresh(); }; wp.appendChild(ob);
+  const nz = el('button', '', 'Normalizar'); nz.onclick = () => { let pk = 0; for (let ch = 0; ch < a.buf.numberOfChannels; ch++) { const d = a.buf.getChannelData(ch); for (let i = 0; i < d.length; i++) pk = Math.max(pk, Math.abs(d[i])); } au.gain = pk > 0 ? Math.min(4, 0.95 / pk) : 1; renderClipPane(); };
+  const rp = el('button', '', 'Reemplazar…'); rp.onclick = () => importAudio(selTrack, selSlot);
+  const dl = el('button', '', 'Quitar audio'); dl.onclick = () => { t.clips[selSlot] = null; renderAll(); };
+  const nm = el('input'); nm.type = 'text'; nm.placeholder = 'nombre'; nm.value = c.name || ''; nm.style.width = '110px'; nm.oninput = () => { c.name = nm.value; };
+  row.append(rv, wp, nz, rp, dl, nm); pane.appendChild(row);
 }
 
 // ----------------------------------------------------------------- grabación MIDI en vivo + MIDI externo
@@ -156,7 +177,7 @@ function extrasKey(e) {
 const HELP = [['Espacio', 'Reproducir / parar'], ['A–K, W E T Y U', 'Tocar notas (Z / X cambian de octava)'], ['● Rec', 'Grabar notas en vivo en el clip seleccionado'],
   ['Ctrl+Z / Ctrl+Y', 'Deshacer / rehacer'], ['Ctrl+C / Ctrl+V', 'Copiar / pegar clip (Session)'], ['1–5', 'Herramientas del piano roll'],
   ['Ctrl+A, Supr, Ctrl+D, flechas', 'Seleccionar, borrar, duplicar, mover notas'], ['Ctrl+D / Ctrl+E / Supr', 'Arrangement: duplicar / dividir / borrar clip'],
-  ['Clic derecho', 'Borrar clip o nota'], ['Mayús + arrastrar (regla)', 'Región de loop'], ['Tap', 'Marcar el tempo con clics'], ['+ MIDI / + Audio', 'Añadir pistas (máx. 16)']];
+  ['Clic derecho', 'Borrar clip o nota'], ['Mayús + arrastrar (regla)', 'Región de loop'], ['Tap', 'Marcar el tempo con clics'], ['+ MIDI / Audio / FM / Sampler', 'Añadir pistas (máx. 16)'], ['Channel Rack', 'Step sequencer: clic y arrastra para pintar pasos, Mayús+clic = acento'], ['MIDI ↓ / ↑ , Stems', 'Exportar/importar MIDI y un WAV por pista']];
 $('#btnHelp').onclick = () => {
   const h = $('#help'); h.hidden = !h.hidden; if (h.hidden) return; h.innerHTML = '';
   const box = el('div', 'helpbox'); box.appendChild(el('h3', '', 'Atajos y funciones'));

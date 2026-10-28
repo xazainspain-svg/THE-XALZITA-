@@ -5,10 +5,13 @@ const COLORS = ['#ff6b6b', '#ffb400', '#f4e04d', '#4fd37a', '#35c9c9', '#6d8cff'
 const SCENES = 8, NINS = 16, NSLOTS = 10;
 
 const clipNew = (bars = 1) => ({ bars, notes: [] });
-const defInst = (o = {}) => Object.assign({ wave: 'sawtooth', cutoff: 3000, res: 1, atk: 0.01, rel: 0.2 }, o);
+const defInst = (o = {}) => Object.assign({ wave: 'sawtooth', cutoff: 3000, res: 1, atk: 0.01, rel: 0.2, w2: 'none', d2: 12, sub: 0, fe: 0, fd: 0.25 }, o);
+const defFm = (o = {}) => Object.assign({ ratio: 2, idx: 3, fdec: 0.4, atk: 0.005, rel: 0.3 }, o);
+const defSampler = (o = {}) => Object.assign({ id: null, root: 60, rel: 0.15, loop: false }, o);
+const instFor = (kind, o) => kind === 'synth' ? defInst(o) : kind === 'fm' ? defFm(o) : kind === 'sampler' ? defSampler(o) : null;
 function trackNew(name, kind, color, inst, insert) {
-  return { name, kind, color, inst: kind === 'synth' ? defInst(inst) : null, insert: insert | 0, sends: [0, 0], obj: { on: false, x: 0, y: 1, z: 0 }, vol: 0.8, pan: 0, mute: false, solo: false,
-    clips: Array(SCENES).fill(null), autoVol: [], autoPan: [] };
+  return { name, kind, color, inst: instFor(kind, inst), insert: insert | 0, sends: [0, 0], obj: { on: false, x: 0, y: 1, z: 0 }, vol: 0.8, pan: 0, mute: false, solo: false,
+    clips: Array(SCENES).fill(null) };
 }
 function insertNew(i) {
   return { name: 'Insert ' + (i + 1), vol: 0.8, pan: 0, mute: false, solo: false, fx: Array(NSLOTS).fill(null) };
@@ -53,9 +56,8 @@ function demoSong() {
   inserts[0].fx[0] = fxNew('comp');
   const arr = [], put = (t, from, to, slot) => { arr.push({ t, s: from * 16, l: (to - from) * 16, slot, off: 0 }); };
   put(0, 0, 8, 0); put(0, 8, 16, 1); put(1, 2, 16, 0); put(3, 0, 16, 0); put(2, 4, 16, 0);
-  T[3].autoVol = [{ s: 0, v: 0.2 }, { s: 64, v: 1 }, { s: 224, v: 1 }, { s: 256, v: 0.3 }];
   T[3].sends = [0.35, 0]; T[2].sends = [0, 0.25];
-  return { bpm: 118, swing: 0, masterVol: 0.9, tracks: T, inserts, returns: defReturns(), arr, loop: { on: false, start: 0, end: 64 } };
+  return { bpm: 118, swing: 0, masterVol: 0.9, tracks: T, inserts, returns: defReturns(), autos: [{ target: 't3.vol', pts: [{ s: 0, v: 0.16 }, { s: 64, v: 0.8 }, { s: 224, v: 0.8 }, { s: 256, v: 0.24 }] }], arr, loop: { on: false, start: 0, end: 64 } };
 }
 
 // Acepta proyectos antiguos (formato por compases / efectos por pista) y completa lo que falte.
@@ -71,12 +73,16 @@ function upgradeSong(s) {
   s.tracks.forEach((t, i) => {
     t.insert = t.insert === undefined ? Math.min(i, NINS - 1) : t.insert; delete t.fx;
     t.obj = t.obj || { on: false, x: 0, y: 1, z: 0 };
-    t.autoVol = t.autoVol || []; t.autoPan = t.autoPan || []; delete t.auto;
+    if (t.autoVol && t.autoVol.length) { s.autos = s.autos || []; s.autos.push({ target: 't' + i + '.vol', pts: t.autoVol.map(p => ({ s: p.s, v: Math.max(0, Math.min(1, p.v / 1.25)) })) }); }
+    if (t.autoPan && t.autoPan.length) { s.autos = s.autos || []; s.autos.push({ target: 't' + i + '.pan', pts: t.autoPan.map(p => ({ s: p.s, v: Math.max(0, Math.min(1, (p.v + 1) / 2)) })) }); }
+    delete t.autoVol; delete t.autoPan; delete t.auto;
+    if (!t.inst) t.inst = instFor(t.kind);
     t.clips = (t.clips || []).concat(Array(SCENES).fill(null)).slice(0, SCENES);
   });
   s.arr = (s.arr || []).map(it => it.bar !== undefined
     ? { t: it.t, s: it.bar * 16, l: ((s.tracks[it.t] && s.tracks[it.t].clips[it.slot] && s.tracks[it.t].clips[it.slot].bars) || 1) * 16, slot: it.slot, off: 0 }
     : it);
+  s.autos = (s.autos || []).filter(a => a && a.target && Array.isArray(a.pts));
   s.loop = s.loop || { on: false, start: 0, end: 64 }; s.swing = s.swing || 0;
   if (!Array.isArray(s.returns) || s.returns.length < 2) s.returns = defReturns();
   s.tracks.forEach(t => { t.sends = t.sends || [0, 0]; });

@@ -28,12 +28,16 @@
   <canvas id="masterMeter" width="80" height="14"></canvas>
   <button id="btnUndo" title="Deshacer (Ctrl+Z)">↶</button><button id="btnRedo" title="Rehacer (Ctrl+Y)">↷</button>
   <button id="btnAddM" title="Añadir pista MIDI">+ MIDI</button><button id="btnAddA" title="Añadir pista de audio">+ Audio</button>
+  <button id="btnAddF" title="Añadir pista FM">+ FM</button><button id="btnAddS" title="Añadir pista sampler">+ Sampler</button>
   <button id="btnMic" title="Grabar audio del micrófono en el clip seleccionado">● Mic</button>
   <button id="btnHelp" title="Atajos">?</button>
   <button id="btnNew">Nuevo</button>
   <button id="btnSave">Guardar</button>
   <button id="btnLoad">Abrir…</button>
   <button id="btnExport">Exportar WAV</button>
+  <button id="btnStems" title="Un WAV por pista">Stems</button>
+  <button id="btnMidiOut" title="Exportar MIDI">MIDI ↓</button><button id="btnMidiIn" title="Importar MIDI al clip seleccionado">MIDI ↑</button>
+  <input id="midiIn" type="file" accept=".mid,.midi,audio/midi" hidden>
   <input id="fileIn" type="file" accept=".json,application/json" hidden>
   <input id="audioIn" type="file" accept="audio/*" hidden>
 </header>
@@ -48,11 +52,15 @@
 <footer id="bottom">
   <div class="tabs">
     <button id="tabClip" class="on">Clip (piano roll)</button>
+    <button id="tabRack">Channel Rack</button>
     <button id="tabDev">Dispositivos</button>
+    <button id="tabSmp">Samples</button>
     <span id="selInfo"></span>
   </div>
   <div id="clipPane"></div>
+  <div id="rackPane" hidden></div>
   <div id="devPane" hidden></div>
+  <div id="smpPane" hidden></div>
 </footer>
 <script src="engine.js"></script>
 <script src="model.js"></script>
@@ -62,6 +70,7 @@
 <script src="arr.js"></script>
 <script src="imm.js"></script>
 <script src="extras.js"></script>
+<script src="studio.js"></script>
 <script src="start.js"></script>
 </body>
 </html>

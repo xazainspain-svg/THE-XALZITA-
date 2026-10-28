@@ -44,8 +44,9 @@ function renderArr() {
   const dup = el('button', '', 'Duplicar'); dup.title = 'Ctrl+D'; dup.onclick = arrDuplicate;
   const spl = el('button', '', 'Dividir'); spl.title = 'Ctrl+E (en el cursor)'; spl.onclick = arrSplit;
   const del = el('button', '', 'Borrar'); del.title = 'Supr'; del.onclick = arrDelete;
+  const aa = el('button', '', '+ Automatización'); aa.onclick = () => { song.autos.push({ target: 't' + selTrack + '.vol', pts: [] }); renderArr(); };
   const fol = el('label', ''), fc = el('input'); fc.type = 'checkbox'; fc.checked = ARR.follow; fc.onchange = () => { ARR.follow = fc.checked; }; fol.append(fc, ' Seguir');
-  bar.append(zl, zr, el('span', '', 'Snap'), sn, loop, cap, dup, spl, del, fol,
+  bar.append(zl, zr, el('span', '', 'Snap'), sn, loop, cap, dup, spl, del, aa, fol,
     el('span', 'hint', 'Doble clic en una pista: insertar clip · arrastra el clip para moverlo · bordes: recortar / alargar (en bucle) · clic en la regla: cursor · Mayús+arrastrar en la regla: loop'));
 
   const board = el('div', 'arrboard'); board.style.width = (HEAD_W + W) + 'px'; root.appendChild(board);
@@ -65,8 +66,7 @@ function renderArr() {
     if (!slots.length) { const o = el('option', '', '(sin clips)'); o.value = -1; sl.appendChild(o); }
     sl.value = ARR.slotSel[i] !== undefined && slots.includes(ARR.slotSel[i]) ? ARR.slotSel[i] : (slots[0] !== undefined ? slots[0] : -1);
     sl.onchange = () => { ARR.slotSel[i] = +sl.value; };
-    const ab = el('button', ARR.autoOpen[i] ? 'on' : '', 'Auto'); ab.title = 'Mostrar automatización'; ab.onclick = () => { ARR.autoOpen[i] = !ARR.autoOpen[i]; renderArr(); };
-    row2.append(sl, ab); head.appendChild(row2); board.appendChild(head);
+    row2.append(sl); head.appendChild(row2); board.appendChild(head);
 
     const lane = el('div', 'arrlane'); lane.style.height = LANE_H + 'px'; lane.style.width = W + 'px';
     lane.style.backgroundSize = (16 * z) + 'px 100%, ' + (4 * z) + 'px 100%';
@@ -84,15 +84,14 @@ function renderArr() {
     song.arr.filter(it => it.t === i && itemClip(it)).forEach(it => lane.appendChild(makeClip(it, t, z)));
     board.appendChild(lane);
 
-    if (ARR.autoOpen[i]) {
-      const ah = el('div', 'arrhead auto'); ah.style.setProperty('--c', t.color); ah.style.height = AUTO_H + 'px';
-      const ps = el('select'); [['vol', 'Volumen'], ['pan', 'Panorama']].forEach(([v, l]) => { const o = el('option', '', l); o.value = v; ps.appendChild(o); });
-      ps.value = ARR.autoParam[i] || 'vol'; ps.onchange = () => { ARR.autoParam[i] = ps.value; renderArr(); };
-      const clr = el('button', '', 'Borrar curva'); clr.onclick = () => { if (ps.value === 'vol') t.autoVol = []; else t.autoPan = []; renderArr(); };
-      ah.append(ps, clr, el('div', 'hint', 'Clic: añadir punto · arrastrar · doble clic: borrar'));
-      board.appendChild(ah);
-      const cv = el('canvas'); cv.width = W; cv.height = AUTO_H; cv.className = 'autocv'; board.appendChild(cv); bindAuto(cv, i);
-    }
+  });
+  song.autos.forEach((au, k) => {                     // carriles de automatización de cualquier parámetro
+    const T = autoInfo(au.target, song), ah = el('div', 'arrhead auto'); ah.style.height = AUTO_H + 'px'; ah.style.setProperty('--c', '#ffb400');
+    const sel = el('select'); autoTargets(song).forEach(g => { const og = el('optgroup'); og.label = g.group; g.items.forEach(([id, l]) => { const o = el('option', '', l); o.value = id; og.appendChild(o); }); sel.appendChild(og); });
+    sel.value = au.target; sel.onchange = () => { au.target = sel.value; renderArr(); };
+    const del = el('button', '', 'Quitar'); del.onclick = () => { song.autos.splice(k, 1); renderArr(); };
+    ah.append(sel, del, el('div', 'hint', T ? T.label : 'parámetro no disponible')); board.appendChild(ah);
+    const cv = el('canvas'); cv.width = W; cv.height = AUTO_H; cv.className = 'autocv'; board.appendChild(cv); bindAuto(cv, au);
   });
   ARR.ph = el('div', 'phead'); ARR.ph.style.display = 'none'; board.appendChild(ARR.ph);
   ARR.cur = el('div', 'curmark'); board.appendChild(ARR.cur); moveCursor();
@@ -104,7 +103,7 @@ function makeClip(it, t, z) {
   const c = itemClip(it), d = el('div', 'aclip' + (ARR.sel === it ? ' sel' : ''));
   d._it = it; d.style.left = (it.s * z) + 'px'; d.style.width = Math.max(4, it.l * z - 1) + 'px'; d.style.background = t.color;
   const cv = el('canvas'); cv.width = Math.min(4096, Math.ceil(it.l * z)); cv.height = LANE_H - 18; d.appendChild(cv);
-  paintClip(cv, it, t, c, z); d.appendChild(el('span', 'lbl', 'Clip ' + (it.slot + 1)));
+  paintClip(cv, it, t, c, z); d.appendChild(el('span', 'lbl', c.name || ('Clip ' + (it.slot + 1))));
   d.onmousedown = e => {
     e.stopPropagation();
     if (e.button === 2) { song.arr.splice(song.arr.indexOf(it), 1); if (ARR.sel === it) ARR.sel = null; renderArr(); return; }
@@ -207,34 +206,31 @@ function bindRuler(cv) {
 }
 
 // ----------------------------------------------------------------- automatización
-function bindAuto(cv, i) {
-  const t = song.tracks[i], z = ARR.z, W = cv.width, H = cv.height;
-  const param = () => ARR.autoParam[i] || 'vol', env = () => param() === 'vol' ? t.autoVol : t.autoPan;
-  const setEnv = a => { if (param() === 'vol') t.autoVol = a; else t.autoPan = a; };
-  const toV = y => param() === 'vol' ? Math.max(0, Math.min(1.25, 1.25 * (1 - y / H))) : Math.max(-1, Math.min(1, 1 - 2 * y / H));
-  const toY = v => param() === 'vol' ? H * (1 - v / 1.25) : H * (1 - (v + 1) / 2);
+function bindAuto(cv, au) {
+  const z = ARR.z, W = cv.width, H = cv.height, T = () => autoInfo(au.target, song);
+  const toY = v => H * (1 - v), toV = y => Math.max(0, Math.min(1, 1 - y / H));
   const paint = () => {
-    const g = cv.getContext('2d'); g.fillStyle = '#111'; g.fillRect(0, 0, W, H);
+    const g = cv.getContext('2d'), info = T(); g.fillStyle = '#111'; g.fillRect(0, 0, W, H);
     for (let s = 0; s <= ARR_STEPS; s += 16) { g.fillStyle = '#2a2a2f'; g.fillRect(s * z, 0, 1, H); }
-    const base = param() === 'vol' ? 1 : t.pan; g.strokeStyle = '#3a3a40'; g.beginPath(); g.moveTo(0, toY(base)); g.lineTo(W, toY(base)); g.stroke();
-    const e = env(); if (!e.length) return;
-    g.strokeStyle = t.color; g.lineWidth = 2; g.beginPath(); g.moveTo(0, toY(e[0].v));
+    if (info) { const base = autoNorm(info, info.get()); g.strokeStyle = '#3a3a40'; g.beginPath(); g.moveTo(0, toY(base)); g.lineTo(W, toY(base)); g.stroke(); }
+    const e = au.pts; if (!e.length) return;
+    g.strokeStyle = '#ffb400'; g.lineWidth = 2; g.beginPath(); g.moveTo(0, toY(e[0].v));
     e.forEach(p => g.lineTo(p.s * z, toY(p.v))); g.lineTo(W, toY(e[e.length - 1].v)); g.stroke(); g.lineWidth = 1;
     g.fillStyle = '#fff'; e.forEach(p => { g.beginPath(); g.arc(p.s * z, toY(p.v), 4, 0, 6.3); g.fill(); });
   };
   paint(); let drag = null;
   const pos = ev => { const r = cv.getBoundingClientRect(); return { x: ev.clientX - r.left, y: ev.clientY - r.top }; };
-  const hitPt = p => env().find(q => Math.hypot(q.s * z - p.x, toY(q.v) - p.y) < 7);
+  const hitPt = p => au.pts.find(q => Math.hypot(q.s * z - p.x, toY(q.v) - p.y) < 7);
   cv.oncontextmenu = ev => ev.preventDefault();
   cv.onmousedown = ev => {
     const p = pos(ev), h = hitPt(p);
-    if (ev.button === 2) { if (h) { setEnv(env().filter(q => q !== h)); paint(); } return; }
-    if (h) drag = h; else { const np = { s: Math.max(0, Math.min(ARR_STEPS, aSnapR(p.x / z))), v: toV(p.y) }; setEnv([...env(), np].sort((a, b) => a.s - b.s)); drag = np; }
+    if (ev.button === 2) { if (h) { au.pts = au.pts.filter(q => q !== h); paint(); } return; }
+    if (h) drag = h; else { const np = { s: Math.max(0, Math.min(ARR_STEPS, aSnapR(p.x / z))), v: toV(p.y) }; au.pts = [...au.pts, np].sort((a, b) => a.s - b.s); drag = np; }
     paint();
   };
-  cv.ondblclick = ev => { const h = hitPt(pos(ev)); if (h) { setEnv(env().filter(q => q !== h)); paint(); } };
+  cv.ondblclick = ev => { const h = hitPt(pos(ev)); if (h) { au.pts = au.pts.filter(q => q !== h); paint(); } };
   const mv = ev => { if (!drag) return; const p = pos(ev); drag.s = Math.max(0, Math.min(ARR_STEPS, aSnapR(p.x / z))); drag.v = toV(p.y); paint(); };
-  const up = () => { if (drag) { env().sort((a, b) => a.s - b.s); drag = null; paint(); } };
+  const up = () => { if (drag) { au.pts.sort((a, b) => a.s - b.s); drag = null; paint(); } };
   window.addEventListener('mousemove', mv); window.addEventListener('mouseup', up);
 }
 

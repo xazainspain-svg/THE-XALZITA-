@@ -34,7 +34,10 @@ function renderMixer() {
       const row = el('div', 'row'), bm = el('button', 'm' + (ins.mute ? ' on' : ''), 'M'), bs = el('button', 's' + (ins.solo ? ' on' : ''), 'S');
       bm.onclick = () => { ins.mute = !ins.mute; bm.classList.toggle('on', ins.mute); if (eng) eng.applyMix(); };
       bs.onclick = () => { ins.solo = !ins.solo; bs.classList.toggle('on', ins.solo); if (eng) eng.applyMix(); };
-      row.append(bm, bs); s.append(pan, row);
+      const to = el('select'); to.title = 'Salida del insert'; const o0 = el('option', '', '→ Master'); o0.value = -1; to.appendChild(o0);
+      for (let k = idx + 1; k < song.inserts.length; k++) { const o = el('option', '', '→ ' + (k + 1)); o.value = k; to.appendChild(o); }
+      to.value = ins.to !== undefined && ins.to > idx ? ins.to : -1; to.onchange = () => { ins.to = +to.value; if (eng) eng.applyMix(); };
+      row.append(bm, bs); s.append(pan, row, to);
       const routed = song.tracks.filter(t => t.insert === idx).map(t => t.name);
       s.appendChild(el('div', 'sroute', routed.length ? '← ' + routed.join(', ') : ''));
     }
@@ -71,6 +74,11 @@ function renderMixer() {
     sel.value = f ? f.type : '';
     sel.onchange = () => { ins.fx[k] = sel.value ? fxNew(sel.value) : null; if (eng) eng.rebuildInsert(mixSel); renderMixer(); };
     head.appendChild(sel);
+    if (f && FX_PRESETS[f.type]) {
+      const ps = el('select'); const p0 = el('option', '', 'preset'); p0.value = ''; ps.appendChild(p0);
+      Object.keys(FX_PRESETS[f.type]).forEach(n => { const o = el('option', '', n); o.value = n; ps.appendChild(o); });
+      ps.onchange = () => { if (!ps.value) return; Object.assign(f.p, FX_PRESETS[f.type][ps.value]); if (eng) eng.rebuildInsert(mixSel); renderMixer(); }; head.appendChild(ps);
+    }
     if (f) {
       const pw = el('button', f.on !== false ? 'on' : '', '⏻'); pw.title = 'Activar / desactivar';
       pw.onclick = () => { f.on = f.on === false; if (eng) eng.rebuildInsert(mixSel); renderMixer(); }; head.appendChild(pw);

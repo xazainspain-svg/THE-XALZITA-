@@ -120,3 +120,13 @@ button:disabled{opacity:.35;cursor:default}#spec{background:#000;border-radius:2
 .helpbox h3{margin:0 0 6px}.hrow2{display:grid;grid-template-columns:210px 1fr;gap:10px;align-items:center}
 kbd{background:var(--p3);border:1px solid #555;border-radius:3px;padding:1px 6px;font:11px ui-monospace,Consolas,monospace}
 .strip.ret{border-top-color:#35c9c9}
+/* ---- channel rack */
+.rack{display:flex;flex-direction:column;gap:8px;overflow:auto}
+.rackrow{background:var(--p2);border-radius:3px;padding:5px}
+.rh{display:flex;gap:8px;align-items:center;margin-bottom:4px;border-left:4px solid var(--c);padding-left:6px}
+.rgrid{display:flex;flex-direction:column;gap:2px}
+.rline{display:flex;gap:2px;align-items:center}.rline .rn{width:70px;flex:none;color:var(--mut);font-size:10px}
+.rs{width:22px;height:22px;flex:none;background:#26262b;border-radius:2px;cursor:pointer}
+.rs.b4{background:#33333a}.rs.on{background:var(--c,#ffb400)}.rs.acc{box-shadow:inset 0 0 0 2px #fff}.rs.now{outline:2px solid var(--ok)}
+.smp{display:flex;gap:10px;align-items:center;background:var(--p2);padding:5px 8px;border-radius:3px;margin-bottom:3px}.smp b{flex:1}
+#rackPane,#smpPane{flex:1;overflow:auto;padding:8px 10px;min-height:0}

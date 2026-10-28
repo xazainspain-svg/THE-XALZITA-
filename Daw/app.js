@@ -48,6 +48,8 @@ function setView(v) {
 $('#tabSession').onclick = () => setView('session'); $('#tabArr').onclick = () => setView('arr'); $('#tabMixer').onclick = () => setView('mixer'); $('#tabImm').onclick = () => setView('imm');
 $('#tabClip').onclick = () => { bottomTab = 'clip'; renderBottom(); };
 $('#tabDev').onclick = () => { bottomTab = 'dev'; renderBottom(); };
+$('#tabRack').onclick = () => { bottomTab = 'rack'; renderBottom(); };
+$('#tabSmp').onclick = () => { bottomTab = 'smp'; renderBottom(); };
 
 // ------------------------------------------------------------------ vista Session
 function renderSession() {
@@ -64,7 +66,7 @@ function renderSession() {
     song.tracks.forEach((t, i) => {
       const c = t.clips[s], d = el('div', 'cell ' + (c ? 'has' : 'empty') + (i === selTrack && s === selSlot ? ' sel' : ''));
       d.style.setProperty('--c', t.color);
-      d.appendChild(el('div', 'pl', c ? '▶' : (t.kind === 'audio' ? '♫' : '+'))); if (c) d.appendChild(el('span', 'nm', c.audio ? ((AUDIO[c.audio.id] && AUDIO[c.audio.id].name) || 'sin audio') : c.bars + (c.bars > 1 ? ' compases' : ' compás')));
+      d.appendChild(el('div', 'pl', c ? '▶' : (t.kind === 'audio' ? '♫' : '+'))); if (c) d.appendChild(el('span', 'nm', c.name ? c.name : c.audio ? ((AUDIO[c.audio.id] && AUDIO[c.audio.id].name) || 'sin audio') : c.bars + (c.bars > 1 ? ' compases' : ' compás')));
       d.onclick = () => {
         selTrack = i; selSlot = s; ROLL.sel.clear();
         if (!t.clips[s] && t.kind === 'audio') { importAudio(i, s); return; }
@@ -109,32 +111,51 @@ function slider(parent, label, min, max, val, step, onInput, log) {
 }
 function renderDevPane() {
   const pane = $('#devPane'); pane.innerHTML = ''; const t = song.tracks[selTrack], wrap = el('div', 'dev'); pane.appendChild(wrap);
-  const inst = el('div', 'card'); inst.appendChild(el('h4', '', t.kind === 'drums' ? 'Caja de ritmos' : 'Sintetizador'));
-  if (t.kind === 'audio') { inst.firstChild.textContent = 'Pista de audio'; inst.appendChild(el('div', '', 'Haz clic en una celda vacía para importar un archivo de audio, o usa ● Audio para grabar con el micrófono. Los samples suenan a su velocidad original.')); }
+  const names = { audio: 'Pista de audio', drums: 'Caja de ritmos', synth: 'Sintetizador', fm: 'Sintetizador FM', sampler: 'Sampler' };
+  const inst = el('div', 'card'); inst.appendChild(el('h4', '', names[t.kind]));
+  const sel = (label, opts, val, fn) => { const row = el('div', 'prm'), s = el('select'); opts.forEach(([v, l]) => { const o = el('option', '', l); o.value = v; s.appendChild(o); }); s.value = val; s.onchange = () => fn(s.value); row.append(el('span', '', label), s); inst.appendChild(row); };
+  if (t.kind === 'audio') inst.appendChild(el('div', '', 'Clic en una celda vacía para importar audio, o ● Mic para grabar. En la pestaña Clip puedes recortar, invertir, ajustar la ganancia y estirar al tempo.'));
   else if (t.kind === 'drums') inst.appendChild(el('div', '', 'Sonidos: ' + DRUM_NAMES.join(', ') + '.'));
-  else {
-    const row = el('div', 'prm'), ws = el('select'); ['sawtooth', 'square', 'triangle', 'sine'].forEach(w => { const o = el('option', '', w); o.value = w; ws.appendChild(o); });
-    ws.value = t.inst.wave; ws.onchange = () => t.inst.wave = ws.value; row.append(el('span', '', 'Onda'), ws); inst.appendChild(row);
+  else if (t.kind === 'synth') {
+    const W = ['sawtooth', 'square', 'triangle', 'sine'];
+    sel('Onda 1', W.map(w => [w, w]), t.inst.wave, v => t.inst.wave = v);
+    sel('Onda 2', [['none', 'ninguna']].concat(W.map(w => [w, w])), t.inst.w2, v => t.inst.w2 = v);
+    slider(inst, 'Desafinar 2', -50, 50, t.inst.d2, 1, v => t.inst.d2 = v);
+    slider(inst, 'Sub (−1 oct)', 0, 1, t.inst.sub, 0.01, v => t.inst.sub = v);
     slider(inst, 'Corte', 100, 12000, t.inst.cutoff, 0, v => t.inst.cutoff = v, true);
     slider(inst, 'Resonancia', 0.1, 18, t.inst.res, 0.1, v => t.inst.res = v);
+    slider(inst, 'Env. filtro', 0, 1, t.inst.fe, 0.01, v => t.inst.fe = v);
+    slider(inst, 'Decay filtro', 0.03, 2, t.inst.fd, 0.01, v => t.inst.fd = v);
     slider(inst, 'Ataque', 0.003, 1.5, t.inst.atk, 0.005, v => t.inst.atk = v);
     slider(inst, 'Release', 0.02, 3, t.inst.rel, 0.01, v => t.inst.rel = v);
+  } else if (t.kind === 'fm') {
+    slider(inst, 'Ratio mod.', 0.25, 8, t.inst.ratio, 0.25, v => t.inst.ratio = v);
+    slider(inst, 'Índice', 0, 12, t.inst.idx, 0.1, v => t.inst.idx = v);
+    slider(inst, 'Decay índice', 0.03, 2, t.inst.fdec, 0.01, v => t.inst.fdec = v);
+    slider(inst, 'Ataque', 0.003, 1.5, t.inst.atk, 0.005, v => t.inst.atk = v);
+    slider(inst, 'Release', 0.02, 3, t.inst.rel, 0.01, v => t.inst.rel = v);
+  } else {
+    const smp = AUDIO[t.inst.id]; inst.appendChild(el('div', '', smp ? 'Sample: ' + smp.name : 'Sin sample. Cárgalo con el botón o desde la pestaña Samples.'));
+    const ld = el('button', '', smp ? 'Cambiar sample…' : 'Cargar sample…'); ld.onclick = () => importSamplerFor(selTrack); inst.appendChild(ld);
+    slider(inst, 'Nota raíz', 24, 96, t.inst.root, 1, v => t.inst.root = Math.round(v));
+    slider(inst, 'Release', 0.02, 3, t.inst.rel, 0.01, v => t.inst.rel = v);
+    const lr = el('label', 'prm'), lc = el('input'); lc.type = 'checkbox'; lc.checked = t.inst.loop; lc.onchange = () => { t.inst.loop = lc.checked; }; lr.append(el('span', '', 'Bucle'), lc); inst.appendChild(lr);
   }
   wrap.appendChild(inst);
   const r = el('div', 'card'); r.appendChild(el('h4', '', 'Salida'));
   r.appendChild(el('div', '', 'Esta pista va al Insert ' + (t.insert + 1) + '. Los efectos se editan en la pestaña Mixer.')); wrap.appendChild(r);
 }
 function renderBottom() {
-  $('#tabClip').classList.toggle('on', bottomTab === 'clip'); $('#tabDev').classList.toggle('on', bottomTab === 'dev');
-  $('#clipPane').hidden = bottomTab !== 'clip'; $('#devPane').hidden = bottomTab !== 'dev';
+  const tabs = { clip: ['#tabClip', '#clipPane'], rack: ['#tabRack', '#rackPane'], dev: ['#tabDev', '#devPane'], smp: ['#tabSmp', '#smpPane'] };
+  Object.entries(tabs).forEach(([k, [tb, pn]]) => { $(tb).classList.toggle('on', bottomTab === k); $(pn).hidden = bottomTab !== k; });
   const t = song.tracks[selTrack]; $('#selInfo').textContent = t.name + (curClip() ? ' — clip ' + (selSlot + 1) : '');
-  if (bottomTab === 'clip') renderClipPane(); else renderDevPane();
+  if (bottomTab === 'clip') renderClipPane(); else if (bottomTab === 'rack') renderRackPane(); else if (bottomTab === 'dev') renderDevPane(); else renderSamplesPane();
 }
 function renderAll() { if (view === 'session') renderSession(); else if (view === 'arr') renderArr(); else if (view === 'imm') renderImm(); else renderMixer(); renderBottom(); }
 
 // ------------------------------------------------------------------ guardar / abrir / exportar
 const download = (blob, name) => { const a = el('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); };
-$('#btnNew').onclick = () => { if (confirm('¿Empezar un proyecto vacío? Se pierde lo no guardado.')) { const s = demoSong(); s.tracks.forEach(t => { t.clips = Array(SCENES).fill(null); t.autoVol = []; }); s.inserts.forEach(x => { x.fx = Array(NSLOTS).fill(null); }); s.arr = []; setSong(s); } };
+$('#btnNew').onclick = () => { if (confirm('¿Empezar un proyecto vacío? Se pierde lo no guardado.')) { const s = demoSong(); s.tracks.forEach(t => { t.clips = Array(SCENES).fill(null); }); s.autos = []; s.inserts.forEach(x => { x.fx = Array(NSLOTS).fill(null); }); s.arr = []; setSong(s); } };
 $('#btnSave').onclick = () => {
   const json = JSON.stringify(song); try { localStorage.setItem('xazalive_song', json); } catch (e) {}
   download(new Blob([json], { type: 'application/json' }), 'proyecto.xazalive.json'); status('Proyecto guardado.');
@@ -190,7 +211,7 @@ function frame() {
           c.classList.toggle('queued', eng.playing && r.queued === s); }
       });
     } else if (view === 'arr') arrTick(st); else if (view === 'imm') immTick(); else mixerTick();
-    meterDraw($('#masterMeter'), eng.masterAn); extrasTick();
+    meterDraw($('#masterMeter'), eng.masterAn); extrasTick(); if (bottomTab === 'rack') rackTick();
     if (bottomTab === 'clip' && ROLL.cv) {
       const c = curClip(), r = eng.rt[selTrack]; let ps = -1;
       if (c && eng.playing && st >= 0) {
