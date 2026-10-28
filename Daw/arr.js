@@ -4,7 +4,7 @@
 // (volumen y panorama) con puntos editables.
 
 const ARR = { z: 6, snap: 4, sel: null, cursor: 0, follow: true, autoOpen: {}, autoParam: {}, slotSel: {}, drag: null, ph: null,
-  more: false, mode: 'slip', tool: 'draw', range: null, amode: 'read', fade: 2, silDb: -40, silMs: 150 };
+  chainOpen: {}, more: false, mode: 'slip', tool: 'draw', range: null, amode: 'read', fade: 2, silDb: -40, silMs: 150 };
 const LANE_H = 62, AUTO_H = 72, HEAD_W = 150, RULER_H2 = 26, ARR_STEPS = ARR_BARS * 16;
 const ARR_SNAPS = [['Compás', 16], ['Tiempo', 4], ['1/2 tiempo', 2], ['Paso', 1], ['Sin snap', 0]];
 
@@ -65,12 +65,15 @@ function renderArr() {
   song.lanes.forEach((ln, i) => {
     const head = el('div', 'arrhead'); head.style.setProperty('--c', '#5d6a75'); head.style.height = LANE_H + 'px';
     const top = el('div', 'hrow'), nm = el('b', '', ln.name); nm.style.cursor = 'pointer'; nm.title = 'Doble clic: cambiar el nombre'; ARR.lane = ARR.lane || 0; if (ARR.lane === i) head.classList.add('sel');
+    nm.title = 'Doble clic: mostrar / ocultar la cadena de plugins · clic derecho: cambiar el nombre';
     nm.onclick = () => { ARR.lane = i; renderArr(); };
-    nm.ondblclick = () => { const inp = el('input'); inp.type = 'text'; inp.value = ln.name; inp.style.width = '80px'; nm.replaceWith(inp); inp.focus(); inp.onblur = inp.onchange = () => { ln.name = inp.value || ln.name; renderArr(); }; };
+    nm.ondblclick = e => { e.preventDefault(); ARR.chainOpen[i] = !ARR.chainOpen[i]; ARR.lane = i; renderArr(); };
+    nm.oncontextmenu = e => { e.preventDefault(); const inp = el('input'); inp.type = 'text'; inp.value = ln.name; inp.style.width = '80px'; nm.replaceWith(inp); inp.focus(); inp.select(); inp.onblur = inp.onchange = () => { ln.name = inp.value || ln.name; renderArr(); }; };
+    const chev = el('span', 'chev', ARR.chainOpen[i] ? '▾' : '▸'); chev.title = 'Cadena de plugins'; chev.onclick = nm.ondblclick;
     const led = el('button', 'led' + (ln.mute ? '' : ' on')); led.title = 'Activar / silenciar pista';
     led.onclick = () => { ln.mute = !ln.mute; led.classList.toggle('on', !ln.mute); };
     const arm = el('button', 'arm' + (ln.arm ? ' on' : ''), 'R'); arm.title = 'Armar la pista para grabar audio (luego ● en el transporte)'; arm.onclick = () => { ln.arm = !ln.arm; arm.classList.toggle('on', ln.arm); armChanged(); };
-    top.append(led, nm, arm); head.appendChild(top); board.appendChild(head);
+    top.append(led, chev, nm, arm); head.appendChild(top); board.appendChild(head);
 
     const lane = el('div', 'arrlane'); (ARR.laneEls = ARR.laneEls || [])[i] = lane; lane.style.height = LANE_H + 'px'; lane.style.width = W + 'px';
     lane.style.backgroundSize = (16 * z) + 'px 100%, ' + (4 * z) + 'px 100%';
@@ -104,6 +107,7 @@ function renderArr() {
     song.arr.filter(it => laneOf(it) === i && itemClip(it)).forEach(it => lane.appendChild(makeClip(it, it.pat !== undefined ? null : song.tracks[it.t], z)));
     if (ARR.range && ARR.range.t === i) { const rb = el('div', 'rangesel'); rb.style.left = ARR.range.s * z + 'px'; rb.style.width = (ARR.range.e - ARR.range.s) * z + 'px'; lane.appendChild(rb); }
     board.appendChild(lane);
+    if (ARR.chainOpen[i]) board.appendChild(chainPanel(i));
   });
   song.autos.forEach((au, k) => {                     // carriles de automatización de cualquier parámetro
     const T = autoInfo(au.target, song), ah = el('div', 'arrhead auto'); ah.style.height = AUTO_H + 'px'; ah.style.setProperty('--c', '#ffb400');
@@ -369,4 +373,24 @@ function stripSilence() {
   });
   if (!out.length) { status('No se encontró audio por encima del umbral.'); return; }
   song.arr.splice(song.arr.indexOf(it), 1, ...out); ARR.sel = out[0]; renderArr(); status('Strip silence: ' + out.length + ' fragmento(s).');
+}
+
+// ----------------------------------------------------------------- cadena de plugins desplegable (doble clic en el nombre de la pista)
+function laneInserts(i) {
+  const out = new Set();
+  song.arr.filter(it => laneOf(it) === i).forEach(it => {
+    if (it.pat !== undefined) song.tracks.forEach(t => { if (t.clips[it.pat]) out.add(t.insert); }); else if (song.tracks[it.t]) out.add(song.tracks[it.t].insert);
+  });
+  return out.size ? [...out].sort((a, b) => a - b) : [Math.min(i, NINS - 1)];
+}
+function chainPanel(i) {
+  const row = el('div', 'chainrow'), box = el('div', 'chainbox'); row.appendChild(box);
+  const ks = laneInserts(i), used = song.arr.some(it => laneOf(it) === i);
+  box.appendChild(el('div', 'chainhead', 'Cadena de plugins — ' + song.lanes[i].name + (used ? '' : ' (sin clips: se muestra el Insert ' + (ks[0] + 1) + ')')));
+  ks.forEach(k => {
+    const ins = song.inserts[k], sec = el('div', 'chainsec'), t = song.tracks.filter(tt => tt.insert === k).map(tt => tt.name).join(', ');
+    sec.appendChild(el('div', 'chainins', 'Insert ' + (k + 1) + ' · ' + ins.name + (t ? '   ← ' + t : '')));
+    const slots = el('div', 'chainslots'); buildFxSlots(slots, k, () => { renderArr(); if (winOpen('mixer')) renderMixer(); }); sec.appendChild(slots); box.appendChild(sec);
+  });
+  return row;
 }

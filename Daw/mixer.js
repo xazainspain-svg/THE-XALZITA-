@@ -69,25 +69,32 @@ function renderMixer() {
   panel.appendChild(el('h3', '', ins.name + ' — ranuras de efectos'));
   const routed = song.tracks.map((t, i) => [t, i]).filter(x => x[0].insert === mixSel);
   panel.appendChild(el('div', 'hint', routed.length ? 'Recibe: ' + routed.map(x => x[0].name).join(', ') : 'Ninguna pista llega a este insert. Elige el insert de cada pista en la vista Session (selector "Insert").'));
+  buildFxSlots(panel, mixSel, () => renderMixer());
+}
+
+// Ranuras de efectos de un insert (las usan el Mixer y la cadena desplegable del Playlist).
+function buildFxSlots(parent, k0, rerender) {
+  const ins = song.inserts[k0];
   for (let k = 0; k < NSLOTS; k++) {
     const f = ins.fx[k], slot = el('div', 'slot' + (f ? ' used' : '')), head = el('div', 'shead');
     const sel = el('select'); const o0 = el('option', '', '— ranura ' + (k + 1) + ' —'); o0.value = ''; sel.appendChild(o0);
     Object.keys(FX_DEFS).forEach(key => { const o = el('option', '', FX_DEFS[key].name); o.value = key; sel.appendChild(o); });
     sel.value = f ? f.type : '';
-    sel.onchange = () => { ins.fx[k] = sel.value ? fxNew(sel.value) : null; if (eng) eng.rebuildInsert(mixSel); renderMixer(); };
+    sel.onchange = () => { ins.fx[k] = sel.value ? fxNew(sel.value) : null; if (eng) eng.rebuildInsert(k0); rerender(); };
     head.appendChild(sel);
     if (f && FX_PRESETS[f.type]) {
       const ps = el('select'); const p0 = el('option', '', 'preset'); p0.value = ''; ps.appendChild(p0);
       Object.keys(FX_PRESETS[f.type]).forEach(n => { const o = el('option', '', n); o.value = n; ps.appendChild(o); });
-      ps.onchange = () => { if (!ps.value) return; Object.assign(f.p, FX_PRESETS[f.type][ps.value]); if (eng) eng.rebuildInsert(mixSel); renderMixer(); }; head.appendChild(ps);
+      ps.onchange = () => { if (!ps.value) return; Object.assign(f.p, FX_PRESETS[f.type][ps.value]); if (eng) eng.rebuildInsert(k0); rerender(); }; head.appendChild(ps);
     }
     if (f) {
       const pw = el('button', f.on !== false ? 'on' : '', '⏻'); pw.title = 'Activar / desactivar';
-      pw.onclick = () => { f.on = f.on === false; if (eng) eng.rebuildInsert(mixSel); renderMixer(); }; head.appendChild(pw);
+      pw.onclick = () => { f.on = f.on === false; if (eng) eng.rebuildInsert(k0); rerender(); }; head.appendChild(pw);
+      const rm = el('button', '', '✕'); rm.title = 'Quitar el efecto'; rm.onclick = () => { ins.fx[k] = null; if (eng) eng.rebuildInsert(k0); rerender(); }; head.appendChild(rm);
     }
     slot.appendChild(head);
-    if (f) FX_DEFS[f.type].params.forEach(d => slider(slot, d.n, d.min, d.max, f.p[d.k], d.step, v => { f.p[d.k] = v; const nodes = eng && eng.ins[mixSel].fx[k]; if (nodes) nodes.update(); autoRec('i' + mixSel + '.f' + k + '.' + d.k, v); }, d.log, 'i' + mixSel + '.f' + k + '.' + d.k));
-    panel.appendChild(slot);
+    if (f) FX_DEFS[f.type].params.forEach(d => slider(slot, d.n, d.min, d.max, f.p[d.k], d.step, v => { f.p[d.k] = v; const nodes = eng && eng.ins[k0].fx[k]; if (nodes) nodes.update(); autoRec('i' + k0 + '.f' + k + '.' + d.k, v); }, d.log, 'i' + k0 + '.f' + k + '.' + d.k));
+    parent.appendChild(slot);
   }
 }
 

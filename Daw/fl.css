@@ -100,3 +100,11 @@ main{flex:1;overflow:auto;background:#1a1f23;padding:0}
 #gRec{gap:6px}#gRec .chk{display:flex;align-items:center;gap:3px;font-size:11px;color:var(--mut)}#gRec select{max-width:120px;font-size:11px}
 #inMeter{background:#0d1114;border:1px solid #070a0c;border-radius:2px}
 .recblock{position:absolute;top:3px;bottom:3px;background:rgba(255,59,48,.45);border:1px solid #ff3b30;border-radius:2px;pointer-events:none;z-index:4}
+/* cadena de plugins desplegable en el Playlist */
+.chainrow{grid-column:1 / -1;position:sticky;left:0;z-index:6;background:#232a30;border-top:1px solid #0e1114;border-bottom:2px solid var(--ac);max-width:calc(100vw - 230px)}
+.chainbox{padding:6px 10px 8px}.chainhead{font-weight:700;letter-spacing:.5px;color:var(--ac);margin-bottom:4px}
+.chainins{color:var(--mut);font-size:11px;margin:4px 0}
+.chainslots{display:flex;gap:4px;overflow-x:auto;padding-bottom:6px;align-items:flex-start}
+.chainslots .slot{min-width:186px;width:186px;flex:none;margin:0}
+.chainslots .shead{flex-wrap:wrap}.chainslots .shead select{min-width:0;max-width:100%}
+.chev{cursor:pointer;color:var(--ac);width:10px;text-align:center}
