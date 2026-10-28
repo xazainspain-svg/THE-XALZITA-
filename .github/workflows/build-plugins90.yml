@@ -47,10 +47,12 @@ jobs:
           pattern: Xaza-FX-*-VST3-Windows
           path: vst3
           merge-multiple: true
-      - name: Contar plugins
+      - name: Ordenar y contar plugins
         shell: bash
         run: |
-          n=$(find vst3 -maxdepth 1 -name "*.vst3" | wc -l)
+          mkdir flat
+          find vst3 -type d -name "*.vst3" -print0 | while IFS= read -r -d '' d; do cp -r "$d" flat/; done
+          n=$(find flat -maxdepth 1 -name "*.vst3" | wc -l)
           echo "plugins: $n"
           test "$n" -eq 90
       - name: Instalar Inno Setup
@@ -58,7 +60,7 @@ jobs:
       - name: Crear el instalador .exe
         shell: bash
         run: |
-          "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" "//DSrcDir=$PWD/vst3" Plugins90/installer.iss
+          "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" "//DSrcDir=$PWD/flat" Plugins90/installer.iss
       - name: Subir el instalador
         uses: actions/upload-artifact@v4
         with:
