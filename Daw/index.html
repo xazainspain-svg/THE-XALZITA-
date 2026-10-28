@@ -5,63 +5,73 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Xaza Live</title>
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="fl.css">
 </head>
 <body>
-<header id="top">
-  <div class="logo">XAZA<span>live</span></div>
-  <button id="btnPlay" title="Reproducir / parar (Espacio)">▶</button>
-  <button id="btnStop" title="Parar">■</button>
-  <label class="bpm">BPM <input id="bpm" type="number" min="40" max="240" value="120"></label>
-  <button id="btnMetro" title="Metrónomo">Metro</button>
-  <button id="btnRec" title="Grabar notas en vivo (clip seleccionado)">● Rec</button>
-  <button id="btnTap" title="Tap tempo">Tap</button>
-  <label class="bpm">Swing <input id="swing" type="range" min="0" max="0.5" step="0.01" value="0" style="width:60px"></label>
-  <span id="pos">1.1.1</span>
-  <nav>
-    <button id="tabSession" class="on">Session</button>
-    <button id="tabArr">Arrangement</button>
-    <button id="tabMixer">Mixer</button>
-    <button id="tabImm">Inmersivo 3D</button>
-  </nav>
-  <span class="grow"></span>
-  <canvas id="spec" width="110" height="24" title="Espectro del master"></canvas>
-  <canvas id="masterMeter" width="80" height="14"></canvas>
-  <button id="btnUndo" title="Deshacer (Ctrl+Z)">↶</button><button id="btnRedo" title="Rehacer (Ctrl+Y)">↷</button>
-  <button id="btnAddM" title="Añadir pista MIDI">+ MIDI</button><button id="btnAddA" title="Añadir pista de audio">+ Audio</button>
-  <button id="btnAddF" title="Añadir pista FM">+ FM</button><button id="btnAddS" title="Añadir pista sampler">+ Sampler</button>
-  <button id="btnMic" title="Grabar audio del micrófono en el clip seleccionado">● Mic</button>
-  <button id="btnHelp" title="Atajos">?</button>
-  <button id="btnNew">Nuevo</button>
-  <button id="btnSave">Guardar</button>
-  <button id="btnLoad">Abrir…</button>
-  <button id="btnExport">Exportar WAV</button>
-  <button id="btnStems" title="Un WAV por pista">Stems</button>
-  <button id="btnMidiOut" title="Exportar MIDI">MIDI ↓</button><button id="btnMidiIn" title="Importar MIDI al clip seleccionado">MIDI ↑</button>
-  <input id="midiIn" type="file" accept=".mid,.midi,audio/midi" hidden>
-  <input id="fileIn" type="file" accept=".json,application/json" hidden>
-  <input id="audioIn" type="file" accept="audio/*" hidden>
-</header>
-<div id="status"></div>
-<div id="help" hidden></div>
-<main>
-  <section id="session"></section>
-  <section id="arr" hidden></section>
-  <section id="mixer" hidden></section>
-  <section id="imm" hidden></section>
-</main>
-<footer id="bottom">
-  <div class="tabs">
-    <button id="tabClip" class="on">Clip (piano roll)</button>
-    <button id="tabRack">Channel Rack</button>
-    <button id="tabDev">Dispositivos</button>
-    <button id="tabSmp">Samples</button>
-    <span id="selInfo"></span>
+<div id="menubar"></div>
+<div id="toolbar">
+  <div class="tgroup" id="gSong">
+    <button id="btnPat" class="seg" title="Reproducir el patrón (escena) seleccionado">PAT</button>
+    <button id="btnSong" class="seg on" title="Reproducir el Playlist (canción)">SONG</button>
   </div>
-  <div id="clipPane"></div>
-  <div id="rackPane" hidden></div>
-  <div id="devPane" hidden></div>
-  <div id="smpPane" hidden></div>
-</footer>
+  <div class="tgroup">
+    <button id="btnPlay" class="tport" title="Reproducir / parar (Espacio)">▶</button>
+    <button id="btnStop" class="tport" title="Parar">■</button>
+    <button id="btnRec" class="tport rec" title="Grabar notas en vivo (clip seleccionado)">●</button>
+  </div>
+  <div class="tgroup">
+    <div class="lcd" title="Tempo: arrastra o escribe"><span class="lcdl">TEMPO</span><input id="bpm" type="number" min="40" max="240" value="120"></div>
+    <div class="lcd"><span class="lcdl">POSICIÓN</span><span id="pos">1.1.1</span></div>
+  </div>
+  <div class="tgroup" id="gPat">
+    <span class="lcdl">PATRÓN</span>
+    <button id="patPrev" class="mini">◀</button><span id="patName" class="lcd2">1</span><button id="patNext" class="mini">▶</button>
+  </div>
+  <div class="tgroup" id="gKnobs"></div>
+  <div class="tgroup" id="gWins">
+    <button id="wbPlaylist" class="wb" title="Playlist (F5)">Playlist</button>
+    <button id="wbRack" class="wb" title="Channel Rack (F6)">Rack</button>
+    <button id="wbRoll" class="wb" title="Piano roll (F7)">Piano roll</button>
+    <button id="wbBrowser" class="wb" title="Navegador (F8)">Navegador</button>
+    <button id="wbMixer" class="wb" title="Mixer (F9)">Mixer</button>
+    <button id="wbDev" class="wb" title="Instrumento de la pista (F10)">Instrumento</button>
+  </div>
+  <div class="tgroup grow"></div>
+  <div class="tgroup">
+    <button id="btnMetro" class="mini" title="Metrónomo">Metro</button>
+    <button id="btnTap" class="mini" title="Tap tempo">Tap</button>
+    <button id="btnMic" class="mini" title="Grabar audio del micrófono">● Mic</button>
+    <input id="swing" type="range" min="0" max="0.5" step="0.01" value="0" title="Swing" style="width:52px">
+  </div>
+  <canvas id="spec" width="96" height="26" title="Espectro del master"></canvas>
+  <canvas id="masterMeter" width="64" height="26"></canvas>
+</div>
+<div id="status"></div>
+<div id="workspace">
+  <aside id="browser"></aside>
+  <main>
+    <section id="session" hidden></section>
+    <section id="arr"></section>
+  </main>
+</div>
+
+<div class="win" id="win-rack" hidden><div class="wt"><b>Channel Rack</b><span id="selInfoRack"></span><button class="wx">✕</button></div><div class="wbody" id="rackPane"></div></div>
+<div class="win" id="win-roll" hidden><div class="wt"><b>Piano roll</b><span id="selInfo"></span><button class="wx">✕</button></div><div class="wbody" id="clipPane"></div></div>
+<div class="win" id="win-mixer" hidden><div class="wt"><b>Mixer</b><button class="wx">✕</button></div><div class="wbody" id="mixer"></div></div>
+<div class="win" id="win-dev" hidden><div class="wt"><b>Instrumento</b><button class="wx">✕</button></div><div class="wbody" id="devPane"></div></div>
+<div class="win" id="win-imm" hidden><div class="wt"><b>Inmersivo 3D</b><button class="wx">✕</button></div><div class="wbody" id="imm"></div></div>
+<div id="help" hidden></div>
+
+<div id="legacy" hidden>
+  <button id="btnUndo"></button><button id="btnRedo"></button>
+  <button id="btnAddM"></button><button id="btnAddA"></button><button id="btnAddF"></button><button id="btnAddS"></button>
+  <button id="btnHelp"></button><button id="btnNew"></button><button id="btnSave"></button><button id="btnLoad"></button>
+  <button id="btnExport"></button><button id="btnStems"></button><button id="btnMidiOut"></button><button id="btnMidiIn"></button>
+  <input id="midiIn" type="file" accept=".mid,.midi,audio/midi">
+  <input id="fileIn" type="file" accept=".json,application/json">
+  <input id="audioIn" type="file" accept="audio/*">
+</div>
+
 <script src="engine.js"></script>
 <script src="model.js"></script>
 <script src="app.js"></script>
@@ -71,6 +81,7 @@
 <script src="imm.js"></script>
 <script src="extras.js"></script>
 <script src="studio.js"></script>
+<script src="win.js"></script>
 <script src="start.js"></script>
 </body>
 </html>

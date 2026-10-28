@@ -23,7 +23,7 @@ $('#btnUndo').onclick = undo; $('#btnRedo').onclick = redo; updateUndoBtns();
 // ----------------------------------------------------------------- pistas: añadir / quitar
 function addTrack(kind) {
   if (song.tracks.length >= 16) { status('Máximo 16 pistas.'); return; }
-  const n = song.tracks.length, t = trackNew(({ audio: 'Audio ', fm: 'FM ', sampler: 'Sampler ', synth: 'Synth ' }[kind]) + (n + 1), kind, COLORS[n % COLORS.length], null, Math.min(n, NINS - 1));
+  const n = song.tracks.length, t = trackNew(({ audio: 'Audio ', fm: 'FM ', sampler: 'Sampler ', synth: 'Synth ', drums: 'Batería ' }[kind]) + (n + 1), kind, COLORS[n % COLORS.length], null, Math.min(n, NINS - 1));
   song.tracks.push(t); rebuildEngine(); selTrack = n; renderAll(); status('Pista añadida.'); if (kind === 'sampler') importSamplerFor(n);
 }
 function removeTrack(i) {
@@ -114,8 +114,7 @@ $('#btnRec').onclick = () => {
   REC.on = !REC.on; $('#btnRec').classList.toggle('on', REC.on);
   if (!REC.on) { status('Grabación detenida.'); return; }
   const t = song.tracks[selTrack]; if (t.kind === 'audio') { REC.on = false; $('#btnRec').classList.remove('on'); status('Para grabar notas selecciona una pista MIDI.'); return; }
-  if (view !== 'session') setView('session');
-  if (!t.clips[selSlot]) t.clips[selSlot] = clipNew(); ensureEngine(); eng.launch(selTrack, selSlot); updatePlayBtn(); renderAll();
+  if (!t.clips[selSlot]) t.clips[selSlot] = clipNew(); ensureEngine(); eng.launch(selTrack, selSlot); updatePlayBtn(); renderAll(); openWin('roll');
   status('Grabando: toca con el teclado (A–K) o un teclado MIDI. Las notas se cuantizan a 1/2 paso.', 6000);
 };
 function recPos(c) {

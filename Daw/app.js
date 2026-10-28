@@ -4,7 +4,7 @@
 const $ = (s, r = document) => r.querySelector(s);
 const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt !== undefined) e.textContent = txt; return e; };
 
-let song = demoSong(), eng = null, view = 'session', selTrack = 0, selSlot = 0, bottomTab = 'clip', octave = 4;
+let song = demoSong(), eng = null, view = 'arr', playMode = 'song', selTrack = 0, selSlot = 0, octave = 4;
 let cells = [], meters = [];
 
 function ensureEngine() {
@@ -19,7 +19,7 @@ function setSong(s, keepSel) {
   const metro = eng && eng.metro, st = selTrack, ss = selSlot;
   if (eng) { eng.dispose(); const ctx = eng.ctx; song = s; eng = new Engine(ctx, song); eng.metro = metro; eng.onEnd = () => updatePlayBtn(); } else song = s;
   selTrack = keepSel ? Math.min(st, song.tracks.length - 1) : 0; selSlot = keepSel ? ss : 0; ARR.sel = null; ROLL.sel.clear();
-  $('#bpm').value = song.bpm; $('#swing').value = song.swing || 0; renderAll();
+  $('#bpm').value = song.bpm; $('#swing').value = song.swing || 0; if (typeof refreshKnobs === 'function') refreshKnobs(); renderAll();
 }
 function rebuildEngine() {
   if (!eng) return; const metro = eng.metro, ctx = eng.ctx; eng.dispose(); eng = new Engine(ctx, song); eng.metro = metro; eng.onEnd = () => updatePlayBtn(); updatePlayBtn();
@@ -31,25 +31,18 @@ const curClip = () => { const t = song.tracks[selTrack]; return t && t.clips[sel
 function updatePlayBtn() { const on = !!(eng && eng.playing); $('#btnPlay').classList.toggle('on', on); $('#btnPlay').textContent = on ? '❚❚' : '▶'; }
 function togglePlay() {
   ensureEngine();
-  if (eng.playing) eng.stop(); else if (view === 'arr') eng.play('arr', ARR.cursor); else eng.play('session');
+  if (eng.playing) eng.stop(); else if (playMode === 'song') eng.play('arr', ARR.cursor); else { eng.launchScene(selSlot); }
   updatePlayBtn();
 }
 $('#btnPlay').onclick = togglePlay;
 $('#btnStop').onclick = () => { if (eng) eng.stop(); updatePlayBtn(); };
 $('#bpm').onchange = e => { song.bpm = Math.max(40, Math.min(240, +e.target.value || 120)); e.target.value = song.bpm; };
 $('#btnMetro').onclick = e => { ensureEngine(); eng.metro = !eng.metro; e.target.classList.toggle('on', eng.metro); };
-function setView(v) {
+function setView(v) {                                  // vista principal: 'arr' (Playlist) o 'session'
+  if (v === 'mixer' || v === 'imm') { openWin(v); return; }
   if (eng && eng.playing) { eng.stop(); updatePlayBtn(); }
-  view = v;
-  ['session', 'arr', 'mixer', 'imm'].forEach(k => { $('#' + k).hidden = k !== v; });
-  $('#tabSession').classList.toggle('on', v === 'session'); $('#tabArr').classList.toggle('on', v === 'arr'); $('#tabMixer').classList.toggle('on', v === 'mixer'); $('#tabImm').classList.toggle('on', v === 'imm');
-  renderAll();
+  view = v; $('#session').hidden = v !== 'session'; $('#arr').hidden = v !== 'arr'; updateWinButtons(); renderAll();
 }
-$('#tabSession').onclick = () => setView('session'); $('#tabArr').onclick = () => setView('arr'); $('#tabMixer').onclick = () => setView('mixer'); $('#tabImm').onclick = () => setView('imm');
-$('#tabClip').onclick = () => { bottomTab = 'clip'; renderBottom(); };
-$('#tabDev').onclick = () => { bottomTab = 'dev'; renderBottom(); };
-$('#tabRack').onclick = () => { bottomTab = 'rack'; renderBottom(); };
-$('#tabSmp').onclick = () => { bottomTab = 'smp'; renderBottom(); };
 
 // ------------------------------------------------------------------ vista Session
 function renderSession() {
@@ -70,7 +63,7 @@ function renderSession() {
       d.onclick = () => {
         selTrack = i; selSlot = s; ROLL.sel.clear();
         if (!t.clips[s] && t.kind === 'audio') { importAudio(i, s); return; }
-        if (!t.clips[s]) { t.clips[s] = clipNew(); bottomTab = 'clip'; } else { ensureEngine(); eng.launch(i, s); updatePlayBtn(); }
+        if (!t.clips[s]) { t.clips[s] = clipNew(); openWin('roll'); } else { ensureEngine(); eng.launch(i, s); updatePlayBtn(); }
         renderAll();
       };
       d.oncontextmenu = e => { e.preventDefault(); if (t.clips[s] && confirm('¿Borrar este clip?')) { t.clips[s] = null; song.arr = song.arr.filter(a => !(a.t === i && a.slot === s)); renderAll(); } };
@@ -149,13 +142,13 @@ function renderDevPane() {
   const r = el('div', 'card'); r.appendChild(el('h4', '', 'Salida'));
   r.appendChild(el('div', '', 'Esta pista va al Insert ' + (t.insert + 1) + '. Los efectos se editan en la pestaña Mixer.')); wrap.appendChild(r);
 }
-function renderBottom() {
-  const tabs = { clip: ['#tabClip', '#clipPane'], rack: ['#tabRack', '#rackPane'], dev: ['#tabDev', '#devPane'], smp: ['#tabSmp', '#smpPane'] };
-  Object.entries(tabs).forEach(([k, [tb, pn]]) => { $(tb).classList.toggle('on', bottomTab === k); $(pn).hidden = bottomTab !== k; });
-  const t = song.tracks[selTrack]; $('#selInfo').textContent = t.name + (curClip() ? ' — clip ' + (selSlot + 1) : '');
-  if (bottomTab === 'clip') renderClipPane(); else if (bottomTab === 'rack') renderRackPane(); else if (bottomTab === 'dev') renderDevPane(); else renderSamplesPane();
+function renderBottom() {                              // refresca las ventanas abiertas
+  const t = song.tracks[selTrack], info = t.name + (curClip() ? ' — patrón ' + (selSlot + 1) : '');
+  $('#selInfo').textContent = info; $('#selInfoRack').textContent = '— patrón ' + (selSlot + 1);
+  ['rack', 'roll', 'dev', 'mixer', 'imm'].forEach(id => { if (winOpen(id)) renderWin(id); });
+  if (typeof updatePatName === 'function') updatePatName();
 }
-function renderAll() { if (view === 'session') renderSession(); else if (view === 'arr') renderArr(); else if (view === 'imm') renderImm(); else renderMixer(); renderBottom(); }
+function renderAll() { if (view === 'session') renderSession(); else renderArr(); renderBottom(); if (typeof renderBrowser === 'function') renderBrowser(); }
 
 // ------------------------------------------------------------------ guardar / abrir / exportar
 const download = (blob, name) => { const a = el('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); };
@@ -180,7 +173,8 @@ const KEYMAP = 'awsedftgyhujkolp';
 document.addEventListener('keydown', e => {
   if (e.target.matches('input,select,textarea') && e.target.type !== 'range' && e.target.type !== 'checkbox') return;
   if (e.code === 'Space') { e.preventDefault(); togglePlay(); return; }
-  if (arrKey(e) || (view !== 'mixer' && rollKey(e))) { e.preventDefault(); return; }
+  if (typeof winKey === 'function' && winKey(e)) { e.preventDefault(); return; }
+  if (arrKey(e) || rollKey(e)) { e.preventDefault(); return; }
   if (extrasKey(e)) { e.preventDefault(); return; }
   if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
   const k = e.key.toLowerCase();
@@ -214,9 +208,10 @@ function frame() {
           c.classList.toggle('playing', eng.playing && eng.mode === 'session' && r.playing === s);
           c.classList.toggle('queued', eng.playing && r.queued === s); }
       });
-    } else if (view === 'arr') arrTick(st); else if (view === 'imm') immTick(); else mixerTick();
-    meterDraw($('#masterMeter'), eng.masterAn); extrasTick(); if (bottomTab === 'rack') rackTick();
-    if (bottomTab === 'clip' && ROLL.cv) {
+    } else if (view === 'arr') arrTick(st);
+    if (winOpen('mixer')) mixerTick();
+    meterDraw($('#masterMeter'), eng.masterAn); extrasTick(); if (winOpen('rack')) rackTick();
+    if (winOpen('roll') && ROLL.cv) {
       const c = curClip(), r = eng.rt[selTrack]; let ps = -1;
       if (c && eng.playing && st >= 0) {
         const L = c.bars * 16;

@@ -10,7 +10,7 @@ function renderRackPane() {
   pane.appendChild(el('div', 'rollbar', 'Channel Rack — patrón (escena) ' + (selSlot + 1) + '. Clic: activar/desactivar paso (arrastra para pintar) · Mayús+clic: acento · selecciona otra escena en Session para editar otro patrón.'));
   const wrap = el('div', 'rack'); pane.appendChild(wrap); let drag = null;
   const stepCell = (ti, pitchFn, c, s) => {
-    const b = el('div', 'rs' + (s % 4 === 0 ? ' b4' : '')); b.dataset.s = s;
+    const b = el('div', 'rs g' + (Math.floor(s / 4) % 2)); b.dataset.s = s;
     const find = () => c.notes.find(n => n.n === pitchFn() && Math.floor(n.s + 1e-9) === s && n.l <= 1.01);
     const hit = find(); if (hit) { b.classList.add('on'); if (hit.v >= 0.95) b.classList.add('acc'); b.style.setProperty('--c', song.tracks[ti].color); }
     const set = on => {
@@ -30,7 +30,10 @@ function renderRackPane() {
   song.tracks.forEach((t, ti) => {
     if (t.kind === 'audio') return;
     const c = rackClip(ti, false), box = el('div', 'rackrow'), head = el('div', 'rh'); head.style.setProperty('--c', t.color);
-    head.appendChild(el('b', '', t.name));
+    const led = el('button', 'led' + (t.mute ? '' : ' on')); led.title = 'Activar / silenciar canal'; led.onclick = () => { t.mute = !t.mute; led.classList.toggle('on', !t.mute); if (eng) eng.applyMix(); };
+    const kp = makeKnob('PAN', -1, 1, t.pan, 0, v => { t.pan = v; if (eng) eng.applyMix(); autoRec('t' + ti + '.pan', v); }, 26), kv = makeKnob('VOL', 0, 1.2, t.vol, 0.8, v => { t.vol = v; if (eng) eng.applyMix(); autoRec('t' + ti + '.vol', v); }, 26);
+    const nb = el('button', 'cname' + (ti === selTrack ? ' sel' : ''), t.name); nb.onclick = () => { selTrack = ti; renderAll(); }; nb.ondblclick = () => openWin('dev');
+    head.append(led, kp.el, kv.el, nb);
     if (!c) { const mk = el('button', '', '+ crear patrón'); mk.onclick = () => { rackClip(ti, true); renderRackPane(); }; head.appendChild(mk); box.appendChild(head); wrap.appendChild(box); return; }
     const L = c.bars * 16;
     if (t.kind === 'drums') {
@@ -46,6 +49,7 @@ function renderRackPane() {
     }
     wrap.appendChild(box);
   });
+  const add = el('button', 'bbtn', '＋ Añadir canal'); add.onclick = () => addTrack('synth'); wrap.appendChild(add);
 }
 function rackTick() {
   if (!eng || !eng.playing) return; const st = eng.currentStep(); if (st < 0) return; let ps = -1;

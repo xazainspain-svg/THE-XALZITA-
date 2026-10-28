@@ -50,7 +50,7 @@ function renderClipPane() {
     bar.appendChild(x);
   });
   const clr = el('button', '', 'Vaciar'); clr.onclick = () => { c.notes = []; ROLL.sel.clear(); drawRoll(); }; bar.appendChild(clr);
-  const mx = el('button', ROLL.big ? 'on' : '', '⤢'); mx.title = 'Maximizar / restaurar panel'; mx.onclick = () => { ROLL.big = !ROLL.big; $('#bottom').classList.toggle('big', ROLL.big); renderClipPane(); };
+  const mx = el('button', ROLL.big ? 'on' : '', '⤢'); mx.title = 'Maximizar / restaurar panel'; mx.onclick = () => { ROLL.big = !ROLL.big; $('#win-roll').classList.toggle('max', ROLL.big); renderClipPane(); };
   bar.appendChild(mx);
   pane.appendChild(bar);
   rollToolsRow(pane, c, t);
@@ -163,7 +163,7 @@ function bindRoll(t, c, R, nw) {
 
 // ----------------------------------------------------------------- teclado del piano roll
 function rollKey(e) {
-  const c = curClip(); if (!c || bottomTab !== 'clip' || !ROLL.cv) return false;
+  const c = curClip(); if (!c || !winOpen('roll') || !ROLL.cv) return false;
   const k = e.key, ctrl = e.ctrlKey || e.metaKey;
   if (!ctrl && ['1', '2', '3', '4', '5'].includes(k)) { ROLL.tool = TOOLS[+k - 1][0]; renderClipPane(); return true; }
   if (k === 'Delete' || k === 'Backspace') { if (!ROLL.sel.size) return false; c.notes = c.notes.filter(n => !ROLL.sel.has(n)); ROLL.sel.clear(); drawRoll(); return true; }

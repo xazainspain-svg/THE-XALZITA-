@@ -4,7 +4,7 @@
 // (volumen y panorama) con puntos editables.
 
 const ARR = { z: 6, snap: 4, sel: null, cursor: 0, follow: true, autoOpen: {}, autoParam: {}, slotSel: {}, drag: null, ph: null,
-  mode: 'slip', tool: 'grab', range: null, amode: 'read', fade: 2, silDb: -40, silMs: 150 };
+  mode: 'slip', tool: 'draw', range: null, amode: 'read', fade: 2, silDb: -40, silMs: 150 };
 const LANE_H = 62, AUTO_H = 72, HEAD_W = 150, RULER_H2 = 26, ARR_STEPS = ARR_BARS * 16;
 const ARR_SNAPS = [['Compás', 16], ['Tiempo', 4], ['1/2 tiempo', 2], ['Paso', 1], ['Sin snap', 0]];
 
@@ -69,7 +69,7 @@ function renderArr() {
     if (!slots.length) { const o = el('option', '', '(sin clips)'); o.value = -1; sl.appendChild(o); }
     sl.value = ARR.slotSel[i] !== undefined && slots.includes(ARR.slotSel[i]) ? ARR.slotSel[i] : (slots[0] !== undefined ? slots[0] : -1);
     sl.onchange = () => { ARR.slotSel[i] = +sl.value; };
-    row2.append(sl); head.appendChild(row2); board.appendChild(head);
+    if (false) row2.append(sl); board.appendChild(head);
 
     const lane = el('div', 'arrlane'); lane.style.height = LANE_H + 'px'; lane.style.width = W + 'px';
     lane.style.backgroundSize = (16 * z) + 'px 100%, ' + (4 * z) + 'px 100%';
@@ -80,14 +80,15 @@ function renderArr() {
         ARR.range = { t: i, s: a, e: a }; ARR.drag = { type: 'rangeSel', t: i, a, rect: r, box }; ARR.cursor = a; moveCursor(); return;
       }
       if (e.target !== lane) return;
+      if (ARR.tool === 'draw' && e.button === 0) { place(e); return; }
       ARR.cursor = aSnapF((e.clientX - lane.getBoundingClientRect().left) / z); arrSelect(null); moveCursor();
     };
-    lane.ondblclick = e => {
-      if (e.target !== lane) return;
-      let slot = +sl.value;
-      if (slot < 0) { slot = 0; t.clips[0] = t.clips[0] || clipNew(); status('Se creó un clip vacío en la escena 1 de ' + t.name + '.'); }
-      const len = t.clips[slot].bars * 16, s0 = Math.max(0, Math.min(ARR_STEPS - len, aSnapF((e.clientX - lane.getBoundingClientRect().left) / z)));
-      const it = { t: i, s: s0, l: len, slot, off: 0 }; song.arr.push(it); resolveOverlap(it); ARR.sel = it; selTrack = i; selSlot = slot; renderArr(); renderBottom();
+    lane.ondblclick = null;
+    const place = e => {
+      const r = lane.getBoundingClientRect(), slot = selSlot;
+      if (!t.clips[slot]) { if (t.kind === 'audio') { status('Esta pista de audio no tiene clip en el patrón ' + (slot + 1) + '. Impórtalo desde Session o el Navegador.'); return; } t.clips[slot] = clipNew(); }
+      const len = t.clips[slot].bars * 16, s0 = Math.max(0, Math.min(ARR_STEPS - len, aSnapF((e.clientX - r.left) / z)));
+      const it = { t: i, s: s0, l: len, slot, off: 0 }; song.arr.push(it); resolveOverlap(it); ARR.sel = it; selTrack = i; renderArr(); renderBottom();
     };
     song.arr.filter(it => it.t === i && itemClip(it)).forEach(it => lane.appendChild(makeClip(it, t, z)));
     if (ARR.range && ARR.range.t === i) { const rb = el('div', 'rangesel'); rb.style.left = ARR.range.s * z + 'px'; rb.style.width = (ARR.range.e - ARR.range.s) * z + 'px'; lane.appendChild(rb); }
@@ -110,7 +111,7 @@ function moveCursor() { if (ARR.cur) ARR.cur.style.left = (HEAD_W + ARR.cursor *
 // ----------------------------------------------------------------- clips
 function makeClip(it, t, z) {
   const c = itemClip(it), d = el('div', 'aclip' + (ARR.sel === it ? ' sel' : ''));
-  d._it = it; d.style.left = (it.s * z) + 'px'; d.style.width = Math.max(4, it.l * z - 1) + 'px'; d.style.background = t.color;
+  d._it = it; if (it.m) d.classList.add('muted'); d.style.left = (it.s * z) + 'px'; d.style.width = Math.max(4, it.l * z - 1) + 'px'; d.style.background = t.color;
   const cv = el('canvas'); cv.width = Math.min(4096, Math.ceil(it.l * z)); cv.height = LANE_H - 18; d.appendChild(cv);
   paintClip(cv, it, t, c, z);
   if (c.audio) { const f = el('canvas'); f.width = Math.min(4096, Math.ceil(it.l * z)); f.height = LANE_H; f.style.cssText = 'position:absolute;left:0;top:0;pointer-events:none'; d.appendChild(f); const g = f.getContext('2d'); g.fillStyle = 'rgba(0,0,0,.45)';
@@ -118,13 +119,18 @@ function makeClip(it, t, z) {
   d.appendChild(el('span', 'lbl', c.name || ('Clip ' + (it.slot + 1))));
   d.onmousedown = e => {
     if (ARR.tool !== 'select') e.stopPropagation();
-    if (e.button === 2) { song.arr.splice(song.arr.indexOf(it), 1); if (ARR.sel === it) ARR.sel = null; renderArr(); return; }
+    if (e.button === 2 || ARR.tool === 'del') { song.arr.splice(song.arr.indexOf(it), 1); if (ARR.sel === it) ARR.sel = null; renderArr(); return; }
+    if (ARR.tool === 'mute') { it.m = !it.m; renderArr(); return; }
+    if (ARR.tool === 'slice') {
+      const at = aSnapF(it.s + (e.clientX - d.getBoundingClientRect().left) / z), ll = itemLoopLen(it);
+      if (at > it.s && at < it.s + it.l) { const first = at - it.s, tail = Object.assign({}, it, { s: at, l: it.l - first, off: ((it.off || 0) + first) % ll }); it.l = first; song.arr.push(tail); renderArr(); } return;
+    }
     const x = e.offsetX, w = d.offsetWidth; let type = x > w - 7 ? 'resize' : (x < 7 ? 'trim' : 'move');
     if (ARR.tool === 'trim') type = x < w / 2 ? 'trim' : 'resize'; else if (ARR.tool === 'select') type = 'none';
     arrSelect(it); if (type === 'none') return; ARR.drag = { type, it, d, x0: e.clientX, s0: it.s, l0: it.l, off0: it.off || 0 };
   };
   d.oncontextmenu = e => e.preventDefault();
-  d.ondblclick = e => { e.stopPropagation(); bottomTab = 'clip'; renderBottom(); };
+  d.ondblclick = e => { e.stopPropagation(); openWin('roll'); };
   return d;
 }
 function paintClip(cv, it, t, c, z) {
@@ -273,7 +279,10 @@ function arrBar2(root) {
   const bar = el('div', 'arrbar');
   const sel = (label, opts, val, fn) => { const l = el('label', ''); l.append(label + ' '); const s = el('select'); opts.forEach(([v, t]) => { const o = el('option', '', t); o.value = v; s.appendChild(o); }); s.value = val; s.onchange = () => fn(s.value); l.appendChild(s); bar.appendChild(l); };
   sel('Modo', [['slip', 'Slip'], ['shuffle', 'Shuffle'], ['grid', 'Grid']], ARR.mode, v => { ARR.mode = v; });
-  sel('Herramienta', [['grab', 'Grabber'], ['trim', 'Trim'], ['select', 'Selector']], ARR.tool, v => { ARR.tool = v; ARR.range = null; renderArr(); });
+  const pal = el('div', 'tools');
+  [['draw', '✎', 'Dibujar: clic en una pista coloca el patrón seleccionado; arrastra para mover; bordes para recortar'], ['del', '⌫', 'Borrar clips'], ['mute', '⊘', 'Silenciar clips'], ['slice', '✂', 'Cortar clips'], ['select', '▭', 'Seleccionar un rango (Supr lo borra)']].forEach(([k, g, tip]) => {
+    const b = el('button', ARR.tool === k ? 'on' : '', g); b.title = tip; b.onclick = () => { ARR.tool = k; ARR.range = null; renderArr(); }; pal.appendChild(b); });
+  bar.appendChild(pal);
   const num = (label, val, w, fn, min = 0, max = 99) => { const l = el('label', ''); l.append(label + ' '); const i = el('input'); i.type = 'number'; i.min = min; i.max = max; i.value = val; i.style.width = w; i.onchange = () => fn(+i.value); l.appendChild(i); bar.appendChild(l); };
   num('Fundido (pasos)', ARR.fade, '46px', v => { ARR.fade = v; });
   const act = (label, tip, fn) => { const b = el('button', '', label); b.title = tip; b.onclick = fn; bar.appendChild(b); };

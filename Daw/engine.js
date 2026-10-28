@@ -450,7 +450,7 @@ class Engine {
       (s.autos || []).forEach(au => { if (au.pts && au.pts.length) this.applyAuto(au, step, time, sd); });
       s.arr.forEach(it => {
         const t = s.tracks[it.t]; let c = t && t.clips[it.slot];
-        if (!c || step < it.s || step >= it.s + it.l) return;
+        if (!c || it.m || step < it.s || step >= it.s + it.l) return;
         if (c.audio && it.take !== undefined && c.takes && c.takes[it.take]) c = Object.assign({}, c, { audio: c.takes[it.take] });
         const len = c.bars * 16, local = (step - it.s + (it.off || 0)) % len;
         this.fire(t, it.t, c, local, time, sd, step === it.s, it.s + it.l - step, c.audio ? { fi: it.fi, fo: it.fo } : null);

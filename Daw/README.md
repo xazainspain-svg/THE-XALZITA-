@@ -1,5 +1,7 @@
 # Xaza Live — mini DAW web (original)
 
+La interfaz sigue la disposición de FL Studio (menús, barra con PAT/SONG, tempo, patrón y perillas, navegador, Playlist y ventanas flotantes F5–F10) con gráficos y estilo propios. Uso personal.
+
 Se abre en el navegador, sin instalar: abre `Daw/index.html` (o `python3 -m http.server` dentro de `Daw/`).
 
 - **Session**: 8 pistas × 8 escenas, clips en bucle con lanzamiento cuantizado a compás, lanzar escena, parar pista. Clic derecho en un clip: borrarlo.
