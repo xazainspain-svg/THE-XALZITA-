@@ -69,9 +69,10 @@ function renderArr() {
     nm.ondblclick = () => { const inp = el('input'); inp.type = 'text'; inp.value = ln.name; inp.style.width = '80px'; nm.replaceWith(inp); inp.focus(); inp.onblur = inp.onchange = () => { ln.name = inp.value || ln.name; renderArr(); }; };
     const led = el('button', 'led' + (ln.mute ? '' : ' on')); led.title = 'Activar / silenciar pista';
     led.onclick = () => { ln.mute = !ln.mute; led.classList.toggle('on', !ln.mute); };
-    top.append(led, nm); head.appendChild(top); board.appendChild(head);
+    const arm = el('button', 'arm' + (ln.arm ? ' on' : ''), 'R'); arm.title = 'Armar la pista para grabar audio (luego ● en el transporte)'; arm.onclick = () => { ln.arm = !ln.arm; arm.classList.toggle('on', ln.arm); armChanged(); };
+    top.append(led, nm, arm); head.appendChild(top); board.appendChild(head);
 
-    const lane = el('div', 'arrlane'); lane.style.height = LANE_H + 'px'; lane.style.width = W + 'px';
+    const lane = el('div', 'arrlane'); (ARR.laneEls = ARR.laneEls || [])[i] = lane; lane.style.height = LANE_H + 'px'; lane.style.width = W + 'px';
     lane.style.backgroundSize = (16 * z) + 'px 100%, ' + (4 * z) + 'px 100%';
     const place = (e, pat, extra) => {
       const r = lane.getBoundingClientRect(), slot = pat === undefined ? selSlot : pat;

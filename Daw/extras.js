@@ -111,6 +111,7 @@ function renderAudioPane(pane, c, t) {
 // ----------------------------------------------------------------- grabación MIDI en vivo + MIDI externo
 const REC = { on: false, held: {} };
 $('#btnRec').onclick = () => {
+  if (AUD.active || song.lanes.some(l => l.arm)) { toggleAudioRec(); return; }
   REC.on = !REC.on; $('#btnRec').classList.toggle('on', REC.on);
   if (!REC.on) { status('Grabación detenida.'); return; }
   const t = song.tracks[selTrack]; if (t.kind === 'audio') { REC.on = false; $('#btnRec').classList.remove('on'); status('Para grabar notas selecciona una pista MIDI.'); return; }
@@ -241,4 +242,97 @@ async function recordPunch() {
     if (on && (p >= pn.end || !eng.playing)) { clearInterval(poll); if (rec.state !== 'inactive') rec.stop(); }
   }, 10);
   mic = { rec, poll }; $('#btnMic').classList.add('on'); $('#btnMic').textContent = '■ Parar'; status('Pre-roll… la grabación empieza en el punch in y acaba en el punch out.', 6000);
+}
+
+// ----------------------------------------------------------------- grabación de audio estilo Pro Tools
+// Pistas armadas (R), monitorización con medidor de entrada, cuenta atrás con metrónomo, pre-roll, punch, QuickPunch
+// (REC con el transporte en marcha), grabación en bucle (una toma por vuelta) y compensación de latencia.
+const AUD = { stream: null, src: null, an: null, mon: null, rec: null, active: false, poll: null, startPos: 0, lane: 0, busy: false };
+async function listInputs() {
+  try {
+    const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput'), sel = $('#inSel'), cur = sel.value;
+    sel.innerHTML = '<option value="">Predeterminada</option>'; devs.forEach(d => { const o = el('option', '', d.label || 'Entrada ' + (sel.length)); o.value = d.deviceId; sel.appendChild(o); }); sel.value = cur;
+  } catch (err) {}
+}
+async function ensureInput() {
+  if (AUD.stream) return true;
+  try {
+    ensureEngine(); const id = $('#inSel').value;
+    AUD.stream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: id ? { exact: id } : undefined, echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    const c = eng.ctx; AUD.src = c.createMediaStreamSource(AUD.stream); AUD.an = c.createAnalyser(); AUD.an.fftSize = 512; AUD.src.connect(AUD.an);
+    AUD.mon = c.createGain(); AUD.mon.gain.value = $('#monCb').checked ? 1 : 0; AUD.src.connect(AUD.mon); AUD.mon.connect(c.destination); listInputs(); return true;
+  } catch (err) { status('Entrada de audio no disponible aquí: ' + err.message + ' (abre Daw/index.html en tu navegador y concede permiso).', 8000); return false; }
+}
+function closeInput() { if (!AUD.stream || AUD.active) return; AUD.stream.getTracks().forEach(t => t.stop()); try { AUD.src.disconnect(); AUD.mon.disconnect(); } catch (e) {} AUD.stream = AUD.src = AUD.an = AUD.mon = null; }
+async function armChanged() {
+  if (song.lanes.some(l => l.arm)) { if (!(await ensureInput())) song.lanes.forEach(l => { l.arm = false; }); } else closeInput();
+  if (view === 'arr') renderArr(); $('#btnRec').classList.toggle('armed', song.lanes.some(l => l.arm));
+}
+$('#monCb').onchange = () => { if (AUD.mon) AUD.mon.gain.value = $('#monCb').checked ? 1 : 0; };
+$('#inSel').onchange = async () => { if (AUD.stream && !AUD.active) { closeInput(); await ensureInput(); } };
+
+function toggleAudioRec() { AUD.active ? stopAudioRec() : startAudioRec(); }
+async function startAudioRec() {
+  if (AUD.busy) return; AUD.busy = true;
+  try {
+    const lane = song.lanes.findIndex(l => l.arm); if (lane < 0 || !(await ensureInput())) return;
+    ensureEngine(); const sd = stepSec(), count = +$('#countSel').value, pn = song.punch, lp = song.loop; AUD.lane = lane; AUD.chunks = [];
+    let start, quick = false;
+    if (eng.playing && eng.mode === 'arr') { start = Math.round(eng.posFloat()); quick = true; }            // QuickPunch
+    else if (lp.on) start = lp.start; else if (pn.on) start = pn.start; else start = ARR.cursor;
+    AUD.loopLen = lp.on && !quick ? lp.end - lp.start : 0; AUD.end = pn.on && !quick && !lp.on ? pn.end : Infinity; AUD.startPos = start;
+    const rec = new MediaRecorder(AUD.stream); AUD.rec = rec; rec.ondataavailable = ev => AUD.chunks.push(ev.data); rec.onstop = finishAudioRec;
+    let metro0 = eng.metro, began = quick;
+    if (quick) { rec.start(); AUD.recStart = start; }
+    else {
+      const pre = Math.max(count, pn.on ? pn.pre : 0) * 16, from = Math.max(0, start - pre); if (count > 0) eng.metro = true;
+      eng.play('arr', from); if (count === 0 && from === start) { began = true; rec.start(); AUD.recStart = start; eng.metro = metro0; }
+    }
+    AUD.active = true; AUD.metro0 = metro0; $('#btnRec').classList.add('on'); updatePlayBtn();
+    AUD.poll = setInterval(() => {
+      if (!eng.playing && AUD.active && began) { stopAudioRec(); return; }
+      const p = eng.posFloat(); if (p < 0) return;
+      if (!began && p >= start) { began = true; rec.start(); AUD.recStart = p; eng.metro = AUD.metro0; }
+      if (began && p >= AUD.end) stopAudioRec();
+    }, 10);
+    status(quick ? 'QuickPunch: grabando… pulsa ● para terminar.' : (count ? 'Cuenta atrás…' : 'Grabando…') + ' Pulsa ● o ■ para terminar.', 5000);
+  } finally { AUD.busy = false; }
+}
+function stopAudioRec() {
+  if (!AUD.active) return; AUD.active = false; clearInterval(AUD.poll); if (eng) { eng.metro = AUD.metro0; eng.stop(); updatePlayBtn(); }
+  $('#btnRec').classList.remove('on'); if (AUD.rec && AUD.rec.state !== 'inactive') AUD.rec.stop();
+}
+async function finishAudioRec() {
+  try {
+    const raw = await eng.ctx.decodeAudioData(await new Blob(AUD.chunks).arrayBuffer()), sr = raw.sampleRate, sd = stepSec(), lat = Math.max(0, +$('#latMs').value || 0) / 1000;
+    const skip = Math.min(raw.length - 1, Math.round(lat * sr)), full = sliceBuf(raw, skip / sr, raw.duration, false);
+    const ln = song.lanes[AUD.lane]; let ti = ln.ch; if (ti === undefined || !song.tracks[ti] || song.tracks[ti].kind !== 'audio') {
+      const n = song.tracks.length; if (n >= 16) { status('Máximo 16 pistas.'); return; } song.tracks.push(trackNew(ln.name, 'audio', COLORS[n % COLORS.length], null, Math.min(n, NINS - 1))); ln.ch = n; ti = n; rebuildEngine();
+    }
+    const t = song.tracks[ti]; let slot = t.clips.findIndex(c => !c); if (slot < 0) slot = SCENES - 1;
+    const mkId = b => { const id = newId(); AUDIO[id] = { buf: b, name: ln.name }; return id; }, bars = b => Math.min(16, Math.max(1, Math.ceil(b.duration / (sd * 16))));
+    let clip, item, s0 = Math.max(0, Math.round(AUD.recStart || AUD.startPos));
+    if (AUD.loopLen > 0) {                                       // grabación en bucle: una toma por vuelta
+      const per = AUD.loopLen * sd, n = Math.max(1, Math.floor(full.duration / per + 0.2)), takes = [];
+      for (let k = 0; k < n; k++) { const part = sliceBuf(full, k * per, Math.min(full.duration, (k + 1) * per), false); if (part.duration > 0.05) takes.push({ id: mkId(part) }); }
+      clip = { bars: Math.min(16, Math.max(1, Math.ceil(AUD.loopLen / 16))), notes: [], audio: takes[takes.length - 1], takes }; item = { lane: AUD.lane, t: ti, slot, s: s0, l: AUD.loopLen, off: 0, take: takes.length - 1 };
+      status(takes.length + ' toma(s) grabadas en bucle. Elígelas con el selector "Toma" (Más ▾).', 7000);
+    } else {
+      const au = { id: mkId(full) }; clip = { bars: bars(full), notes: [], audio: au }; item = { lane: AUD.lane, t: ti, slot, s: s0, l: Math.max(1, Math.ceil(full.duration / sd)), off: 0 };
+      status('Grabación colocada en ' + ln.name + ' (' + full.duration.toFixed(1) + ' s).', 5000);
+    }
+    t.clips[slot] = clip; song.arr.push(item); resolveOverlap(item); ARR.sel = item; renderAll();
+  } catch (err) { status('No se pudo procesar la grabación: ' + err.message, 7000); }
+  closeInput(); if (song.lanes.some(l => l.arm)) ensureInput();
+}
+// indicador de grabación (bloque rojo que crece) y medidor de entrada
+function recTick() {
+  const cv = $('#inMeter'), g = cv.getContext('2d'); g.fillStyle = '#0d1114'; g.fillRect(0, 0, cv.width, cv.height);
+  if (AUD.an) { const b = new Float32Array(AUD.an.fftSize); AUD.an.getFloatTimeDomainData(b); let pk = 0; for (let i = 0; i < b.length; i++) pk = Math.max(pk, Math.abs(b[i]));
+    const w = Math.min(1, pk * 1.6) * cv.width; g.fillStyle = pk > 0.9 ? '#ff4d4d' : '#4fd37a'; g.fillRect(0, 4, w, cv.height - 8); }
+  const lane = ARR.laneEls && ARR.laneEls[AUD.lane]; let blk = document.getElementById('recblock');
+  if (AUD.active && lane && eng && AUD.recStart !== undefined) {
+    const p = eng.posFloat(); if (!blk || blk.parentNode !== lane) { if (blk) blk.remove(); blk = el('div', 'recblock'); blk.id = 'recblock'; lane.appendChild(blk); }
+    blk.style.left = AUD.recStart * ARR.z + 'px'; blk.style.width = Math.max(0, (p - AUD.recStart) * ARR.z) + 'px';
+  } else if (blk) blk.remove();
 }

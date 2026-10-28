@@ -210,7 +210,7 @@ function frame() {
       });
     } else if (view === 'arr') arrTick(st);
     if (winOpen('mixer')) mixerTick();
-    meterDraw($('#masterMeter'), eng.masterAn); extrasTick(); if (winOpen('rack')) rackTick();
+    meterDraw($('#masterMeter'), eng.masterAn); extrasTick(); recTick(); if (winOpen('rack')) rackTick();
     if (winOpen('roll') && ROLL.cv) {
       const c = curClip(), r = eng.rt[selTrack]; let ps = -1;
       if (c && eng.playing && st >= 0) {

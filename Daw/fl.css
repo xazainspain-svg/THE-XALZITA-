@@ -95,3 +95,8 @@ main{flex:1;overflow:auto;background:#1a1f23;padding:0}
 .insel{width:46px;font-size:10px;padding:0}
 #patName{min-width:96px}
 .ctxmenu{position:fixed;z-index:500;background:#2c333a;border:1px solid #0e1114;box-shadow:0 8px 18px rgba(0,0,0,.6);padding:3px 0;min-width:210px}
+.arm{width:18px;height:18px;padding:0;font:700 10px sans-serif;color:#ff8a80;background:#3a2a2a;border:1px solid #11151a;border-radius:2px}.arm.on{background:#ff3b30;color:#fff;box-shadow:0 0 6px #ff3b30}
+.tport.rec.armed{box-shadow:0 0 8px #ff3b30;border-color:#ff3b30}
+#gRec{gap:6px}#gRec .chk{display:flex;align-items:center;gap:3px;font-size:11px;color:var(--mut)}#gRec select{max-width:120px;font-size:11px}
+#inMeter{background:#0d1114;border:1px solid #070a0c;border-radius:2px}
+.recblock{position:absolute;top:3px;bottom:3px;background:rgba(255,59,48,.45);border:1px solid #ff3b30;border-radius:2px;pointer-events:none;z-index:4}

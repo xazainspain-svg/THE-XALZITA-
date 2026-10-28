@@ -36,6 +36,13 @@
     <button id="wbMixer" class="wb" title="Mixer (F9)">Mixer</button>
     <button id="wbDev" class="wb" title="Instrumento de la pista (F10)">Instrumento</button>
   </div>
+  <div class="tgroup" id="gRec" title="Grabación de audio estilo Pro Tools: arma una pista con R en el Playlist y pulsa ●">
+    <span class="lcdl">ENTRADA</span><select id="inSel"><option value="">Predeterminada</option></select>
+    <label class="chk"><input type="checkbox" id="monCb"> Monitor</label>
+    <select id="countSel"><option value="0">Sin cuenta</option><option value="1">Cuenta 1 compás</option><option value="2">Cuenta 2 compases</option></select>
+    <label class="chk">Lat <input id="latMs" type="number" value="0" min="0" max="500" style="width:42px"> ms</label>
+    <canvas id="inMeter" width="56" height="20"></canvas>
+  </div>
   <div class="tgroup grow"></div>
   <div class="tgroup">
     <button id="btnMetro" class="mini" title="Metrónomo">Metro</button>
