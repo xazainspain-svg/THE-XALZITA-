@@ -1,0 +1,90 @@
+Low Pass|Filters
+High Pass|Filters
+Band Pass|Filters
+Notch|Filters
+Low Shelf|Filters
+High Shelf|Filters
+Peak EQ|Filters
+Auto Wah|Filters
+Vowel|Filters
+Comb Filter|Filters
+DJ Filter|Filters
+Tilt EQ|Filters
+Compressor|Dynamics
+Limiter|Dynamics
+Gate|Dynamics
+Expander|Dynamics
+De-Esser|Dynamics
+Transient Shaper|Dynamics
+Upward Comp|Dynamics
+Pump|Dynamics
+Leveler|Dynamics
+Tremolo|Dynamics
+Squash|Dynamics
+Peak Clipper|Dynamics
+Saturator|Distortion
+Tube|Distortion
+Tape|Distortion
+Hard Clip|Distortion
+Soft Clip|Distortion
+Foldback|Distortion
+Bitcrusher|Distortion
+Decimator|Distortion
+Rectifier|Distortion
+Fuzz|Distortion
+Overdrive|Distortion
+Sine Shaper|Distortion
+Asym Distortion|Distortion
+Exciter|Distortion
+Chorus|Modulation
+Flanger|Modulation
+Phaser|Modulation
+Vibrato|Modulation
+Auto Pan|Modulation
+Ring Mod|Modulation
+Rotary|Modulation
+Ensemble|Modulation
+Freq Shifter|Modulation
+Wobble|Modulation
+Harmonic Tremolo|Modulation
+Dimension|Modulation
+Pitch Shifter|Modulation
+Doubler|Modulation
+Delay|Time
+Ping Pong|Time
+Slapback|Time
+Tape Echo|Time
+Multi Tap|Time
+Reverb|Time
+Room|Time
+Hall|Time
+Plate|Time
+Spring|Time
+Stutter|Time
+Reverse|Time
+Stereo Width|Stereo
+Mid Side|Stereo
+Mono Maker|Stereo
+Pan|Stereo
+Gain|Stereo
+Polarity|Stereo
+Channel Swap|Stereo
+Haas|Stereo
+Crossfeed|Stereo
+Stereo Rotate|Stereo
+Balance|Stereo
+Decorrelator|Stereo
+Tape Stop|Creative
+Lo-Fi|Creative
+Vinyl|Creative
+Radio|Creative
+Telephone|Creative
+Megaphone|Creative
+Robot|Creative
+Underwater|Creative
+Gater|Creative
+Sample Hold Filter|Creative
+Glitch|Creative
+Shimmer|Creative
+Resonator|Creative
+Freeze|Creative

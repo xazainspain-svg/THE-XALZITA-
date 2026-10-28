@@ -1,0 +1,37 @@
+name: Compilar Xaza FX (90 plugins VST3)
+
+on:
+  push:
+    paths: ['Plugins90/**', '.github/workflows/build-plugins90.yml']
+  workflow_dispatch:
+
+jobs:
+  dsp-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prueba de estabilidad del DSP (90 efectos)
+        working-directory: Plugins90
+        run: |
+          g++ -std=c++17 -O2 -fsanitize=address,undefined -I. test/dsp_test.cpp -o dsp_test
+          ./dsp_test plugins.txt
+
+  build-windows:
+    needs: dsp-test
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        category: [Filters, Dynamics, Distortion, Modulation, Time, Stereo, Creative]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configurar (descarga JUCE)
+        run: cmake -S Plugins90 -B build -DCMAKE_BUILD_TYPE=Release -DXFX_CATEGORY=${{ matrix.category }}
+      - name: Compilar
+        run: cmake --build build --config Release --parallel
+      - name: Subir los .vst3
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xaza-FX-${{ matrix.category }}-VST3-Windows
+          path: build/*_artefacts/Release/VST3/*.vst3
+          if-no-files-found: error
