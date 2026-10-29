@@ -18479,6 +18479,45 @@ mod tests {
         c.pixmap.save_png(std::path::PathBuf::from(dir).join("audio_clip_view.png")).unwrap();
     }
 
+    /// Look check for the Session view and the Object mixer with content.
+    #[test]
+    #[ignore]
+    fn session_and_objects_shot() {
+        let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.playlist.reset();
+        let names = ["Intro", "Drums", "Bass", "Chords", "Lead", "Break", "Build", "Drop", "Outro"];
+        let cols = [(0xff, 0x94, 0xa6), (0xff, 0xa5, 0x29), (0xf7, 0xf4, 0x7c), (0x25, 0xff, 0xa8), (0x8b, 0xc5, 0xff), (0x92, 0x7c, 0xe4), (0xd8, 0x6c, 0xe4), (0xe5, 0x53, 0xa0), (0x5c, 0xff, 0xe8)];
+        for (k, (n, col)) in names.iter().zip(cols).enumerate() {
+            let num = k as u16 + 1;
+            if app.state.project.pattern(num).is_none() {
+                app.state.project.patterns.push(os_model::Pattern { number: num, ..Default::default() });
+            }
+            let p = app.state.project.patterns.iter_mut().find(|p| p.number == num).unwrap();
+            p.name = Some((*n).into());
+            p.color = Some(os_model::Rgb::new(col.0, col.1, col.2));
+            p.notes = vec![Note { length: 24, key: 60, ..Note::step(0, 0) }];
+        }
+        app.state.pattern = 3;
+        app.state.z = vec![Win::Playlist, Win::Session];
+        app.state.wins[Win::Playlist.slot().unwrap()].maxed = true;
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(dir.join("session.png")).unwrap();
+        // The object mixer: four inserts placed around the listener.
+        for (n, az, d) in [(1u16, -60.0f32, 0.45f32), (2, 40.0, 0.7), (3, 150.0, 0.5), (4, 0.0, 0.25)] {
+            if let Some(m) = app.state.project.mixer.iter_mut().find(|m| m.index == n) {
+                m.spatial = Some((az, d));
+            }
+        }
+        app.state.selected_mixer = 2;
+        app.state.z = vec![Win::Playlist, Win::Objects];
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(dir.join("objects.png")).unwrap();
+    }
+
     /// Look check for the piano roll's vertical zoom, time markers, Tools menu and snap menus (spec: ui/piano-roll.md
     /// §3a, §10a, §11; ui/piano-snap.md): `OS_SHOT_DIR=dir cargo test -p os-app piano_shots -- --ignored`.
     #[test]
