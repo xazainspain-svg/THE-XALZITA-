@@ -1605,7 +1605,7 @@ impl App {
                  Studio does not read yet.\n\nOpen the project in version 24.2 or later, save it again, then open the new copy \
                  here."
             );
-            self.tell(crate::dialog::Kind::Info, "Project not supported yet", crate::dialog::spans(&["Lemon Studio cannot open ", &name, &rest]));
+            self.tell(crate::dialog::Kind::Info, "Project not supported yet", crate::dialog::spans(&["Xadaw cannot open ", &name, &rest]));
         }
         match result {
             Ok((file, project)) => {
@@ -8551,7 +8551,7 @@ impl App {
             (HELP_MENU, HELP_ABOUT) => {
                 // The Windows build includes the ASIO SDK, which is under version 3 only (THIRD-PARTY-NOTICES.txt §9).
                 let licence = if cfg!(windows) { "the GNU GPL v3" } else { "the GNU GPL v3 or later" };
-                self.state.message = Some(format!("Lemon Studio {} (pre-alpha), free software under {licence}", env!("CARGO_PKG_VERSION")));
+                self.state.message = Some(format!("Xadaw {} (pre-alpha), free software under {licence}", env!("CARGO_PKG_VERSION")));
             }
             (ADD_MENU | TOOLS_MENU, i) if item_at(menu, i).is_some_and(|it| it.label == "Pattern") => {
                 let at = crate::patterns::box_at_mouse(self.mouse);
@@ -8797,7 +8797,7 @@ impl App {
         let _ = std::fs::create_dir_all(&dir);
         let start = self.state.bar.user_current().map_or_else(|| "My toolbar".to_string(), |p| p.name.clone());
         let dlg = FileDlg::new(Mode::Save, "Save toolbar preset as", "toolbar preset", crate::dialog::Then::SaveToolbarPreset)
-            .filter("Lemon Studio toolbar preset", &[EXT])
+            .filter("Xadaw toolbar preset", &[EXT])
             .start(Some(&dir))
             .name(&format!("{start}.{EXT}"));
         self.file_dialog(dlg);
@@ -11905,8 +11905,8 @@ mod tests {
         let r = hit_rect(&app, &Action::Settings(SAct::Check("Pickup (takeover mode)")));
         click(&mut app, &mut c, r);
         assert_eq!(app.state.message.as_deref(), Some("Pickup (takeover mode): on"));
-        assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Body) && h.hint == "Lemon Studio has no MIDI scripts"));
-        assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Body) && h.hint == "Lemon Studio has no playlist performance mode"));
+        assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Body) && h.hint == "Xadaw has no MIDI scripts"));
+        assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Body) && h.hint == "Xadaw has no playlist performance mode"));
         let r = hit_rect(&app, &Action::Settings(SAct::Tab(PROJECT)));
         click(&mut app, &mut c, r);
         assert!(app.hits.iter().any(|h| matches!(h.action, Action::Settings(SAct::Combo("Ask for data folder", ..)))), "Ask for data folder works");
@@ -12199,7 +12199,7 @@ mod tests {
                 (Kind::Question, "Confirm", spans(&["Save the changes to ", "Demo.flp", " before closing?"]), &[Answer::Yes, Answer::No, Answer::Cancel][..], "question"),
                 (Kind::Warning, "Confirm save as", spans(&["", "Demo.flp", " already exists.\nDo you want to replace it?"]), &[Answer::Yes, Answer::No][..], "warning"),
                 (Kind::Error, "Error", spans(&["The file doesn't exist or has been moved."]), &[Answer::Ok][..], "error"),
-                (Kind::Info, "Project not supported yet", spans(&["Lemon Studio cannot open ", "Old.flp", " yet.\n\nIt was saved by version 12.3. Projects saved before version 24.2 use an older channel layout that Lemon Studio does not read yet."]), &[Answer::Ok][..], "info"),
+                (Kind::Info, "Project not supported yet", spans(&["Xadaw cannot open ", "Old.flp", " yet.\n\nIt was saved by version 12.3. Projects saved before version 24.2 use an older channel layout that Xadaw does not read yet."]), &[Answer::Ok][..], "info"),
             ] {
                 let mut m = Msg::new(kind, title, text, buttons, Then::Nothing);
                 // As in the app, the replace question starts on No.
@@ -19104,7 +19104,7 @@ mod tests {
         right(&mut app, &mut c, help, (help.cx() + 40.0, help.cy()));
         assert!(app.state.message.is_none());
         right(&mut app, &mut c, help, (help.cx(), help.cy()));
-        assert!(app.state.message.as_deref().is_some_and(|m| m.starts_with("Lemon Studio ")), "{:?}", app.state.message);
+        assert!(app.state.message.as_deref().is_some_and(|m| m.starts_with("Xadaw ")), "{:?}", app.state.message);
         // Undo: EDIT > Undo; its right click does nothing yet.
         let undo = hit_rect(&app, &Action::Util(Util::Undo));
         app.state.message = None;

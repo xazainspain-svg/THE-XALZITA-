@@ -290,7 +290,7 @@ struct HostData {
     run: Mutex<Vec<(u32, bool, u64)>>,
 }
 
-static HOST_NAME: &CStr = c"Lemon Studio";
+static HOST_NAME: &CStr = c"Xadaw";
 static HOST_URL: &CStr = c"";
 static HOST_VERSION: &CStr = c"0.0.1";
 

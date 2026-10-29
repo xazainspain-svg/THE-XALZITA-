@@ -1,0 +1,35 @@
+name: Compilar Xadaw (Windows .exe)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['claude/**']
+    paths: ['Lemon-Studio/**', '.github/workflows/build-xadaw.yml']
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Lemon-Studio
+      - name: Compilar Xadaw (release)
+        working-directory: Lemon-Studio
+        run: cargo build -p os-app --release --locked
+      - name: Preparar Xadaw.exe
+        shell: bash
+        run: |
+          mkdir out
+          cp Lemon-Studio/target/release/lemonstudio.exe out/Xadaw.exe
+          cp Lemon-Studio/LICENSE out/LICENSE.txt
+          cp Lemon-Studio/THIRD-PARTY-NOTICES.txt out/THIRD-PARTY-NOTICES.txt
+          ls -l out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Xadaw-Windows
+          path: out/
