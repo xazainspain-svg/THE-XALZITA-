@@ -36,6 +36,8 @@ pub enum Win {
     Perf,
     /// The Tempo tapper (spec: ui/tempo-tapper.md).
     Tapper,
+    /// The Session view: launch pads for the patterns (Xaza).
+    Session,
     /// The Touch controller (spec: ui/touch-controller.md).
     Touch,
     /// The piano roll's Strum dialog (spec: ui/piano-strum.md).
@@ -175,6 +177,8 @@ pub enum Action {
     Perf(crate::perf::PerfAct),
     /// The Tempo tapper's pad and Apply tempo switch (spec: ui/tempo-tapper.md).
     Tapper(crate::tapper::TapAct),
+    /// A Session view pad: launches that pattern (Xaza).
+    Session(u16),
     /// The Touch controller's controls (spec: ui/touch-controller.md).
     Touch(crate::touch::TouchAct),
     /// The Strum dialog's switches and buttons (spec: ui/piano-strum.md).
@@ -955,6 +959,7 @@ pub struct State {
     pub perf: crate::perf::Perf,
     /// The Tempo tapper: where it is, the count of taps, the pad's flash.
     pub tapper: crate::tapper::TapperUi,
+    pub session: views::session::SessionUi,
     pub touch: crate::touch::TouchUi,
     /// The piano roll's Strum dialog: where it is, its settings and its preview session.
     pub strum: crate::strum::StrumUi,
@@ -1413,6 +1418,7 @@ impl App {
                 cpu: crate::cpu::Cpu::saved(),
                 perf: crate::perf::Perf::default(),
                 tapper: Default::default(),
+                session: Default::default(),
                 touch: Default::default(),
                 strum: Default::default(),
                 arp: Default::default(),
@@ -1890,7 +1896,7 @@ impl App {
             self.invalidate();
             return;
         }
-        let tool = |w: &Win| matches!(w, Win::Perf | Win::Tapper | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg);
+        let tool = |w: &Win| matches!(w, Win::Perf | Win::Tapper | Win::Session | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg);
         if let Some(&w) = self.state.z.last().filter(|w| !self.state.no_focus && tool(w)) {
             self.act(Action::CloseWin(w));
             self.invalidate();
@@ -2928,7 +2934,7 @@ impl App {
             .iter()
             .skip_while(|&&w| w != Win::Playlist)
             .skip(1)
-            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg))
+            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper | Win::Session | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg))
             .map(|&w| Cover { bounds: self.win_bounds(w).outset(1.0), win: Some(w), solid: self.win_solid(w) })
             .collect();
         if !s.toolbar.hidden {
@@ -2954,6 +2960,7 @@ impl App {
             Win::Plugin => s.project.channels.get(s.plugin_channel).map(|_| views::channel_win::rect(s)),
             Win::Perf => Some(views::perf::rect(s)),
             Win::Tapper => Some(views::tapper::rect(s)),
+            Win::Session => Some(views::session::rect(s)),
             Win::Touch => Some(views::touch::rect(s)),
             Win::Strum => Some(views::strum::rect(s)),
             Win::Arp => Some(views::arpeggiate::rect(s)),
@@ -3606,6 +3613,7 @@ impl App {
             Win::ChannelRack => self.damage_rect(views::rack::bounds(&self.state)),
             Win::Perf => self.damage_rect(views::perf::bounds(&self.state)),
             Win::Tapper => self.damage_rect(views::tapper::bounds(&self.state)),
+            Win::Session => self.damage_rect(views::session::bounds(&self.state)),
             Win::Touch => self.damage_rect(views::touch::bounds(&self.state)),
             Win::Strum => self.damage_rect(views::strum::bounds(&self.state)),
             Win::Arp => self.damage_rect(views::arpeggiate::bounds(&self.state)),
@@ -5755,6 +5763,7 @@ impl App {
             Win::Plugin => views::channel_win::bounds(&self.state),
             Win::Perf => views::perf::bounds(&self.state),
             Win::Tapper => views::tapper::bounds(&self.state),
+            Win::Session => views::session::bounds(&self.state),
             Win::Touch => views::touch::bounds(&self.state),
             Win::Strum => views::strum::bounds(&self.state),
             Win::Arp => views::arpeggiate::bounds(&self.state),
@@ -7765,6 +7774,24 @@ impl App {
             Action::Close => self.want_close = true,
             Action::DragWindow => self.want_drag_window = true,
             Action::Bar(h) => self.bar_hit(h),
+            Action::Session(n) => {
+                let playing = self.transport.playing();
+                let same = self.state.pattern == n && !self.state.song_mode;
+                self.state.pattern = n;
+                self.state.playlist.source = Some(os_model::ClipSource::Pattern(n));
+                if self.state.song_mode {
+                    self.act(Action::PatSong(false));
+                }
+                if playing && same {
+                    self.act(Action::Stop);
+                } else {
+                    if playing {
+                        self.act(Action::Stop);
+                    }
+                    self.act(Action::Play);
+                }
+                self.damage_win(Win::Session);
+            }
             Action::Play => {
                 self.perf_transport();
                 match self.transport.state() {
@@ -8012,6 +8039,7 @@ impl App {
                     Win::Plugin => s.plugin_pos,
                     Win::Perf => s.perf.pos,
                     Win::Tapper => s.tapper.pos,
+                    Win::Session => s.session.pos,
                     Win::Touch => s.touch.pos,
                     Win::Strum => s.strum.pos,
                     Win::Arp => s.arp.pos,
