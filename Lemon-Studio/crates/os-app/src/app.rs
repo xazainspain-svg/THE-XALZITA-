@@ -13535,6 +13535,42 @@ mod tests {
         let _ = std::fs::remove_file(&wav);
     }
 
+    /// Arranger track (Xaza, after Studio One): sections made by markers move, duplicate and delete as blocks.
+    #[test]
+    fn arranger_sections_move_duplicate_delete() {
+        use crate::playlist as pl;
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.project.patterns[0].notes = vec![Note { length: 24, key: 60, ..Note::step(0, 0) }];
+        let bar = 4 * u32::from(app.state.project.ppq);
+        {
+            let a = pl::arr_mut(&mut app.state);
+            a.clips.push(os_model::Clip::new(0, 2 * bar, 0, os_model::ClipSource::Pattern(1)));
+            a.clips.push(os_model::Clip::new(2 * bar, bar, 0, os_model::ClipSource::Pattern(1)));
+            a.markers.push(os_model::TimeMarker::new(0, "Verse"));
+            a.markers.push(os_model::TimeMarker::new(2 * bar, "Chorus"));
+        }
+        let secs = pl::sections(&app.state);
+        assert_eq!(secs.iter().map(|x| (x.name.as_str(), x.start, x.end)).collect::<Vec<_>>(), vec![("Verse", 0, 2 * bar), ("Chorus", 2 * bar, 3 * bar)]);
+        // Move the Verse later: the Chorus comes first.
+        app.state.playlist.pos = 0;
+        assert!(pl::move_section(&mut app.state, 1));
+        let secs = pl::sections(&app.state);
+        assert_eq!((secs[0].name.as_str(), secs[0].start, secs[0].end), ("Chorus", 0, bar));
+        assert_eq!((secs[1].name.as_str(), secs[1].start, secs[1].end), ("Verse", bar, 3 * bar));
+        let lens: Vec<(u32, u32)> = pl::clips(&app.state).iter().map(|c| (c.position, c.length)).collect();
+        assert!(lens.contains(&(0, bar)) && lens.contains(&(bar, 2 * bar)), "{lens:?}");
+        // Duplicate the Chorus, then delete the copy.
+        app.state.playlist.pos = 0;
+        assert!(pl::duplicate_section(&mut app.state));
+        assert_eq!(pl::sections(&app.state).len(), 3);
+        let n = pl::clips(&app.state).len();
+        app.state.playlist.pos = bar;
+        assert!(pl::delete_section(&mut app.state));
+        assert_eq!(pl::sections(&app.state).len(), 2);
+        assert_eq!(pl::clips(&app.state).len(), n - 1);
+    }
+
     /// Audio-clip channels (dropped audio, FL's audio clips) are hosted and opened by Lemon Sampler, never the info
     /// window (spec: plugins/lemon-sampler.md §7).
     #[test]

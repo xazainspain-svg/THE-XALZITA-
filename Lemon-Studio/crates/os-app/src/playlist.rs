@@ -238,6 +238,10 @@ pub enum Cmd {
     AutoMode,
     /// Independent clips on / off.
     Independent,
+    /// Arranger track (Studio One): the sections the time markers make, moved, duplicated and deleted as blocks.
+    SectionMove(i32),
+    SectionDuplicate,
+    SectionDelete,
     /// Comp (Xaza): inside the time selection only the last selected take (its track) plays.
     Comp,
     Delete,
@@ -2181,6 +2185,143 @@ fn make_unique_lane(s: &mut State, j: usize, old: u16, new: u16) {
     arr_mut(s).clips[j].source = ClipSource::Channel(idx);
 }
 
+/// A section of the song (Studio One's arranger track): from a plain time marker to the next one, the last to the end
+/// of the last clip.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Section {
+    pub name: String,
+    pub start: u32,
+    pub end: u32,
+}
+
+pub fn sections(s: &State) -> Vec<Section> {
+    let mut m: Vec<&TimeMarker> = markers(s).iter().filter(|m| m.kind == TimeMarker::PLAIN).collect();
+    m.sort_by_key(|m| m.position);
+    let end = clips(s).iter().map(Clip::end).max().unwrap_or(0);
+    m.iter()
+        .enumerate()
+        .map(|(k, x)| Section { name: x.name.clone(), start: x.position, end: m.get(k + 1).map_or(end.max(x.position), |n| n.position) })
+        .filter(|sec| sec.end > sec.start)
+        .collect()
+}
+
+/// The section the song position (or the time selection's start) is in.
+fn section_here(s: &State) -> Option<usize> {
+    let at = s.playlist.range.map_or(s.playlist.pos, |r| r.0);
+    sections(s).iter().position(|sec| at >= sec.start && at < sec.end)
+}
+
+fn cut_at(s: &mut State, t: u32) {
+    let ids: Vec<usize> = clips(s).iter().enumerate().filter(|(_, c)| c.position < t && c.end() > t).map(|(i, _)| i).collect();
+    for i in ids {
+        split(s, i, t);
+    }
+}
+
+/// Moves the current section `d` places along (-1 earlier, 1 later): it swaps places with its neighbour, clips and
+/// markers together.
+pub fn move_section(s: &mut State, d: i32) -> bool {
+    let secs = sections(s);
+    let Some(k) = section_here(s) else { return false };
+    let j = k as i32 + d.signum();
+    if j < 0 || j as usize >= secs.len() {
+        return false;
+    }
+    let (a, b) = if d < 0 { (secs[j as usize].clone(), secs[k].clone()) } else { (secs[k].clone(), secs[j as usize].clone()) };
+    for t in [a.start, a.end, b.end] {
+        cut_at(s, t);
+    }
+    let (la, lb) = (a.end - a.start, b.end - b.start);
+    let arr = arr_mut(s);
+    for c in &mut arr.clips {
+        if c.position >= a.start && c.position < a.end {
+            c.position += lb;
+        } else if c.position >= b.start && c.position < b.end {
+            c.position -= la;
+        }
+    }
+    for m in &mut arr.markers {
+        if m.position == a.start && m.kind == TimeMarker::PLAIN {
+            m.position = a.start + lb;
+        } else if m.position == b.start && m.kind == TimeMarker::PLAIN {
+            m.position = a.start;
+        }
+    }
+    arr.markers.sort_by_key(|m| m.position);
+    // The song position follows the section.
+    s.playlist.pos = (i64::from(s.playlist.pos) + if d < 0 { -i64::from(la) } else { i64::from(lb) }).max(0) as u32;
+    s.playlist.range = None;
+    s.piano.dirty = true;
+    true
+}
+
+/// Duplicates the current section right after itself (with its clips, independent of the originals) and everything after
+/// it moves later.
+pub fn duplicate_section(s: &mut State) -> bool {
+    let secs = sections(s);
+    let Some(k) = section_here(s) else { return false };
+    let sec = secs[k].clone();
+    cut_at(s, sec.start);
+    cut_at(s, sec.end);
+    let len = sec.end - sec.start;
+    let inside: Vec<Clip> = clips(s).iter().filter(|c| c.position >= sec.start && c.end() <= sec.end).copied().collect();
+    let arr = arr_mut(s);
+    for c in &mut arr.clips {
+        if c.position >= sec.end {
+            c.position += len;
+        }
+    }
+    for m in &mut arr.markers {
+        if m.position >= sec.end {
+            m.position += len;
+        }
+    }
+    let first = arr.clips.len();
+    for c in inside {
+        let mut n = c;
+        n.position += len;
+        n.set_id(0);
+        arr.clips.push(n);
+    }
+    let mut mk = arr.markers.iter().find(|m| m.position == sec.start && m.kind == TimeMarker::PLAIN).cloned().unwrap_or_else(|| TimeMarker::new(sec.start, &sec.name));
+    mk.position = sec.end;
+    mk.name = format!("{} #2", sec.name.split(" #").next().unwrap_or(&sec.name));
+    arr.markers.push(mk);
+    arr.markers.sort_by_key(|m| m.position);
+    independent_copies(s, first);
+    s.playlist.sel.clear();
+    s.piano.dirty = true;
+    true
+}
+
+/// Deletes the current section: its clips and its marker go, and everything after it moves earlier.
+pub fn delete_section(s: &mut State) -> bool {
+    let secs = sections(s);
+    let Some(k) = section_here(s) else { return false };
+    let sec = secs[k].clone();
+    cut_at(s, sec.start);
+    cut_at(s, sec.end);
+    let inside: Vec<usize> = clips(s).iter().enumerate().filter(|(_, c)| c.position >= sec.start && c.end() <= sec.end).map(|(i, _)| i).collect();
+    delete(s, inside);
+    let len = sec.end - sec.start;
+    let arr = arr_mut(s);
+    for c in &mut arr.clips {
+        if c.position >= sec.end {
+            c.position -= len;
+        }
+    }
+    arr.markers.retain(|m| !(m.position == sec.start && m.kind == TimeMarker::PLAIN));
+    for m in &mut arr.markers {
+        if m.position >= sec.end {
+            m.position -= len;
+        }
+    }
+    s.playlist.sel.clear();
+    s.playlist.range = None;
+    s.piano.dirty = true;
+    true
+}
+
 /// Independent clips: each pattern clip added since `from` (a duplicate or a paste) gets a pattern of its own, so that
 /// editing one never changes the other.
 pub fn independent_copies(s: &mut State, from: usize) {
@@ -2722,6 +2863,10 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
                 PItem::new("Paste", Cmd::Paste).key("Ctrl+V"),
                 PItem::new("Duplicate", Cmd::Duplicate).key("Ctrl+B"),
                 PItem::new("Strip silence", Cmd::StripSilence).key("Alt+S"),
+                PItem::new("Section: move left (earlier)", Cmd::SectionMove(-1)).key("Ctrl+Alt+Left"),
+                PItem::new("Section: move right (later)", Cmd::SectionMove(1)).key("Ctrl+Alt+Right"),
+                PItem::new("Section: duplicate", Cmd::SectionDuplicate),
+                PItem::new("Section: delete", Cmd::SectionDelete),
                 PItem::new("Separate at position / selection", Cmd::Separate).key("Alt+E"),
                 PItem::new("Heal separation", Cmd::Heal).key("Alt+H"),
                 PItem::new("Trim to time selection", Cmd::TrimRange).key("Alt+R"),
@@ -4677,6 +4822,18 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             snapshot_as(s, "Trim to selection");
             trim_range(s);
             None
+        }
+        Cmd::SectionMove(d) => {
+            snapshot_as(s, "Move section");
+            Some(if move_section(s, d) { "Section moved".to_string() } else { "No section there: add markers (Alt+T) to split the song into sections".to_string() })
+        }
+        Cmd::SectionDuplicate => {
+            snapshot_as(s, "Duplicate section");
+            Some(if duplicate_section(s) { "Section duplicated".to_string() } else { "No section at the song position".to_string() })
+        }
+        Cmd::SectionDelete => {
+            snapshot_as(s, "Delete section");
+            Some(if delete_section(s) { "Section deleted".to_string() } else { "No section at the song position".to_string() })
         }
         Cmd::Independent => {
             s.playlist.independent = !s.playlist.independent;
