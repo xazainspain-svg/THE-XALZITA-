@@ -309,6 +309,8 @@ pub enum Cmd {
     /// `auto_params`, on the track above it; the lane's own selector (`.0` = the automation clip) switches the parameter.
     AutomateClip(usize, usize),
     AutoTarget(usize, usize),
+    /// Macro control (Studio One): the lane also drives (or stops driving) parameter `.1`.
+    MacroToggle(usize, usize),
     ClipPreview(usize),
     /// A picker item's menu (§10a) on an audio or automation clip source: the command and the source's channel index.
     Pick(PickCmd, u16),
@@ -3207,8 +3209,39 @@ pub fn lane_label(s: &State, j: usize) -> Option<&'static str> {
     let ai = lane_audio(s, j)?;
     let ClipSource::Channel(ach) = clips(s)[ai].source else { return None };
     let ClipSource::Channel(lch) = clips(s)[j].source else { return None };
-    let tgt = s.project.automation(lch)?.targets.first().copied()?;
-    auto_params(s, ach).into_iter().find(|p| p.1 == tgt).map(|p| p.0)
+    let targets = &s.project.automation(lch)?.targets;
+    let names: Vec<&'static str> = auto_params(s, ach).into_iter().filter(|p| targets.contains(&p.1)).map(|p| p.0).collect();
+    match names.len() {
+        0 => None,
+        1 => Some(names[0]),
+        _ => Some("Macro"),
+    }
+}
+
+/// Makes the lane a macro: it also drives parameter `k` (or lets it go; one parameter always stays).
+pub fn macro_toggle(s: &mut State, j: usize, k: usize) -> Option<String> {
+    let ai = lane_audio(s, j)?;
+    let ClipSource::Channel(ach) = clips(s)[ai].source else { return None };
+    let ClipSource::Channel(lch) = clips(s)[j].source else { return None };
+    let (label, tgt, _) = *auto_params(s, ach).get(k)?;
+    let a = s.project.automation_mut(lch)?;
+    let msg = if let Some(at) = a.targets.iter().position(|t| *t == tgt) {
+        if a.targets.len() < 2 {
+            return Some("A lane keeps at least one parameter".to_string());
+        }
+        a.targets.remove(at);
+        format!("The lane no longer drives {label}")
+    } else {
+        a.targets.push(tgt);
+        format!("The lane also drives {label}")
+    };
+    let n = a.targets.len();
+    let sample = s.project.channel(ach).and_then(|x| x.name.clone()).unwrap_or_else(|| "Audio".into());
+    if let Some(c) = s.project.channels.iter_mut().find(|c| c.index == lch) {
+        c.name = Some(if n > 1 { format!("{sample} - Macro ({n})") } else { format!("{sample} - {label}") });
+    }
+    s.piano.dirty = true;
+    Some(msg)
 }
 
 /// Gives audio clip `i` an automation lane for parameter `k` inside it: the lane's clip spans the audio clip on its own
@@ -3258,6 +3291,11 @@ pub fn lane_selector(s: &State, j: usize, x: f32, y: f32) -> Option<Popup> {
     let mut items = vec![PItem::head("Automate")];
     for (k, (label, tgt, _)) in auto_params(s, ach).into_iter().enumerate() {
         items.push(PItem::new(label, Cmd::AutoTarget(j, k)).mark(Mark::Check(cur == Some(tgt))));
+    }
+    items.push(PItem::head("Macro: also drive"));
+    let all = s.project.automation(lch).map(|a| a.targets.clone()).unwrap_or_default();
+    for (k, (label, tgt, _)) in auto_params(s, ach).into_iter().enumerate() {
+        items.push(PItem::new(label, Cmd::MacroToggle(j, k)).mark(Mark::Check(all.contains(&tgt))));
     }
     Some(Popup { x, y, items, sub: None, scroll: [0; 2] })
 }
@@ -5302,6 +5340,10 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::AutomateClip(i, k) => {
             snapshot_as(s, "Automation lane");
             automate_clip(s, i, k)
+        }
+        Cmd::MacroToggle(j, k) => {
+            snapshot_as(s, "Macro lane");
+            macro_toggle(s, j, k)
         }
         Cmd::AutoTarget(j, k) => {
             snapshot_as(s, "Automation lane parameter");

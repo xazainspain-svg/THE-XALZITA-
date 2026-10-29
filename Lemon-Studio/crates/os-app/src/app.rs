@@ -13619,6 +13619,29 @@ mod tests {
         assert!(pl::sections(&app.state).is_empty(), "chord markers are not song sections");
     }
 
+    /// Macro controls (Xaza, after Studio One): one lane drives several parameters of its audio clip at once.
+    #[test]
+    fn a_lane_can_be_a_macro_for_several_parameters() {
+        use crate::playlist as pl;
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::default();
+        app.plugins.available = crate::plugins::builtin();
+        let wav = std::env::temp_dir().join(format!("os-macro-{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.5f32; 96000]).unwrap();
+        let ai = pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("clip");
+        pl::automate_clip(&mut app.state, ai, 0).expect("lane");
+        let lane = pl::embedded_lane(&app.state, ai).unwrap();
+        let os_model::ClipSource::Channel(lch) = pl::clips(&app.state)[lane].source else { panic!() };
+        assert_eq!(pl::lane_label(&app.state, lane), Some("Channel volume"));
+        pl::macro_toggle(&mut app.state, lane, 3).expect("add cutoff");
+        assert_eq!(app.state.project.automation(lch).unwrap().targets.len(), 2, "one lane, two parameters");
+        assert_eq!(pl::lane_label(&app.state, lane), Some("Macro"));
+        pl::macro_toggle(&mut app.state, lane, 3).expect("remove cutoff");
+        assert_eq!(app.state.project.automation(lch).unwrap().targets.len(), 1);
+        assert!(pl::macro_toggle(&mut app.state, lane, 0).unwrap().contains("at least one"));
+        let _ = std::fs::remove_file(&wav);
+    }
+
     /// Audio-clip channels (dropped audio, FL's audio clips) are hosted and opened by Lemon Sampler, never the info
     /// window (spec: plugins/lemon-sampler.md §7).
     #[test]
