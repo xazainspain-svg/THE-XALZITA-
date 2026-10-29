@@ -11,8 +11,8 @@ const dbTxt = v => { const d = dbOf(v); return d === -Infinity ? '-inf' : (d > 0
 
 function renderMixer() {
   const root = $('#mixer'); root.innerHTML = ''; mixMeters = [];
-  const strips = el('div', 'strips'), panel = el('div', 'fxpanel');
-  root.append(strips, panel);
+  const top = el('div', 'mixtop'), strips = el('div', 'strips'), panel = el('div', 'fxpanel'), dv = el('div', 'devview');
+  top.append(strips, panel); root.append(top, dv); panel.hidden = !MIXG; renderDeviceView(dv);
 
   const mkStrip = (idx, name, color, get, set, isMaster) => {
     const s = el('div', 'strip' + (mixSel === idx ? ' sel' : '') + (isMaster ? ' master' : '')); s.style.setProperty('--c', color);
@@ -25,7 +25,7 @@ function renderMixer() {
       top.append(led, num, so);
       const pk = makeKnob('PAN', -1, 1, ins.pan, 0, v => { ins.pan = v; if (eng) eng.applyMix(); autoRec('i' + idx + '.pan', v); }, 30, 'i' + idx + '.pan'); s.append(top, pk.el);
     } else { top.append(num); s.appendChild(top); }
-    const fw = el('div', 'sfader'), cv = el('canvas'); cv.width = 22; cv.height = 170;
+    const fw = el('div', 'sfader'), cv = el('canvas'); cv.width = 22; cv.height = 128;
     const f = el('input'); f.type = 'range'; f.min = 0; f.max = 1.25; f.step = 0.005; f.value = get(); f.className = 'fader'; f.dataset.auto = isMaster ? 'm.vol' : 'i' + idx + '.vol';
     const db = el('div', 'sdb', dbTxt(get()));
     f.oninput = () => { set(+f.value); db.textContent = dbTxt(+f.value); if (eng) eng.applyMix(); autoRec(isMaster ? 'm.vol' : 'i' + idx + '.vol', +f.value); };
@@ -49,30 +49,15 @@ function renderMixer() {
     const idx = -2 - k, s = el('div', 'strip ret' + (mixSel === idx ? ' sel' : '')); s.style.setProperty('--c', '#35c9c9');
     const nm = el('div', 'sname', k ? 'Retorno B' : 'Retorno A'); nm.onclick = () => { mixSel = idx; renderMixer(); };
     s.append(nm, el('div', 'sdots', FX_DEFS[r.fx.type].name));
-    const fw = el('div', 'sfader'), cv = el('canvas'); cv.width = 22; cv.height = 170;
+    const fw = el('div', 'sfader'), cv = el('canvas'); cv.width = 22; cv.height = 128;
     const f = el('input'); f.type = 'range'; f.min = 0; f.max = 1.25; f.step = 0.005; f.value = r.vol; f.className = 'fader';
     const db = el('div', 'sdb', dbTxt(r.vol)); f.oninput = () => { r.vol = +f.value; db.textContent = dbTxt(r.vol); if (eng) eng.applyMix(); autoRec('r' + k + '.vol', r.vol); };
     fw.append(cv, f); s.append(fw, db); mixMeters.push({ cv, lv: [0, 0], idx: idx }); strips.appendChild(s);
   });
 
-  const tg = el('div', 'shead'); [['Efectos', false], ['Grupos / VCA', true]].forEach(([l, v]) => { const b = el('button', MIXG === v ? 'on' : '', l); b.onclick = () => { MIXG = v; renderMixer(); }; tg.appendChild(b); });
-  panel.appendChild(tg); if (MIXG) { renderGroups(panel); return; }
-  // ---- panel de ranuras de efectos
-  if (mixSel <= -2) {
-    const k = -2 - mixSel, r = song.returns[k]; panel.appendChild(el('h3', '', r.name));
-    panel.appendChild(el('div', 'hint', 'Las pistas envían señal aquí con los potenciómetros "Envío" de la vista Session. Salida 100% efecto.'));
-    const slot = el('div', 'slot used'); FX_DEFS[r.fx.type].params.forEach(d => slider(slot, d.n, d.min, d.max, r.fx.p[d.k], d.step, v => { r.fx.p[d.k] = v; if (eng && eng.ret[k]) eng.ret[k].fx.update(); }, d.log));
-    panel.appendChild(slot); return;
-  }
-  if (mixSel < 0) { panel.appendChild(el('h3', '', 'Master')); panel.appendChild(el('div', 'hint', 'El master lleva un limitador fijo (-3 dB) para evitar saturación digital. Los efectos se insertan en cada insert.')); return; }
-  const ins = song.inserts[mixSel];
-  panel.appendChild(el('h3', '', ins.name + ' — ranuras de efectos'));
-  const routed = song.tracks.map((t, i) => [t, i]).filter(x => x[0].insert === mixSel);
-  panel.appendChild(el('div', 'hint', routed.length ? 'Recibe: ' + routed.map(x => x[0].name).join(', ') : 'Ninguna pista llega a este insert. Elige el insert de cada pista en la vista Session (selector "Insert").'));
-  buildFxSlots(panel, mixSel, () => renderMixer());
+  if (MIXG) renderGroups(panel);
 }
 
-// Ranuras de efectos de un insert (las usan el Mixer y la cadena desplegable del Playlist).
 function buildFxSlots(parent, k0, rerender) {
   const ins = song.inserts[k0];
   for (let k = 0; k < NSLOTS; k++) {
@@ -130,4 +115,69 @@ function renderGroups(panel) {
     box.appendChild(mem); panel.appendChild(box);
   });
   const add = el('button', '', '+ Nuevo grupo'); add.onclick = () => { song.groups.push({ name: 'Grupo ' + (song.groups.length + 1), vca: 1, mute: false, solo: false }); renderMixer(); }; panel.appendChild(add);
+}
+
+// ----------------------------------------------------------------- vista de dispositivos (estilo Ableton Live)
+// Cadena horizontal de módulos: barra de título con encendido y plegado, perillas con su valor, reordenar arrastrando.
+const FX_COLORS = { filter: '#7a8a99', delay: '#8a7aa6', reverb: '#6a8f8a', dist: '#a8705a', chorus: '#7a96b3', comp: '#8d9a6a', eq: '#a69a6a', peq: '#a69a6a', duck: '#9a6a7a' };
+function fmtParam(d, v) {
+  if (d.k === 'type') return v >= 0.5 ? 'HP' : 'LP';
+  if (d.k === 'src') return 'Insert ' + Math.round(v);
+  const n = d.n;
+  if (/Hz/.test(n)) return v >= 1000 ? (v / 1000).toFixed(v >= 10000 ? 1 : 2) + ' kHz' : Math.round(v) + ' Hz';
+  if (/dB/.test(n)) return (v > 0 ? '+' : '') + v.toFixed(1) + ' dB';
+  if (/ms/.test(n)) return Math.round(v) + ' ms';
+  if (d.k === 'time') return Math.round(v * 1000) + ' ms';
+  if (d.k === 'depth' && d.max < 0.1) return (v * 1000).toFixed(1) + ' ms';
+  if (d.max <= 1.01 && d.min >= -0.01) return Math.round(v * 100) + ' %';
+  return v.toFixed(Math.abs(v) < 10 ? 2 : 1);
+}
+function deviceEl(f, o) {                                    // o: {k, s, update, rebuild, rerender, movable, removable, powerable}
+  const col = FX_COLORS[f.type] || '#7a8a99', dev = el('div', 'dev2' + (f.fold ? ' fold' : '') + (f.on === false ? ' off' : '')); dev.style.setProperty('--dc', col);
+  const head = el('div', 'dh'), pw = el('button', 'dpw' + (f.on !== false ? ' on' : ''), ''); pw.title = 'Activar / desactivar el dispositivo';
+  const name = el('span', 'dn', FX_DEFS[f.type].name), fd = el('button', 'dfold', f.fold ? '▸' : '▾'); fd.title = 'Plegar / desplegar';
+  const rm = el('button', 'dx', '✕'); rm.title = 'Quitar el dispositivo';
+  if (o.powerable !== false) head.appendChild(pw); head.appendChild(name); head.appendChild(fd); if (o.removable !== false) head.appendChild(rm);
+  pw.onclick = () => { f.on = f.on === false; o.rebuild(); o.rerender(); }; fd.onclick = () => { f.fold = !f.fold; o.rerender(); }; rm.onclick = () => o.remove();
+  dev.appendChild(head);
+  if (o.movable) {                                           // arrastrar para reordenar
+    head.draggable = true; head.ondragstart = e => { e.dataTransfer.setData('xaza/dev', String(o.s)); dev.classList.add('drag'); }; head.ondragend = () => dev.classList.remove('drag');
+    dev.ondragover = e => { if (e.dataTransfer.types.includes('xaza/dev')) { e.preventDefault(); dev.classList.add('over'); } }; dev.ondragleave = () => dev.classList.remove('over');
+    dev.ondrop = e => { e.preventDefault(); const from = +e.dataTransfer.getData('xaza/dev'); if (isNaN(from) || from === o.s) return; o.move(from, o.s); };
+  }
+  if (f.fold) { dev.title = FX_DEFS[f.type].name; return dev; }
+  const body = el('div', 'dbody'), P = FX_PRESETS[f.type];
+  if (P) { const ps = el('select', 'dpre'); const p0 = el('option', '', 'Preset'); p0.value = ''; ps.appendChild(p0); Object.keys(P).forEach(n => { const q = el('option', '', n); q.value = n; ps.appendChild(q); });
+    ps.onchange = () => { if (!ps.value) return; Object.assign(f.p, P[ps.value]); o.rebuild(); o.rerender(); }; body.appendChild(ps); }
+  const knobs = el('div', 'dknobs');
+  FX_DEFS[f.type].params.forEach(d => {
+    const toVal = n => { let v = d.log ? d.min * Math.pow(d.max / d.min, n) : d.min + (d.max - d.min) * n; if (d.step === 1) v = Math.round(v); return v; };
+    const toNorm = v => Math.max(0, Math.min(1, d.log ? Math.log(v / d.min) / Math.log(d.max / d.min) : (v - d.min) / (d.max - d.min)));
+    const cell = el('div', 'dk'), val = el('div', 'dval', fmtParam(d, f.p[d.k]));
+    const kb = makeKnob(d.n, 0, 1, toNorm(f.p[d.k]), toNorm(d.v), n => { const v = toVal(n); f.p[d.k] = v; val.textContent = fmtParam(d, v); o.update(); autoRec(o.target(d.k), v); }, 38, o.target(d.k));
+    cell.append(kb.el, val, el('div', 'dlab', d.n)); knobs.appendChild(cell);
+  });
+  body.appendChild(knobs); dev.appendChild(body); return dev;
+}
+function renderDeviceView(dv) {
+  dv.innerHTML = ''; const rr = () => renderMixer();
+  const title = el('div', 'dvtitle');
+  if (mixSel === -1) { title.innerHTML = '<b>MASTER</b><span>Limitador fijo −3 dB</span>'; dv.append(title); dv.appendChild(el('div', 'dvnote', 'El master lleva un limitador fijo para evitar saturación digital. Inserta efectos en cada insert o retorno.')); }
+  else if (mixSel <= -2) {
+    const k = -2 - mixSel, r = song.returns[k]; title.innerHTML = '<b>' + r.name + '</b><span>Retorno · salida 100% efecto</span>'; dv.appendChild(title);
+    dv.appendChild(deviceEl(r.fx, { powerable: false, removable: false, movable: false, target: () => null, update: () => { if (eng && eng.ret[k]) eng.ret[k].fx.update(); }, rebuild: () => {}, rerender: rr, remove: () => {} }));
+  } else {
+    const k = mixSel, ins = song.inserts[k], routed = song.tracks.filter(t => t.insert === k).map(t => t.name);
+    title.innerHTML = '<b>' + ins.name + '</b><span>' + (routed.length ? 'Recibe: ' + routed.join(', ') : 'Sin canales') + '</span>'; dv.appendChild(title);
+    ins.fx.forEach((f, s) => {
+      if (!f) return;
+      dv.appendChild(deviceEl(f, { k, s, movable: true, target: pk => 'i' + k + '.f' + s + '.' + pk, update: () => { const n = eng && eng.ins[k].fx[s]; if (n) n.update(); }, rebuild: () => { if (eng) eng.rebuildInsert(k); }, rerender: rr,
+        remove: () => { ins.fx[s] = null; if (eng) eng.rebuildInsert(k); rr(); },
+        move: (from, to) => { const t = ins.fx[from]; ins.fx[from] = ins.fx[to]; ins.fx[to] = t; if (eng) eng.rebuildInsert(k); rr(); } }));
+    });
+    const free = ins.fx.findIndex(f => !f), add = el('div', 'dadd'), ab = el('button', '', free < 0 ? 'Cadena llena' : '＋ Dispositivo'); ab.disabled = free < 0; add.appendChild(ab);
+    ab.onclick = e => { e.stopPropagation(); closeFxPop(); const m = el('div', 'ctxmenu'); Object.keys(FX_DEFS).forEach(key => { const b = el('button', 'mitem', FX_DEFS[key].name); b.onclick = () => { m.remove(); ins.fx[free] = fxNew(key); if (eng) eng.rebuildInsert(k); rr(); }; m.appendChild(b); }); placeNear(m, ab); onOutside(m); };
+    dv.appendChild(add);
+  }
+  const gb = el('button', 'dgrp' + (MIXG ? ' on' : ''), 'Grupos / VCA'); gb.onclick = () => { MIXG = !MIXG; renderMixer(); }; dv.appendChild(gb);
 }

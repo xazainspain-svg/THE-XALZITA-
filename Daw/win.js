@@ -3,7 +3,7 @@
 // navegador a la izquierda, ventanas flotantes (Channel Rack, Piano roll, Mixer, Instrumento, Inmersivo) y atajos F5–F10.
 
 // ----------------------------------------------------------------- ventanas flotantes
-const WINS = { rack: { x: 232, y: 112, w: 700, h: 400 }, roll: { x: 300, y: 190, w: 960, h: 500 }, mixer: { x: 232, y: 250, w: 1000, h: 440 },
+const WINS = { rack: { x: 232, y: 112, w: 700, h: 400 }, roll: { x: 300, y: 190, w: 960, h: 500 }, mixer: { x: 232, y: 130, w: 1020, h: 600 },
   dev: { x: 900, y: 118, w: 330, h: 430 }, imm: { x: 330, y: 150, w: 800, h: 540 } };
 let zTop = 30;
 const winEl = id => $('#win-' + id);
