@@ -242,6 +242,10 @@ pub enum Cmd {
     SectionMove(i32),
     SectionDuplicate,
     SectionDelete,
+    /// Scratch pad (Studio One): a second arrangement to try ideas in, and back.
+    ScratchSend,
+    ScratchBring,
+    ScratchToggle,
     /// Comp (Xaza): inside the time selection only the last selected take (its track) plays.
     Comp,
     Delete,
@@ -599,6 +603,8 @@ pub struct PlaylistState {
     pub auto_mode: bool,
     /// Independent clips (Ableton): a duplicate or a paste of a pattern clip gets a pattern of its own.
     pub independent: bool,
+    /// The arrangement to go back to from the scratch pad.
+    pub scratch_back: Option<u16>,
     /// Time selection (ticks).
     pub range: Option<(u32, u32)>,
     pub clipboard: Vec<Clip>,
@@ -668,6 +674,7 @@ impl Default for PlaylistState {
             shuffle: false,
             auto_mode: false,
             independent: true,
+            scratch_back: None,
             lock_len: None,
             row_h: ROW_H,
             last_header: None,
@@ -2185,6 +2192,59 @@ fn make_unique_lane(s: &mut State, j: usize, old: u16, new: u16) {
     arr_mut(s).clips[j].source = ClipSource::Channel(idx);
 }
 
+const SCRATCH: &str = "Scratch pad";
+
+fn scratch_number(s: &State) -> Option<u16> {
+    s.project.arrangements.iter().find(|a| a.name.as_deref() == Some(SCRATCH)).map(|a| a.number)
+}
+
+/// Copies the selected clips into the scratch pad (a second arrangement made when missing), at the same places.
+pub fn send_to_scratch(s: &mut State) -> Option<usize> {
+    let picked: Vec<Clip> = s.playlist.sel.iter().filter_map(|&i| clips(s).get(i).copied()).collect();
+    if picked.is_empty() {
+        return None;
+    }
+    let n = match scratch_number(s) {
+        Some(n) => n,
+        None => {
+            let n = s.project.arrangements.iter().map(|a| a.number + 1).max().unwrap_or(0);
+            let mut a = os_flp::project::default_arrangement();
+            a.number = n;
+            a.name = Some(SCRATCH.into());
+            s.project.arrangements.push(a);
+            n
+        }
+    };
+    let arr = s.project.arrangements.iter_mut().find(|a| a.number == n)?;
+    for mut c in picked.iter().copied() {
+        c.set_id(0);
+        arr.clips.push(c);
+    }
+    s.piano.dirty = true;
+    Some(picked.len())
+}
+
+/// Copies the scratch pad's clips (those inside the time selection, else all) into the arrangement from the song
+/// position on; they are independent of the originals.
+pub fn bring_from_scratch(s: &mut State) -> Option<usize> {
+    let n = scratch_number(s)?;
+    let range = s.playlist.range.filter(|r| r.1 > r.0);
+    let src: Vec<Clip> = s.project.arrangements.iter().find(|a| a.number == n)?.clips.iter().filter(|c| range.is_none_or(|r| c.position >= r.0 && c.end() <= r.1)).copied().collect();
+    let first_pos = src.iter().map(|c| c.position).min()?;
+    let at = s.playlist.pos;
+    let arr = arr_mut(s);
+    let first = arr.clips.len();
+    for mut c in src.iter().copied() {
+        c.position = at + (c.position - first_pos);
+        c.set_id(0);
+        arr.clips.push(c);
+    }
+    independent_copies(s, first);
+    s.playlist.sel = (first..clips(s).len()).collect();
+    s.piano.dirty = true;
+    Some(src.len())
+}
+
 /// A section of the song (Studio One's arranger track): from a plain time marker to the next one, the last to the end
 /// of the last clip.
 #[derive(Debug, Clone, PartialEq)]
@@ -2867,6 +2927,9 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
                 PItem::new("Section: move right (later)", Cmd::SectionMove(1)).key("Ctrl+Alt+Right"),
                 PItem::new("Section: duplicate", Cmd::SectionDuplicate),
                 PItem::new("Section: delete", Cmd::SectionDelete),
+                PItem::new("Scratch pad: send selection", Cmd::ScratchSend),
+                PItem::new("Scratch pad: bring it here (at the song position)", Cmd::ScratchBring),
+                PItem::new("Scratch pad: open / back to the arrangement", Cmd::ScratchToggle),
                 PItem::new("Separate at position / selection", Cmd::Separate).key("Alt+E"),
                 PItem::new("Heal separation", Cmd::Heal).key("Alt+H"),
                 PItem::new("Trim to time selection", Cmd::TrimRange).key("Alt+R"),
@@ -4830,6 +4893,38 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::SectionDuplicate => {
             snapshot_as(s, "Duplicate section");
             Some(if duplicate_section(s) { "Section duplicated".to_string() } else { "No section at the song position".to_string() })
+        }
+        Cmd::ScratchSend => {
+            snapshot_as(s, "Send to scratch pad");
+            Some(match send_to_scratch(s) {
+                Some(n) => format!("{n} clip(s) sent to the scratch pad"),
+                None => "Select clips to send to the scratch pad".to_string(),
+            })
+        }
+        Cmd::ScratchBring => {
+            snapshot_as(s, "Bring from scratch pad");
+            Some(match bring_from_scratch(s) {
+                Some(n) => format!("{n} clip(s) brought from the scratch pad"),
+                None => "The scratch pad is empty".to_string(),
+            })
+        }
+        Cmd::ScratchToggle => {
+            let n = scratch_number(s);
+            let cur = s.project.arrangement().map(|a| a.number);
+            match (n, cur) {
+                (Some(n), Some(c)) if n != c => {
+                    s.playlist.scratch_back = Some(c);
+                    show_arrangement(s, n);
+                    Some("Scratch pad".to_string())
+                }
+                (Some(n), Some(c)) if n == c => {
+                    if let Some(b) = s.playlist.scratch_back.take() {
+                        show_arrangement(s, b);
+                    }
+                    Some("Back to the arrangement".to_string())
+                }
+                _ => Some("The scratch pad is empty: send clips to it first".to_string()),
+            }
         }
         Cmd::SectionDelete => {
             snapshot_as(s, "Delete section");

@@ -13571,6 +13571,30 @@ mod tests {
         assert_eq!(pl::clips(&app.state).len(), n - 1);
     }
 
+    /// Scratch pad (Xaza, after Studio One): clips go to a second arrangement and come back as independent copies.
+    #[test]
+    fn scratch_pad_sends_and_brings_clips() {
+        use crate::playlist as pl;
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.project.patterns[0].notes = vec![Note { length: 24, key: 60, ..Note::step(0, 0) }];
+        pl::place(&mut app.state, 0, 0);
+        app.state.playlist.sel = vec![0];
+        assert_eq!(pl::send_to_scratch(&mut app.state), Some(1));
+        assert!(app.state.project.arrangements.iter().any(|a| a.name.as_deref() == Some("Scratch pad") && a.clips.len() == 1));
+        assert_eq!(pl::clips(&app.state).len(), 1, "the arrangement itself is unchanged");
+        app.state.playlist.pos = 4 * 4 * u32::from(app.state.project.ppq);
+        assert_eq!(pl::bring_from_scratch(&mut app.state), Some(1));
+        let cs = pl::clips(&app.state);
+        assert_eq!(cs.len(), 2);
+        assert_eq!(cs[1].position, app.state.playlist.pos);
+        assert_ne!(cs[0].source, cs[1].source, "independent of the original");
+        assert_eq!(pl::run(&mut app, pl::Cmd::ScratchToggle), Some("Scratch pad".to_string()));
+        assert_eq!(pl::clips(&app.state).len(), 1);
+        assert_eq!(pl::run(&mut app, pl::Cmd::ScratchToggle), Some("Back to the arrangement".to_string()));
+        assert_eq!(pl::clips(&app.state).len(), 2);
+    }
+
     /// Audio-clip channels (dropped audio, FL's audio clips) are hosted and opened by Lemon Sampler, never the info
     /// window (spec: plugins/lemon-sampler.md §7).
     #[test]
