@@ -229,7 +229,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     // Clips reaching the painted part of the grid (a scrolled-in strip is a small part, see `App::playlist_scrolled`);
     // a clip draws inside its own rect.
     for (i, c) in pl::clips(s).iter().enumerate() {
-        if ui.c.visible(g.clip_rect(c).outset(2.0)) {
+        // A lane inside an audio clip is drawn by that clip, in Automation mode only.
+        if ui.c.visible(g.clip_rect(c).outset(2.0)) && pl::lane_audio(s, i).is_none() {
             clip_paint(ui, s, &g, i, c);
         }
     }
@@ -900,7 +901,13 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
         }
     }
     if r.w > 16.0 {
-        ui.c.text_clip(Font::new(12), inner.x + 14.0, inner.y - 1.0, inner.w - 16.0, ic, &pl::source_name(s, c.source));
+        let mut name = pl::source_name(s, c.source);
+        if s.playlist.auto_mode && kind == PickKind::Audio {
+            if let Some(label) = pl::embedded_lane(s, i).and_then(|j| pl::lane_label(s, j)) {
+                name = format!("{name}  [{label}]");
+            }
+        }
+        ui.c.text_clip(Font::new(12), inner.x + 14.0, inner.y - 1.0, inner.w - 16.0, ic, &name);
     }
     // Content.
     let content = if c.muted { dim(text).with_alpha(90) } else { dim(cc(t, NOTE)) };
@@ -916,6 +923,14 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
                 waveform(ui, s, g, c, ch, body_at, col, waves.as_ref().map(|w| (w, &dim as &dyn Fn(Color) -> Color)));
                 if !c.muted {
                     fades(ui, s, g, i, c, body_at, dim(wave));
+                }
+                if s.playlist.auto_mode {
+                    if let Some(j) = pl::embedded_lane(s, i) {
+                        let lane = pl::clips(s)[j];
+                        if let ClipSource::Channel(lch) = lane.source {
+                            curve(ui, s, g, i, &lane, lch, body_at, dim(body), dim(cc(t, CURVE)));
+                        }
+                    }
                 }
             }
             (PickKind::Automation, ClipSource::Channel(ch)) => {

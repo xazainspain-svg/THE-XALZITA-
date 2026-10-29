@@ -13386,10 +13386,11 @@ mod tests {
         assert!(pl::auto_params(&app.state, match a.source { os_model::ClipSource::Channel(c) => c, _ => unreachable!() }).len() >= 4);
         let msg = pl::automate_clip(&mut app.state, ai, 0).expect("lane");
         assert!(msg.starts_with("Automating"), "{msg}");
-        let lane = pl::clips(&app.state).iter().position(|c| c.track == 2 && matches!(c.source, os_model::ClipSource::Channel(ch) if app.state.project.automation(ch).is_some())).expect("lane on the track above");
+        let lane = pl::clips(&app.state).iter().position(|c| c.track == 3 && matches!(c.source, os_model::ClipSource::Channel(ch) if app.state.project.automation(ch).is_some())).expect("lane inside the audio clip");
         let l = pl::clips(&app.state)[lane];
         assert_eq!((l.position, l.length), (a.position, a.length), "the lane spans the audio clip");
         assert_eq!(pl::lane_audio(&app.state, lane), Some(ai));
+        assert_eq!(pl::embedded_lane(&app.state, ai), Some(lane));
         let os_model::ClipSource::Channel(lch) = l.source else { unreachable!() };
         let first = app.state.project.automation(lch).unwrap().targets.clone();
         pl::retarget(&mut app.state, lane, 1).expect("retarget");
@@ -18273,19 +18274,22 @@ mod tests {
         pl::arr_mut(&mut app.state).clips.push(os_model::Clip::new(0, 4 * bar, 2, os_model::ClipSource::Channel(ach)));
         let ai = pl::clips(&app.state).len() - 1;
         pl::automate_clip(&mut app.state, ai, 0).unwrap();
-        let lane = pl::clips(&app.state).iter().position(|c| c.track == 1).unwrap();
+        let lane = pl::clips(&app.state).iter().position(|c| c.track == 2 && c.source != os_model::ClipSource::Channel(ach)).unwrap();
         let os_model::ClipSource::Channel(lch) = pl::clips(&app.state)[lane].source else { return };
         for (b, v) in [(4.0, 0.9), (8.0, 0.3), (12.0, 0.7)] {
             pl::add_point(&mut app.state, lch, b, v);
         }
-        app.state.playlist.auto_mode = true;
         app.state.playlist_bar_w = 120.0;
         app.state.playlist.sel = vec![lane];
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(std::path::PathBuf::from(&dir).join("auto_lane_off.png")).unwrap();
+        app.state.playlist.auto_mode = true;
         frame(&mut app, &mut c, None);
         let g = app.pl_grid.unwrap();
         let geom = pl::PGeom::new(&app.state, g);
         let r = geom.clip_rect(&pl::clips(&app.state)[lane]);
         app.state.playlist.popup = pl::lane_selector(&app.state, lane, r.x + 40.0, r.y + 18.0);
+        let _ = ai;
         frame(&mut app, &mut c, None);
         c.pixmap.save_png(std::path::PathBuf::from(dir).join("auto_lane.png")).unwrap();
     }

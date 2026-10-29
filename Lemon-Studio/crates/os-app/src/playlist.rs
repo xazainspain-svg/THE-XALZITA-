@@ -1338,7 +1338,7 @@ pub(crate) fn restore(s: &mut State, (c, m, t, a, st): Snapshot) {
 
 /// Topmost clip under (x, y): the last one in the list (drawn on top).
 pub fn clip_at(s: &State, g: &PGeom, x: f32, y: f32) -> Option<usize> {
-    clips(s).iter().enumerate().rev().find(|(_, c)| g.clip_rect(c).contains(x, y)).map(|(i, _)| i)
+    clips(s).iter().enumerate().rev().find(|(i, c)| g.clip_rect(c).contains(x, y) && lane_audio(s, *i).is_none()).map(|(i, _)| i)
 }
 
 /// The playlist's snap setting with Main read as the global snap (§4). Events and Markers are not available here.
@@ -2622,7 +2622,7 @@ pub fn clip_menu(s: &State, i: usize, x: f32, y: f32) -> Popup {
         items.push(PItem::new("Make unique", Cmd::ClipUnique(i)));
     }
     if let (PickKind::Audio, ClipSource::Channel(ach)) = (source_kind(s, c.source), c.source) {
-        items.push(PItem::head("Automate on a lane above"));
+        items.push(PItem::head("Automate inside this clip (A)"));
         for (k, (label, ..)) in auto_params(s, ach).into_iter().enumerate() {
             items.push(PItem::new(label, Cmd::AutomateClip(i, k)));
         }
@@ -2657,7 +2657,8 @@ pub fn auto_params(s: &State, ch: u16) -> Vec<(&'static str, u32, f64)> {
     v
 }
 
-/// The audio clip an automation clip sits beside (the lane above it, or below on track 1): same time, next track.
+/// The audio clip an automation clip sits inside (Xaza): same track, overlapping in time. Such a lane is not drawn as a
+/// clip of its own; its curve shows inside the audio clip while Automation mode (A) is on.
 pub fn lane_audio(s: &State, i: usize) -> Option<usize> {
     let a = *clips(s).get(i)?;
     if !matches!(a.source, ClipSource::Channel(ch) if s.project.automation(ch).is_some()) {
@@ -2665,18 +2666,32 @@ pub fn lane_audio(s: &State, i: usize) -> Option<usize> {
     }
     (0..clips(s).len()).find(|&k| {
         let c = clips(s)[k];
-        source_kind(s, c.source) == PickKind::Audio && (c.track == a.track + 1 || c.track + 1 == a.track) && c.position < a.end() && a.position < c.end()
+        source_kind(s, c.source) == PickKind::Audio && c.track == a.track && c.position < a.end() && a.position < c.end()
     })
 }
 
-/// Gives audio clip `i` an automation lane for parameter `k`, on the track above it (below on track 1): the lane's
-/// clip spans the audio clip. An existing lane beside the clip is switched to the parameter instead.
+/// The lane (automation clip) inside audio clip `ai`.
+pub fn embedded_lane(s: &State, ai: usize) -> Option<usize> {
+    (0..clips(s).len()).find(|&j| lane_audio(s, j) == Some(ai))
+}
+
+/// The parameter an embedded lane automates, as `auto_params` names it.
+pub fn lane_label(s: &State, j: usize) -> Option<&'static str> {
+    let ai = lane_audio(s, j)?;
+    let ClipSource::Channel(ach) = clips(s)[ai].source else { return None };
+    let ClipSource::Channel(lch) = clips(s)[j].source else { return None };
+    let tgt = s.project.automation(lch)?.targets.first().copied()?;
+    auto_params(s, ach).into_iter().find(|p| p.1 == tgt).map(|p| p.0)
+}
+
+/// Gives audio clip `i` an automation lane for parameter `k` inside it: the lane's clip spans the audio clip on its own
+/// track. An existing lane beside the clip is switched to the parameter instead.
 pub fn automate_clip(s: &mut State, i: usize, k: usize) -> Option<String> {
     let c = *clips(s).get(i)?;
     let ClipSource::Channel(ach) = c.source else { return None };
     let (label, tgt, init) = *auto_params(s, ach).get(k)?;
-    let lane = if c.track > 0 { c.track - 1 } else { c.track + 1 };
-    let existing = (0..clips(s).len()).find(|&j| lane_audio(s, j) == Some(i));
+    let lane = c.track;
+    let existing = embedded_lane(s, i);
     if let Some(j) = existing {
         return retarget(s, j, k);
     }
@@ -2689,7 +2704,7 @@ pub fn automate_clip(s: &mut State, i: usize, k: usize) -> Option<String> {
         a.track = lane;
     }
     s.piano.dirty = true;
-    Some(format!("Automating {label} on the lane above {sample}"))
+    Some(format!("Automating {label} inside {sample}: press A to see and edit it"))
 }
 
 /// Switches automation clip `j` (a lane beside an audio clip) to parameter `k` of that audio clip's list.
@@ -3207,6 +3222,11 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                 }
             }
         }
+        // Automation mode: the lane inside an audio clip answers in the clip (its title strip is the selector).
+        let (ci, c) = match (s.playlist.auto_mode && !right && !app.ctrl).then(|| embedded_lane(s, ci)).flatten() {
+            Some(j) => (j, clips(s)[j]),
+            None => (ci, c),
+        };
         let auto_clip = matches!(c.source, ClipSource::Channel(ch) if s.project.automation(ch).is_some());
         let amode = s.playlist.auto_mode;
         if auto_clip && (amode || matches!(tool, PlTool::Draw | PlTool::Paint | PlTool::Select)) && !app.ctrl && g.body(&c).contains(x, y) {
