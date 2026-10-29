@@ -13372,6 +13372,37 @@ mod tests {
         assert!(app.state.project.channels[0].color.is_none() && app.state.project.mixer.iter().find(|m| m.index == 1).unwrap().name.is_none());
     }
 
+    /// Automation lane above an audio clip (Xaza): created for a parameter, switched with the lane's selector.
+    #[test]
+    fn automation_lane_above_an_audio_clip_with_selector() {
+        use crate::playlist as pl;
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::default();
+        app.plugins.available = crate::plugins::builtin();
+        let wav = std::env::temp_dir().join(format!("os-lane-{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.5f32; 192000]).unwrap();
+        let ai = pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 3, 0).expect("audio clip");
+        let a = pl::clips(&app.state)[ai];
+        assert!(pl::auto_params(&app.state, match a.source { os_model::ClipSource::Channel(c) => c, _ => unreachable!() }).len() >= 4);
+        let msg = pl::automate_clip(&mut app.state, ai, 0).expect("lane");
+        assert!(msg.starts_with("Automating"), "{msg}");
+        let lane = pl::clips(&app.state).iter().position(|c| c.track == 2 && matches!(c.source, os_model::ClipSource::Channel(ch) if app.state.project.automation(ch).is_some())).expect("lane on the track above");
+        let l = pl::clips(&app.state)[lane];
+        assert_eq!((l.position, l.length), (a.position, a.length), "the lane spans the audio clip");
+        assert_eq!(pl::lane_audio(&app.state, lane), Some(ai));
+        let os_model::ClipSource::Channel(lch) = l.source else { unreachable!() };
+        let first = app.state.project.automation(lch).unwrap().targets.clone();
+        pl::retarget(&mut app.state, lane, 1).expect("retarget");
+        let second = app.state.project.automation(lch).unwrap().targets.clone();
+        assert_ne!(first, second, "the selector switched the parameter");
+        assert!(pl::lane_selector(&app.state, lane, 0.0, 0.0).is_some());
+        // Automating again reuses the lane instead of adding another.
+        let n = pl::clips(&app.state).len();
+        pl::automate_clip(&mut app.state, ai, 2).unwrap();
+        assert_eq!(pl::clips(&app.state).len(), n);
+        let _ = std::fs::remove_file(&wav);
+    }
+
     /// Audio-clip channels (dropped audio, FL's audio clips) are hosted and opened by Lemon Sampler, never the info
     /// window (spec: plugins/lemon-sampler.md §7).
     #[test]
@@ -18214,6 +18245,49 @@ mod tests {
         app.state.playlist_bar_w = 120.0;
         frame(&mut app, &mut c, None);
         c.pixmap.save_png(std::path::PathBuf::from(dir).join("auto_line.png")).unwrap();
+    }
+
+    /// Look check for the automation lane above an audio clip with its selector open.
+    #[test]
+    #[ignore]
+    fn auto_lane_shot() {
+        use crate::playlist as pl;
+        let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.playlist.reset();
+        app.state.z = vec![Win::Playlist];
+        app.state.wins[Win::Playlist.slot().unwrap()].maxed = true;
+        app.add_clip_channel(ChannelKind::AudioClip);
+        let ach = app.state.project.channels.iter().rfind(|c| c.kind == ChannelKind::AudioClip).unwrap().index;
+        {
+            let ch = app.state.project.channels.iter_mut().find(|c| c.index == ach).unwrap();
+            ch.sample_path = Some("shot.wav".into());
+            ch.name = Some("Vocal take".into());
+        }
+        let peaks = (0..800).map(|i| ((i as f32 / 7.0).sin() * (i as f32 / 90.0).cos()).abs() * 0.8).map(|a| (-a, a)).collect();
+        let wave = pl::Wave { rate: 44100, frames: 800 * 2000, per: 2000, peaks };
+        app.state.playlist.waves.borrow_mut().insert("shot.wav".into(), Some(std::rc::Rc::new(wave)));
+        let bar = 4 * u32::from(app.state.project.ppq);
+        pl::arr_mut(&mut app.state).clips.push(os_model::Clip::new(0, 4 * bar, 2, os_model::ClipSource::Channel(ach)));
+        let ai = pl::clips(&app.state).len() - 1;
+        pl::automate_clip(&mut app.state, ai, 0).unwrap();
+        let lane = pl::clips(&app.state).iter().position(|c| c.track == 1).unwrap();
+        let os_model::ClipSource::Channel(lch) = pl::clips(&app.state)[lane].source else { return };
+        for (b, v) in [(4.0, 0.9), (8.0, 0.3), (12.0, 0.7)] {
+            pl::add_point(&mut app.state, lch, b, v);
+        }
+        app.state.playlist.auto_mode = true;
+        app.state.playlist_bar_w = 120.0;
+        app.state.playlist.sel = vec![lane];
+        frame(&mut app, &mut c, None);
+        let g = app.pl_grid.unwrap();
+        let geom = pl::PGeom::new(&app.state, g);
+        let r = geom.clip_rect(&pl::clips(&app.state)[lane]);
+        app.state.playlist.popup = pl::lane_selector(&app.state, lane, r.x + 40.0, r.y + 18.0);
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(std::path::PathBuf::from(dir).join("auto_lane.png")).unwrap();
     }
 
     /// Look check for the piano roll's vertical zoom, time markers, Tools menu and snap menus (spec: ui/piano-roll.md

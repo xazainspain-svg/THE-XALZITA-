@@ -291,6 +291,10 @@ pub enum Cmd {
     ClipSelectSimilar(usize),
     ClipRename(usize),
     ClipRandomColor(usize),
+    /// Automation lane above an audio clip (Xaza): the audio clip `.0` gets an automation clip for parameter `.1` of
+    /// `auto_params`, on the track above it; the lane's own selector (`.0` = the automation clip) switches the parameter.
+    AutomateClip(usize, usize),
+    AutoTarget(usize, usize),
     ClipPreview(usize),
     /// A picker item's menu (§10a) on an audio or automation clip source: the command and the source's channel index.
     Pick(PickCmd, u16),
@@ -2617,9 +2621,103 @@ pub fn clip_menu(s: &State, i: usize, x: f32, y: f32) -> Popup {
         items.push(PItem::new("Edit pattern", Cmd::ClipEditSource(i)));
         items.push(PItem::new("Make unique", Cmd::ClipUnique(i)));
     }
+    if let (PickKind::Audio, ClipSource::Channel(ach)) = (source_kind(s, c.source), c.source) {
+        items.push(PItem::head("Automate on a lane above"));
+        for (k, (label, ..)) in auto_params(s, ach).into_iter().enumerate() {
+            items.push(PItem::new(label, Cmd::AutomateClip(i, k)));
+        }
+        items.push(PItem::sep());
+    }
+    if lane_audio(s, i).is_some() {
+        if let Some(p) = lane_selector(s, i, x, y) {
+            items.extend(p.items);
+            items.push(PItem::sep());
+        }
+    }
     items.push(PItem::new("Select all similar clips", Cmd::ClipSelectSimilar(i)));
     items.push(PItem::new("Delete", Cmd::ClipDelete(i)));
     Popup { x, y, items, sub: None, scroll: [0; 2] }
+}
+
+/// What an audio clip's automation lane can drive: (label, target, initial value) for the clip's channel and its mixer
+/// track.
+pub fn auto_params(s: &State, ch: u16) -> Vec<(&'static str, u32, f64)> {
+    use os_model::target as t;
+    let track = s.project.channel(ch).map_or(0, |c| c.mixer_track);
+    let mut v = vec![
+        ("Channel volume", t::channel(ch, t::CHANNEL_VOLUME), 0.78),
+        ("Channel pan", t::channel(ch, t::CHANNEL_PAN), 0.5),
+        ("Channel pitch", t::channel(ch, t::CHANNEL_PITCH), 0.5),
+        ("Filter cutoff", t::channel(ch, t::CHANNEL_CUTOFF), 1.0),
+    ];
+    if track > 0 {
+        v.push(("Mixer volume", t::mixer(track, t::MIXER_VOLUME), 0.8));
+        v.push(("Mixer pan", t::mixer(track, t::MIXER_PAN), 0.5));
+    }
+    v
+}
+
+/// The audio clip an automation clip sits beside (the lane above it, or below on track 1): same time, next track.
+pub fn lane_audio(s: &State, i: usize) -> Option<usize> {
+    let a = *clips(s).get(i)?;
+    if !matches!(a.source, ClipSource::Channel(ch) if s.project.automation(ch).is_some()) {
+        return None;
+    }
+    (0..clips(s).len()).find(|&k| {
+        let c = clips(s)[k];
+        source_kind(s, c.source) == PickKind::Audio && (c.track == a.track + 1 || c.track + 1 == a.track) && c.position < a.end() && a.position < c.end()
+    })
+}
+
+/// Gives audio clip `i` an automation lane for parameter `k`, on the track above it (below on track 1): the lane's
+/// clip spans the audio clip. An existing lane beside the clip is switched to the parameter instead.
+pub fn automate_clip(s: &mut State, i: usize, k: usize) -> Option<String> {
+    let c = *clips(s).get(i)?;
+    let ClipSource::Channel(ach) = c.source else { return None };
+    let (label, tgt, init) = *auto_params(s, ach).get(k)?;
+    let lane = if c.track > 0 { c.track - 1 } else { c.track + 1 };
+    let existing = (0..clips(s).len()).find(|&j| lane_audio(s, j) == Some(i));
+    if let Some(j) = existing {
+        return retarget(s, j, k);
+    }
+    let sample = s.project.channel(ach).and_then(|x| x.name.clone()).unwrap_or_else(|| "Audio".into());
+    let range = s.playlist.range;
+    s.playlist.range = Some((c.position, c.end()));
+    let ch = create_automation(s, tgt, &format!("{sample} - {label}"), init);
+    s.playlist.range = range;
+    if let Some(a) = arr_mut(s).clips.iter_mut().rfind(|x| x.source == ClipSource::Channel(ch)) {
+        a.track = lane;
+    }
+    s.piano.dirty = true;
+    Some(format!("Automating {label} on the lane above {sample}"))
+}
+
+/// Switches automation clip `j` (a lane beside an audio clip) to parameter `k` of that audio clip's list.
+pub fn retarget(s: &mut State, j: usize, k: usize) -> Option<String> {
+    let ai = lane_audio(s, j)?;
+    let ClipSource::Channel(ach) = clips(s)[ai].source else { return None };
+    let ClipSource::Channel(lch) = clips(s)[j].source else { return None };
+    let (label, tgt, _) = *auto_params(s, ach).get(k)?;
+    s.project.automation_mut(lch)?.targets = vec![tgt];
+    let sample = s.project.channel(ach).and_then(|x| x.name.clone()).unwrap_or_else(|| "Audio".into());
+    if let Some(c) = s.project.channels.iter_mut().find(|c| c.index == lch) {
+        c.name = Some(format!("{sample} - {label}"));
+    }
+    s.piano.dirty = true;
+    Some(format!("The lane now automates {label}"))
+}
+
+/// The parameter selector of an automation lane: one entry per parameter, the current one marked.
+pub fn lane_selector(s: &State, j: usize, x: f32, y: f32) -> Option<Popup> {
+    let ai = lane_audio(s, j)?;
+    let ClipSource::Channel(ach) = clips(s)[ai].source else { return None };
+    let ClipSource::Channel(lch) = clips(s)[j].source else { return None };
+    let cur = s.project.automation(lch).and_then(|a| a.targets.first().copied());
+    let mut items = vec![PItem::head("Automate")];
+    for (k, (label, tgt, _)) in auto_params(s, ach).into_iter().enumerate() {
+        items.push(PItem::new(label, Cmd::AutoTarget(j, k)).mark(Mark::Check(cur == Some(tgt))));
+    }
+    Some(Popup { x, y, items, sub: None, scroll: [0; 2] })
 }
 
 /// The commands of a picker item's menu (§10a).
@@ -3168,6 +3266,13 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                     app.hint = Cow::Owned(value_text(s, ch, v));
                 }
                 app.invalidate();
+                return;
+            }
+        }
+        // Automation mode: the lane's title strip is its parameter selector.
+        if amode && !right && auto_clip && y < g.clip_rect(&c).y + TITLE_H {
+            if let Some(pop) = lane_selector(s, ci, x, y + 6.0) {
+                s.playlist.popup = Some(pop);
                 return;
             }
         }
@@ -4580,6 +4685,14 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
                 _ => return Some("Rename: only pattern clips can be renamed here".into()),
             }
             None
+        }
+        Cmd::AutomateClip(i, k) => {
+            snapshot_as(s, "Automation lane");
+            automate_clip(s, i, k)
+        }
+        Cmd::AutoTarget(j, k) => {
+            snapshot_as(s, "Automation lane parameter");
+            retarget(s, j, k)
         }
         Cmd::ClipRandomColor(i) => {
             let Some(src) = clips(s).get(i).map(|c| c.source) else { return None };
