@@ -40,6 +40,8 @@ pub enum Win {
     Session,
     /// The Object mixer: a radar to place mixer tracks around the listener (Xaza).
     Objects,
+    /// The Clip view: properties of the selected playlist clip (Xaza).
+    ClipView,
     /// The Touch controller (spec: ui/touch-controller.md).
     Touch,
     /// The piano roll's Strum dialog (spec: ui/piano-strum.md).
@@ -183,6 +185,8 @@ pub enum Action {
     Session(u16),
     /// Object mixer radar: place the selected track at the mouse (false) or take it out of space (true).
     ObjPlace(bool),
+    /// A − / + of the Clip view.
+    ClipProp(crate::playlist::ClipProp),
     /// The Touch controller's controls (spec: ui/touch-controller.md).
     Touch(crate::touch::TouchAct),
     /// The Strum dialog's switches and buttons (spec: ui/piano-strum.md).
@@ -965,6 +969,7 @@ pub struct State {
     pub tapper: crate::tapper::TapperUi,
     pub session: views::session::SessionUi,
     pub objects: views::objects::ObjectsUi,
+    pub clipview: views::clipview::ClipViewUi,
     /// Linked names and colours of playlist tracks, mixer inserts and their channels (`crate::link`).
     pub link: crate::link::Linked,
     pub touch: crate::touch::TouchUi,
@@ -1427,6 +1432,7 @@ impl App {
                 tapper: Default::default(),
                 session: Default::default(),
                 objects: Default::default(),
+                clipview: Default::default(),
                 link: Default::default(),
                 touch: Default::default(),
                 strum: Default::default(),
@@ -1905,7 +1911,7 @@ impl App {
             self.invalidate();
             return;
         }
-        let tool = |w: &Win| matches!(w, Win::Perf | Win::Tapper | Win::Session | Win::Objects | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg);
+        let tool = |w: &Win| matches!(w, Win::Perf | Win::Tapper | Win::Session | Win::Objects | Win::ClipView | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg);
         if let Some(&w) = self.state.z.last().filter(|w| !self.state.no_focus && tool(w)) {
             self.act(Action::CloseWin(w));
             self.invalidate();
@@ -2943,7 +2949,7 @@ impl App {
             .iter()
             .skip_while(|&&w| w != Win::Playlist)
             .skip(1)
-            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper | Win::Session | Win::Objects | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg))
+            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper | Win::Session | Win::Objects | Win::ClipView | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg))
             .map(|&w| Cover { bounds: self.win_bounds(w).outset(1.0), win: Some(w), solid: self.win_solid(w) })
             .collect();
         if !s.toolbar.hidden {
@@ -2971,6 +2977,7 @@ impl App {
             Win::Tapper => Some(views::tapper::rect(s)),
             Win::Session => Some(views::session::rect(s)),
             Win::Objects => Some(views::objects::rect(s)),
+            Win::ClipView => Some(views::clipview::rect(s)),
             Win::Touch => Some(views::touch::rect(s)),
             Win::Strum => Some(views::strum::rect(s)),
             Win::Arp => Some(views::arpeggiate::rect(s)),
@@ -3625,6 +3632,7 @@ impl App {
             Win::Tapper => self.damage_rect(views::tapper::bounds(&self.state)),
             Win::Session => self.damage_rect(views::session::bounds(&self.state)),
             Win::Objects => self.damage_rect(views::objects::bounds(&self.state)),
+            Win::ClipView => self.damage_rect(views::clipview::bounds(&self.state)),
             Win::Touch => self.damage_rect(views::touch::bounds(&self.state)),
             Win::Strum => self.damage_rect(views::strum::bounds(&self.state)),
             Win::Arp => self.damage_rect(views::arpeggiate::bounds(&self.state)),
@@ -5783,6 +5791,7 @@ impl App {
             Win::Tapper => views::tapper::bounds(&self.state),
             Win::Session => views::session::bounds(&self.state),
             Win::Objects => views::objects::bounds(&self.state),
+            Win::ClipView => views::clipview::bounds(&self.state),
             Win::Touch => views::touch::bounds(&self.state),
             Win::Strum => views::strum::bounds(&self.state),
             Win::Arp => views::arpeggiate::bounds(&self.state),
@@ -7793,6 +7802,10 @@ impl App {
             Action::Close => self.want_close = true,
             Action::DragWindow => self.want_drag_window = true,
             Action::Bar(h) => self.bar_hit(h),
+            Action::ClipProp(p) => {
+                self.state.message = crate::playlist::clip_prop(&mut self.state, p);
+                self.invalidate();
+            }
             Action::ObjPlace(off) => {
                 let n = self.state.selected_mixer;
                 let (mx, my) = self.mouse;
@@ -8080,6 +8093,7 @@ impl App {
                     Win::Tapper => s.tapper.pos,
                     Win::Session => s.session.pos,
                     Win::Objects => s.objects.pos,
+                    Win::ClipView => s.clipview.pos,
                     Win::Touch => s.touch.pos,
                     Win::Strum => s.strum.pos,
                     Win::Arp => s.arp.pos,
@@ -13450,6 +13464,38 @@ mod tests {
         assert!(!link.sync(&mut app.state), "settled");
     }
 
+    /// Independent clips and the Clip view (Xaza): a duplicate gets a pattern of its own, and the view edits the clip.
+    #[test]
+    fn independent_clips_and_clip_view() {
+        use crate::playlist as pl;
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.project.patterns[0].notes = vec![Note { length: 24, key: 60, ..Note::step(0, 0) }];
+        pl::place(&mut app.state, 0, 0);
+        app.state.playlist.sel = vec![0];
+        app.state.playlist.range = None;
+        pl::duplicate(&mut app.state);
+        let (a, b) = (pl::clips(&app.state)[0], pl::clips(&app.state)[1]);
+        assert_ne!(a.source, b.source, "the copy has a pattern of its own");
+        let (os_model::ClipSource::Pattern(pa), os_model::ClipSource::Pattern(pb)) = (a.source, b.source) else { panic!() };
+        app.state.project.patterns.iter_mut().find(|p| p.number == pb).unwrap().notes.clear();
+        assert!(!app.state.project.pattern(pa).unwrap().notes.is_empty(), "editing the copy leaves the original");
+        // With the switch off, copies share their pattern again.
+        app.state.playlist.independent = false;
+        app.state.playlist.sel = vec![0];
+        pl::duplicate(&mut app.state);
+        assert_eq!(pl::clips(&app.state)[2].source, pl::clips(&app.state)[0].source);
+        // The Clip view: rows for the selected clip, and its + / - change it.
+        app.state.playlist.sel = vec![1];
+        let rows = pl::clip_rows(&app.state);
+        assert!(rows.iter().any(|r| r.label == "Start") && rows.iter().any(|r| r.label == "Pattern"));
+        let before = pl::clips(&app.state)[1].position;
+        pl::clip_prop(&mut app.state, pl::ClipProp::Start(1));
+        assert!(pl::clips(&app.state)[1].position > before);
+        pl::clip_prop(&mut app.state, pl::ClipProp::Mute);
+        assert!(pl::clips(&app.state)[1].muted);
+    }
+
     /// Audio-clip channels (dropped audio, FL's audio clips) are hosted and opened by Lemon Sampler, never the info
     /// window (spec: plugins/lemon-sampler.md §7).
     #[test]
@@ -18338,6 +18384,28 @@ mod tests {
         let _ = ai;
         frame(&mut app, &mut c, None);
         c.pixmap.save_png(std::path::PathBuf::from(dir).join("auto_lane.png")).unwrap();
+    }
+
+    /// Look check for the Clip view.
+    #[test]
+    #[ignore]
+    fn clip_view_shot() {
+        use crate::playlist as pl;
+        let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.playlist.reset();
+        app.state.project.patterns[0].notes = (0..8).map(|i| Note { length: 24, key: 60 + i as u16, ..Note::step(0, i * 48) }).collect();
+        let bar = 4 * u32::from(app.state.project.ppq);
+        pl::arr_mut(&mut app.state).clips.push(os_model::Clip::new(0, 2 * bar, 0, os_model::ClipSource::Pattern(1)));
+        app.state.playlist.sel = vec![0];
+        pl::duplicate(&mut app.state);
+        app.state.playlist.sel = vec![1];
+        app.state.z = vec![Win::Playlist, Win::ClipView];
+        app.state.wins[Win::Playlist.slot().unwrap()].maxed = true;
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(std::path::PathBuf::from(dir).join("clip_view.png")).unwrap();
     }
 
     /// Look check for the piano roll's vertical zoom, time markers, Tools menu and snap menus (spec: ui/piano-roll.md

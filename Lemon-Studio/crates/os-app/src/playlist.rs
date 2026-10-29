@@ -236,6 +236,8 @@ pub enum Cmd {
     /// Automation mode (Ableton's A): automation clips edit with any tool, a click on the curve moves its segment,
     /// a click elsewhere in the clip adds a breakpoint.
     AutoMode,
+    /// Independent clips on / off.
+    Independent,
     /// Comp (Xaza): inside the time selection only the last selected take (its track) plays.
     Comp,
     Delete,
@@ -591,6 +593,8 @@ pub struct PlaylistState {
     pub shuffle: bool,
     /// Automation mode (key A).
     pub auto_mode: bool,
+    /// Independent clips (Ableton): a duplicate or a paste of a pattern clip gets a pattern of its own.
+    pub independent: bool,
     /// Time selection (ticks).
     pub range: Option<(u32, u32)>,
     pub clipboard: Vec<Clip>,
@@ -659,6 +663,7 @@ impl Default for PlaylistState {
             stretch_base: Vec::new(),
             shuffle: false,
             auto_mode: false,
+            independent: true,
             lock_len: None,
             row_h: ROW_H,
             last_header: None,
@@ -1905,6 +1910,7 @@ pub fn duplicate(s: &mut State) {
     }
     let n = arr.clips.len();
     regroup_copies(s, first);
+    independent_copies(s, first);
     s.playlist.sel = (first..n).collect();
     if let Some((r0, r1)) = s.playlist.range {
         s.playlist.range = Some((r0 + span, r1 + span));
@@ -1932,6 +1938,7 @@ pub fn paste(s: &mut State) {
     }
     let n = arr.clips.len();
     regroup_copies(s, start);
+    independent_copies(s, start);
     s.playlist.sel = (start..n).collect();
     s.piano.dirty = true;
 }
@@ -2121,7 +2128,9 @@ pub fn make_unique(s: &mut State, i: usize) -> Option<u16> {
     let next = s.project.patterns.iter().map(|p| p.number).max().unwrap_or(0).max(n) + 1;
     let base = p.name.clone().unwrap_or_else(|| format!("Pattern {n}"));
     p.number = next;
-    p.name = Some(format!("{base} #2"));
+    let root = base.split(" #").next().unwrap_or(&base).to_string();
+    let k = (2..).find(|k| !s.project.patterns.iter().any(|q| q.name.as_deref() == Some(format!("{root} #{k}").as_str()))).unwrap_or(2);
+    p.name = Some(format!("{root} #{k}"));
     s.project.patterns.push(p);
     if let Some(cl) = arr_mut(s).clips.get_mut(i) {
         cl.source = ClipSource::Pattern(next);
@@ -2130,6 +2139,134 @@ pub fn make_unique(s: &mut State, i: usize) -> Option<u16> {
     s.pattern = next;
     s.piano.dirty = true;
     Some(next)
+}
+
+/// Independent clips: each pattern clip added since `from` (a duplicate or a paste) gets a pattern of its own, so that
+/// editing one never changes the other.
+pub fn independent_copies(s: &mut State, from: usize) {
+    if !s.playlist.independent {
+        return;
+    }
+    let (pat, source) = (s.pattern, s.playlist.source);
+    for i in from..clips(s).len() {
+        if matches!(clips(s)[i].source, ClipSource::Pattern(_)) {
+            let _ = make_unique(s, i);
+        }
+    }
+    s.pattern = pat;
+    s.playlist.source = source;
+}
+
+/// One row of the Clip view: a label, the value as text, and what its − and + do.
+pub struct ClipRow {
+    pub label: &'static str,
+    pub value: String,
+    pub minus: Option<ClipProp>,
+    pub plus: Option<ClipProp>,
+}
+
+/// What the Clip view changes on the selected clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipProp {
+    Start(i32),
+    Length(i32),
+    Offset(i32),
+    Gain(i32),
+    FadeIn(i32),
+    FadeOut(i32),
+    Mute,
+    Unique,
+    Independent,
+}
+
+fn bar_beat(s: &State, t: u32) -> String {
+    let (b, p) = (bar(s).max(1), u32::from(ppq(s)).max(1));
+    format!("{}.{}", t / b + 1, t % b / p + 1)
+}
+
+/// The clip the Clip view shows: the last selected one.
+pub fn viewed(s: &State) -> Option<usize> {
+    s.playlist.sel.iter().copied().rfind(|&i| i < clips(s).len())
+}
+
+pub fn clip_rows(s: &State) -> Vec<ClipRow> {
+    let Some(i) = viewed(s) else { return Vec::new() };
+    let c = clips(s)[i];
+    let kind = source_kind(s, c.source);
+    let audio = kind == PickKind::Audio;
+    let mut v = vec![
+        ClipRow { label: "Clip", value: source_name(s, c.source), minus: None, plus: None },
+        ClipRow { label: "Start", value: bar_beat(s, c.position), minus: Some(ClipProp::Start(-1)), plus: Some(ClipProp::Start(1)) },
+        ClipRow { label: "Length", value: format!("{} beats", c.length / u32::from(ppq(s)).max(1)), minus: Some(ClipProp::Length(-1)), plus: Some(ClipProp::Length(1)) },
+        ClipRow { label: "Offset", value: format!("{:.0} ms", window(s, &c).0), minus: Some(ClipProp::Offset(-1)), plus: Some(ClipProp::Offset(1)) },
+    ];
+    if audio {
+        v.push(ClipRow { label: "Gain", value: format!("{:+.1} dB", 20.0 * c.gain().log10()), minus: Some(ClipProp::Gain(-1)), plus: Some(ClipProp::Gain(1)) });
+        v.push(ClipRow { label: "Fade in", value: format!("{:.0} ms", c.fade_in().map_or(0.0, |f| f.0)), minus: Some(ClipProp::FadeIn(-1)), plus: Some(ClipProp::FadeIn(1)) });
+        v.push(ClipRow { label: "Fade out", value: format!("{:.0} ms", c.fade_out().map_or(0.0, |f| f.0)), minus: Some(ClipProp::FadeOut(-1)), plus: Some(ClipProp::FadeOut(1)) });
+    }
+    v.push(ClipRow { label: "Muted", value: if c.muted { "yes".into() } else { "no".into() }, minus: Some(ClipProp::Mute), plus: None });
+    if kind == PickKind::Pattern {
+        let n = clips(s).iter().filter(|o| o.source == c.source).count();
+        v.push(ClipRow { label: "Pattern", value: if n > 1 { format!("shared by {n} clips") } else { "independent".into() }, minus: Some(ClipProp::Unique), plus: None });
+    }
+    v.push(ClipRow { label: "Copies", value: if s.playlist.independent { "independent".into() } else { "linked".into() }, minus: Some(ClipProp::Independent), plus: None });
+    v
+}
+
+/// A − or + of the Clip view on the selected clip.
+pub fn clip_prop(s: &mut State, p: ClipProp) -> Option<String> {
+    let i = viewed(s)?;
+    let c = clips(s)[i];
+    let beat = i64::from(ppq(s)).max(1);
+    let step_src = to_src(s, c.source, (beat / 4).max(1) as f64);
+    snapshot_as(s, "Clip view");
+    match p {
+        ClipProp::Start(d) => {
+            let pos = (i64::from(c.position) + i64::from(d) * beat).max(0) as u32;
+            arr_mut(s).clips[i].position = pos;
+        }
+        ClipProp::Length(d) => {
+            let len = (i64::from(c.length) + i64::from(d) * beat).max(1) as u32;
+            let (w0, _) = window(s, &c);
+            let end = w0 + to_src(s, c.source, f64::from(len));
+            let k = &mut arr_mut(s).clips[i];
+            k.length = len;
+            if c.window.is_some() {
+                k.window = Some((w0, end));
+            }
+        }
+        ClipProp::Offset(d) => {
+            let (w0, w1) = window(s, &c);
+            let a = (w0 + f64::from(d) * step_src).max(0.0);
+            arr_mut(s).clips[i].window = Some((a, a + (w1 - w0)));
+        }
+        ClipProp::Gain(d) => {
+            let db = (20.0 * f64::from(c.gain()).log10() + f64::from(d)).clamp(-60.0, 12.0);
+            arr_mut(s).clips[i].set_gain(10f64.powf(db / 20.0) as f32);
+        }
+        ClipProp::FadeIn(d) => {
+            let (ms, t) = c.fade_in().unwrap_or((0.0, 0.0));
+            let ms = (ms + 50.0 * d as f32).max(0.0);
+            arr_mut(s).clips[i].set_fade_in((ms > 0.0).then_some((ms, t)));
+        }
+        ClipProp::FadeOut(d) => {
+            let (ms, t) = c.fade_out().unwrap_or((0.0, 0.0));
+            let ms = (ms + 50.0 * d as f32).max(0.0);
+            arr_mut(s).clips[i].set_fade_out((ms > 0.0).then_some((ms, t)));
+        }
+        ClipProp::Mute => arr_mut(s).clips[i].muted = !c.muted,
+        ClipProp::Unique => {
+            let pat = s.pattern;
+            let src = s.playlist.source;
+            let _ = make_unique(s, i);
+            s.pattern = pat;
+            s.playlist.source = src;
+        }
+        ClipProp::Independent => s.playlist.independent = !s.playlist.independent,
+    }
+    s.piano.dirty = true;
+    None
 }
 
 /// First track at or below `from` with no clips overlapping `[a, b)`.
@@ -2492,6 +2629,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
                 PItem::new("Trim to time selection", Cmd::TrimRange).key("Alt+R"),
                 PItem::new("Shuffle mode (close gaps on delete)", Cmd::Shuffle).key("Alt+J"),
                 PItem::new("Automation mode (edit curves with any tool)", Cmd::AutoMode).key("A"),
+                PItem::new("Independent clips (copies are not linked)", Cmd::Independent).mark(Mark::Check(s.playlist.independent)),
                 PItem::new("Comp: use this take in the selection", Cmd::Comp).key("Alt+K"),
                 PItem::new("Delete", Cmd::Delete).key("Del"),
                 PItem::sep(),
@@ -4441,6 +4579,10 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             snapshot_as(s, "Trim to selection");
             trim_range(s);
             None
+        }
+        Cmd::Independent => {
+            s.playlist.independent = !s.playlist.independent;
+            Some(if s.playlist.independent { "Independent clips on: copies get a pattern of their own" } else { "Independent clips off: copies share their pattern" }.into())
         }
         Cmd::AutoMode => {
             s.playlist.auto_mode = !s.playlist.auto_mode;

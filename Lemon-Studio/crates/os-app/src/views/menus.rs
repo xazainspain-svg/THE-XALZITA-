@@ -240,6 +240,7 @@ const VIEW_ITEMS: &[Item] = &[
     it("Touch controller", "Alt+F7").tick(),
     it("Session view", "").on().tick(),
     it("Object mixer", "").on().tick(),
+    it("Clip view", "").on().tick(),
     it("Script output", ""),
     it("Toolbars", "").sub(),
     it("Plugin performance monitor", ""),
@@ -396,6 +397,7 @@ fn win_of(label: &str) -> Option<Win> {
         "Tempo tapper" => Win::Tapper,
         "Session view" => Win::Session,
         "Object mixer" => Win::Objects,
+        "Clip view" => Win::ClipView,
         // spec: ui/touch-controller.md §2
         "Touch controller" => Win::Touch,
         _ => return None,

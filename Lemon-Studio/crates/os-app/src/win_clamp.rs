@@ -111,6 +111,7 @@ pub fn rect_of(s: &State, w: Win) -> Option<Rect> {
         Win::Tapper => views::tapper::rect(s),
         Win::Session => views::session::rect(s),
         Win::Objects => views::objects::rect(s),
+        Win::ClipView => views::clipview::rect(s),
         Win::Touch => views::touch::rect(s),
         Win::Strum => views::strum::rect(s),
         Win::Arp => views::arpeggiate::rect(s),
@@ -128,6 +129,7 @@ fn set_pos(s: &mut State, w: Win, pos: (f32, f32)) {
         Win::Tapper => s.tapper.pos = pos,
         Win::Session => s.session.pos = pos,
         Win::Objects => s.objects.pos = pos,
+        Win::ClipView => s.clipview.pos = pos,
         Win::Touch => s.touch.pos = pos,
         Win::Strum => s.strum.pos = pos,
         Win::Arp => s.arp.pos = pos,
@@ -157,7 +159,7 @@ pub fn keep_all(s: &mut State) -> bool {
         return false;
     }
     let mut moved = false;
-    for w in [Win::ChannelRack, Win::Plugin, Win::Perf, Win::Tapper, Win::Session, Win::Objects, Win::Touch, Win::Strum, Win::Arp, Win::PianoDlg] {
+    for w in [Win::ChannelRack, Win::Plugin, Win::Perf, Win::Tapper, Win::Session, Win::Objects, Win::ClipView, Win::Touch, Win::Strum, Win::Arp, Win::PianoDlg] {
         let Some(r) = rect_of(s, w) else { continue };
         let pos = keep(r.x, r.y, r.w, work);
         if pos != (r.x, r.y) {
@@ -191,7 +193,7 @@ impl App {
         if r.h > work.h {
             s.rack_size.1 = fit.1;
         }
-        for w in [Win::ChannelRack, Win::Plugin, Win::Perf, Win::Tapper, Win::Session, Win::Objects, Win::Touch, Win::Strum, Win::Arp, Win::PianoDlg] {
+        for w in [Win::ChannelRack, Win::Plugin, Win::Perf, Win::Tapper, Win::Session, Win::Objects, Win::ClipView, Win::Touch, Win::Strum, Win::Arp, Win::PianoDlg] {
             if let Some(r) = rect_of(s, w) {
                 let to = inside(r, work, (r.w, r.h));
                 set_pos(s, w, (to.x, to.y));
