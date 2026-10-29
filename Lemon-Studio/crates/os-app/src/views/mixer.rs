@@ -115,6 +115,10 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let inner = super::float_frame(ui, s, Win::Mixer, r);
     let r = inner.unwrap_or(r);
     let client = super::window_frame_ex(ui, Win::Mixer, Rect::new(r.x, r.y, r.w - panel_w, r.h), "", 0.0, false, inner.is_some());
+    // Device view (Xaza, after Ableton's): a band under the strips with the selected track's effect chain as cards.
+    let full_h = r.h;
+    let dev_h = if r.h >= DEV_MIN_H { DEV_H } else { 0.0 };
+    let r = Rect::new(r.x, r.y, r.w, r.h - dev_h);
     title_tools(ui, s, r);
     if r.h < 2.0 * TITLE_H {
         // Collapsed to the title bar: only the slot panel's title with the window buttons.
@@ -231,7 +235,10 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     chevron(ui, area.x + 5.0, bottom - 9.5, false, ui.t.s(0x5d6366));
     cables(ui, s, strips, area, bottom);
 
-    slot_panel(ui, s, Rect::new(r.right() - panel_w, r.y, panel_w, r.h));
+    slot_panel(ui, s, Rect::new(r.right() - panel_w, r.y, panel_w, full_h));
+    if dev_h > 0.0 {
+        device_view(ui, s, Rect::new(r.x, r.bottom(), r.w - panel_w - 7.0, dev_h));
+    }
     resize_zones(ui, s, Win::Mixer, outer);
 }
 
@@ -632,6 +639,45 @@ fn fader_value(db: f32) -> f32 {
 /// Fader handle centred on (cx, cy): 14 × 23.
 fn fader_handle(ui: &mut Ui, cx: f32, cy: f32, selected: bool, hov: bool) {
     os_ui::kit::fader_handle(ui.c, ui.t, cx, cy, selected, os_ui::kit::State::hover(hov));
+}
+
+/// Height of the device view band and the mixer height from which it shows.
+const DEV_H: f32 = 78.0;
+const DEV_MIN_H: f32 = 600.0;
+
+/// Device view: the selected insert's ten effect slots side by side as cards: name (click opens the slot's menu),
+/// the mix knob and the on / off LED, the same controls as the slot panel's rows.
+fn device_view(ui: &mut Ui, s: &State, r: Rect) {
+    let n = s.selected_mixer;
+    let track = s.project.mixer.iter().find(|m| m.index == n);
+    ui.c.fill_rect(r, ui.t.s(0x1f2224));
+    ui.c.fill_rect(Rect::new(r.x, r.y, r.w, 1.0), ui.t.s(0x34383a));
+    let title = match track.and_then(|m| m.name.clone()) {
+        Some(nm) => format!("Devices - {nm}"),
+        None if n == 0 => "Devices - Master".into(),
+        None => format!("Devices - Insert {n}"),
+    };
+    ui.c.text_clip(Font::new(15), r.x + 6.0, r.y + 2.0, r.w - 12.0, ui.t.s(0x8a9296), &title);
+    let w = ((r.w - 12.0) / 10.0).clamp(40.0, 132.0);
+    for i in 0..10 {
+        let k = i as u8;
+        let card = Rect::new(r.x + 6.0 + w * i as f32, r.y + 20.0, w - 4.0, r.h - 25.0);
+        let name = mx::slot_name(s, n, k);
+        let on = track.is_none_or(|m| m.slot_on[i]);
+        let hn = ui.hit(Rect::new(card.x, card.y, card.w, card.h - 26.0), Action::Mix(MHit::SlotName(k)), format!("FX slot {} options", i + 1));
+        ui.c.fill_rrect(card, 4.0, if hn { ui.t.s(0x34383a) } else { ui.t.s(0x2a2d2f) });
+        ui.c.stroke_rrect(card, 4.0, 1.0, if name.is_some() && on { ui.t.h(0xf09a28) } else { ui.t.s(0x3a3f42) });
+        let (f, label, ink) = match &name {
+            Some(p) => (Font::new(15), p.to_string(), if on { ui.t.tx(0xe3e8ea) } else { ui.t.s(0x6d7275) }),
+            None => (Font::new(15).italic(), format!("Slot {}", i + 1), ui.t.s(0x50575b)),
+        };
+        ui.c.text_clip(f, card.x + 5.0, card.y + 3.0, card.w - 10.0, ink, &label);
+        let mix = KnobId::SlotMix(n, k);
+        ui.hit(Rect::new(card.x + 4.0, card.bottom() - 25.0, 24.0, 22.0), Action::Knob(mix), s.knob_text(mix));
+        mixer_knob(ui, card.x + 16.0, card.bottom() - 14.0, 8.0, 10.0, s.knob(mix), Some(false));
+        ui.hit(Rect::new(card.right() - 22.0, card.bottom() - 25.0, 18.0, 22.0), Action::Mix(MHit::SlotLed(k)), "Mute / solo  (ctrl)0..9");
+        led(ui, card.right() - 13.0, card.bottom() - 14.0, on);
+    }
 }
 
 fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
