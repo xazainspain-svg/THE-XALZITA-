@@ -88,3 +88,4 @@ Glitch|Creative
 Shimmer|Creative
 Resonator|Creative
 Freeze|Creative
+Pitch Corrector|Creative

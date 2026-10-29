@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Prueba de estabilidad del DSP (90 efectos)
+      - name: Prueba de estabilidad del DSP (91 efectos)
         working-directory: Plugins90
         run: |
           g++ -std=c++17 -O2 -fsanitize=address,undefined -I. test/dsp_test.cpp -o dsp_test
@@ -54,7 +54,7 @@ jobs:
           find vst3 -type d -name "*.vst3" -print0 | while IFS= read -r -d '' d; do cp -r "$d" flat/; done
           n=$(find flat -maxdepth 1 -name "*.vst3" | wc -l)
           echo "plugins: $n"
-          test "$n" -eq 90
+          test "$n" -eq 91
       - name: Instalar Inno Setup
         run: choco install innosetup -y --no-progress
       - name: Crear el instalador .exe

@@ -116,6 +116,8 @@ inline std::vector<Info> buildRegistry()
     add ("Shimmer",     "Creative", 0.4f, { F ("Decay", 0, 1, 0.8f), F ("Shimmer", 0, 1, 0.5f), F ("Damping", 0, 1, 0.4f) }, &mk<ShimmerFx>);
     add ("Resonator",   "Creative", 0.5f, { I ("Root Note", 24, 84, 48), I ("Chord", 0, 3, 0), F ("Decay", 0.5f, 0.99f, 0.93f), L ("Tone Hz", 1000, 16000, 6000) }, &mk<PerCh<ResonatorS>>);
     add ("Freeze",      "Creative", 1.f, { B ("Freeze", false), L ("Size ms", 30, 500, 150) },                   &mk<FreezeFx>);
+    // ---- Afinacion (1)
+    add ("Pitch Corrector", "Creative", 1.f, { I ("Key (C=0)", 0, 11, 0), I ("Scale 0 Chrom 1 Major 2 Minor", 0, 2, 1), L ("Retune ms", 1, 400, 40), F ("Amount", 0, 1, 1) }, &mk<PitchCorrectFx>);
     return r;
 }
 

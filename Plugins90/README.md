@@ -1,6 +1,6 @@
-# Xaza FX — 90 plugins de audio (VST3, JUCE)
+# Xaza FX — 91 plugins de audio (VST3, JUCE)
 
-90 efectos independientes, cada uno un `.vst3` propio ("Xaza <Nombre>"), todos con **Mix** y **Output dB** además de sus parámetros.
+91 efectos independientes (el n.º 91, **Pitch Corrector**, es un corrector de afinación en tiempo real monofónico: detecta el tono con YIN y lo acerca a la nota más cercana de la escala; no es Melodyne), cada uno un `.vst3` propio ("Xaza <Nombre>"), todos con **Mix** y **Output dB** además de sus parámetros.
 El DSP (`Dsp.h`, `Fx*.h`) no depende de JUCE; `Processor.cpp` es el envoltorio genérico (interfaz genérica del host) y `Registry.h` la lista de los 90.
 
 | Categoría | Plugins |

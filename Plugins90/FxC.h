@@ -457,4 +457,59 @@ struct FreezeFx : Fx   // freeze, tamano ms
         l = lerp (l, fl, fg); r = lerp (r, fr, fg);
     }
 };
+
+// Corrector de afinacion en tiempo real (estilo Melodyne/Auto-Tune, monofonico): detecta el tono con YIN, lo acerca a
+// la nota mas cercana de la escala y desplaza con PitchCore. Parametros: tonica, escala, velocidad de ajuste, cantidad.
+struct PitchCorrectFx : Fx
+{
+    static constexpr int kDec = 4, kW = 384, kTau = 200, kHop = 32;   // a sr/4: ventana, retardos (60 Hz..1.5 kHz), salto
+    double sr = 48000; PitchCore pl, pr;
+    float buf[kW + kTau] = {}; int bi = 0, acc = 0, hop = 0; float sum = 0, ratioT = 1.f, ratio = 1.f;
+    void prepare (double s) override { sr = s; pl.init (s); pr.init (s); std::fill (std::begin (buf), std::end (buf), 0.f); bi = acc = hop = 0; sum = 0; ratioT = ratio = 1.f; }
+
+    static bool allowed (int pc, int scale)
+    {
+        static const bool major[12] = { 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1 }, minor[12] = { 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0 };
+        return scale == 0 || (scale == 1 ? major[pc] : minor[pc]);
+    }
+    // f0 en Hz por YIN sobre los ultimos kW + kTau valores decimados; 0 si no hay tono claro.
+    float detect() const
+    {
+        float d[kTau + 1] = {}, cm[kTau + 1] = {}; float run = 0;
+        for (int t = 1; t <= kTau; ++t)
+        {
+            float s = 0;
+            for (int j = 0; j < kW; ++j) { const float a = buf[(bi + j) % (kW + kTau)], b = buf[(bi + j + t) % (kW + kTau)]; s += (a - b) * (a - b); }
+            d[t] = s; run += s; cm[t] = run > 1e-12f ? s * (float) t / run : 1.f;
+        }
+        int best = 0;
+        for (int t = 8; t < kTau; ++t)
+            if (cm[t] < 0.2f && cm[t] <= cm[t + 1]) { best = t; break; }
+        if (best == 0) { float m = 1e9f; for (int t = 8; t < kTau; ++t) if (cm[t] < m) { m = cm[t]; best = t; } if (m > 0.35f) return 0.f; }
+        float tau = (float) best;
+        if (best > 1 && best < kTau) { const float a = cm[best - 1], b = cm[best], c = cm[best + 1], den = a - 2 * b + c; if (std::fabs (den) > 1e-9f) tau += 0.5f * (a - c) / den; }
+        return (float) (sr / kDec) / tau;
+    }
+    void tick (float& l, float& r, const float* p) override
+    {
+        sum += 0.5f * (l + r);
+        if (++acc == kDec) { buf[bi] = sum / kDec; bi = (bi + 1) % (kW + kTau); acc = 0; sum = 0;
+            if (++hop >= kHop)
+            {
+                hop = 0; const float f0 = detect(); ratioT = 1.f;
+                if (f0 > 50.f && f0 < 1500.f)
+                {
+                    const float m = 69.f + 12.f * std::log2 (f0 / 440.f); const int key = (int) std::round (p[0]), scale = (int) std::round (p[1]);
+                    int bestN = (int) std::round (m); float bd = 1e9f;
+                    for (int n = (int) std::round (m) - 6; n <= (int) std::round (m) + 6; ++n)
+                        if (allowed (((n - key) % 12 + 12) % 12, scale) && std::fabs (n - m) < bd) { bd = std::fabs (n - m); bestN = n; }
+                    ratioT = std::pow (2.f, (bestN - m) * p[3] / 12.f);
+                }
+            } }
+        const float a = 1.f - std::exp (-1.f / (float) (sr * std::max (0.001f, p[2] * 0.001f)));
+        ratio += a * (ratioT - ratio);
+        const float win = 0.03f * (float) sr;
+        l = pl.run (l, ratio, win); r = pr.run (r, ratio, win);
+    }
+};
 }
