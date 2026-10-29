@@ -227,6 +227,12 @@ pub enum Cmd {
     Duplicate,
     /// Strip silence (Xaza): cuts the quiet stretches out of the selected audio clips.
     StripSilence,
+    /// Pro Tools flow (Xaza): Separate at the song position (or the time selection's edges), Heal separation, Trim to
+    /// selection and the Shuffle edit mode.
+    Separate,
+    Heal,
+    TrimRange,
+    Shuffle,
     /// Comp (Xaza): inside the time selection only the last selected take (its track) plays.
     Comp,
     Delete,
@@ -574,6 +580,8 @@ pub struct PlaylistState {
     pub track: u16,
     /// Song position (ticks): song playback starts here.
     pub pos: u32,
+    /// Shuffle edit mode (Pro Tools): deleting clips closes the gap they leave on their track.
+    pub shuffle: bool,
     /// Time selection (ticks).
     pub range: Option<(u32, u32)>,
     pub clipboard: Vec<Clip>,
@@ -640,6 +648,7 @@ impl Default for PlaylistState {
             arr_anchor: (300.0, 90.0),
             stretch: false,
             stretch_base: Vec::new(),
+            shuffle: false,
             lock_len: None,
             row_h: ROW_H,
             last_header: None,
@@ -1686,6 +1695,101 @@ pub fn comp(s: &mut State) -> bool {
     true
 }
 
+/// Separate (Pro Tools): the selected (else all) clips are cut at the time selection's edges, or at the song position.
+pub fn separate(s: &mut State) -> usize {
+    let ticks: Vec<u32> = match s.playlist.range {
+        Some((a, b)) if b > a => vec![b, a],
+        _ => vec![s.playlist.pos],
+    };
+    let idx = targets(s);
+    let mut n = 0;
+    for tick in ticks {
+        for &i in &idx {
+            if split(s, i, tick).is_some() {
+                n += 1;
+            }
+        }
+    }
+    s.piano.dirty = true;
+    n
+}
+
+/// Heal separation (Pro Tools): neighbouring pieces of one source on a track whose windows continue are joined again.
+pub fn heal(s: &mut State) -> usize {
+    let mut idx = targets(s);
+    idx.sort_by_key(|&i| (clips(s)[i].track, clips(s)[i].position));
+    let mut dead = Vec::new();
+    let mut n = 0;
+    let mut k = 0;
+    while k < idx.len() {
+        let a = idx[k];
+        let mut tail = clips(s)[a];
+        let mut j = k + 1;
+        while j < idx.len() {
+            let b = clips(s)[idx[j]];
+            let (wa, wb) = (window(s, &tail), window(s, &b));
+            let same = b.track == tail.track && b.source == tail.source && b.muted == tail.muted && b.position == tail.end();
+            let tol = to_src(s, tail.source, 1.0).abs().max(0.5);
+            if !same || (wa.1 - wb.0).abs() > tol {
+                break;
+            }
+            tail.length += b.length;
+            tail.window = Some((wa.0, wb.1));
+            dead.push(idx[j]);
+            n += 1;
+            j += 1;
+        }
+        if j > k + 1 {
+            arr_mut(s).clips[a] = tail;
+        }
+        k = j.max(k + 1);
+    }
+    delete(s, dead);
+    s.piano.dirty = true;
+    n
+}
+
+/// Trim to selection (Pro Tools): what the selected (else all) clips hold outside the time selection is removed.
+pub fn trim_range(s: &mut State) -> bool {
+    let Some((r0, r1)) = s.playlist.range.filter(|r| r.1 > r.0) else { return false };
+    let spans: Vec<(u16, u32, u32)> = targets(s).iter().filter_map(|&i| clips(s).get(i)).map(|c| (c.track, c.position, c.end())).collect();
+    let idx = targets(s);
+    for tick in [r1, r0] {
+        for &i in &idx {
+            let _ = split(s, i, tick);
+        }
+    }
+    let out: Vec<usize> = (0..clips(s).len())
+        .filter(|&i| {
+            let c = clips(s)[i];
+            spans.iter().any(|&(t, a, b)| c.track == t && c.position >= a && c.end() <= b) && (c.end() <= r0 || c.position >= r1)
+        })
+        .collect();
+    delete(s, out);
+    s.piano.dirty = true;
+    true
+}
+
+/// The gaps deleting `idx` leaves on their tracks, as (track, end, length): Shuffle mode closes them.
+pub fn shuffle_gaps(s: &State, idx: &[usize]) -> Vec<(u16, u32, u32)> {
+    if !s.playlist.shuffle {
+        return Vec::new();
+    }
+    let mut g: Vec<(u16, u32, u32)> = idx.iter().filter_map(|&i| clips(s).get(i)).map(|c| (c.track, c.end(), c.length)).collect();
+    g.sort_by(|a, b| b.1.cmp(&a.1));
+    g
+}
+
+/// Shuffle mode: later clips on a track move left by the length of each gap (the last gap first).
+pub fn shuffle_close(s: &mut State, gaps: Vec<(u16, u32, u32)>) {
+    for (t, end, len) in gaps {
+        for c in arr_mut(s).clips.iter_mut().filter(|c| c.track == t && c.position >= end) {
+            c.position -= len;
+        }
+    }
+    s.piano.dirty = true;
+}
+
 /// Move the content of a clip by `dt` ticks inside it (Slip tool).
 pub fn slip(s: &mut State, i: usize, orig: &Clip, dt: i64) {
     let (w0, w1) = window(s, orig);
@@ -2363,6 +2467,10 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
                 PItem::new("Paste", Cmd::Paste).key("Ctrl+V"),
                 PItem::new("Duplicate", Cmd::Duplicate).key("Ctrl+B"),
                 PItem::new("Strip silence", Cmd::StripSilence).key("Alt+S"),
+                PItem::new("Separate at position / selection", Cmd::Separate).key("Alt+E"),
+                PItem::new("Heal separation", Cmd::Heal).key("Alt+H"),
+                PItem::new("Trim to time selection", Cmd::TrimRange).key("Alt+R"),
+                PItem::new("Shuffle mode (close gaps on delete)", Cmd::Shuffle).key("Alt+J"),
                 PItem::new("Comp: use this take in the selection", Cmd::Comp).key("Alt+K"),
                 PItem::new("Delete", Cmd::Delete).key("Del"),
                 PItem::sep(),
@@ -4129,6 +4237,25 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             comp(s);
             None
         }
+        Cmd::Separate => {
+            snapshot_as(s, "Separate");
+            separate(s);
+            None
+        }
+        Cmd::Heal => {
+            snapshot_as(s, "Heal separation");
+            heal(s);
+            None
+        }
+        Cmd::TrimRange => {
+            snapshot_as(s, "Trim to selection");
+            trim_range(s);
+            None
+        }
+        Cmd::Shuffle => {
+            s.playlist.shuffle = !s.playlist.shuffle;
+            Some(if s.playlist.shuffle { "Shuffle mode on: deleting closes the gap" } else { "Shuffle mode off" }.into())
+        }
         Cmd::StripSilence => {
             snapshot_as(s, "Strip silence");
             strip_silence(s, STRIP_DB, STRIP_MIN_MS);
@@ -4137,7 +4264,9 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Delete => {
             snapshot(s);
             let sel = s.playlist.sel.clone();
+            let gaps = shuffle_gaps(s, &sel);
             delete(s, sel);
+            shuffle_close(s, gaps);
             None
         }
         Cmd::ShiftTime(d) => {
@@ -4801,6 +4930,10 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("v") => Cmd::Paste,
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("b") => Cmd::Duplicate,
         Key::Character(c) if alt && !ctrl && c.eq_ignore_ascii_case("s") => Cmd::StripSilence,
+        Key::Character(c) if alt && !ctrl && c.eq_ignore_ascii_case("e") => Cmd::Separate,
+        Key::Character(c) if alt && !ctrl && c.eq_ignore_ascii_case("h") => Cmd::Heal,
+        Key::Character(c) if alt && !ctrl && c.eq_ignore_ascii_case("r") => Cmd::TrimRange,
+        Key::Character(c) if alt && !ctrl && c.eq_ignore_ascii_case("j") => Cmd::Shuffle,
         Key::Character(c) if alt && !ctrl && c.eq_ignore_ascii_case("k") => Cmd::Comp,
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("z") => Cmd::Undo,
         Key::Character(c) if alt && !ctrl && c.eq_ignore_ascii_case("m") => Cmd::Mute(!shift),

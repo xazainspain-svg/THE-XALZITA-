@@ -13255,6 +13255,45 @@ mod tests {
         let _ = std::fs::remove_file(&wav);
     }
 
+    /// Pro Tools flow (Xaza): separate, heal, trim to selection and shuffle.
+    #[test]
+    fn pro_tools_edit_flow() {
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::default();
+        app.plugins.available = crate::plugins::builtin();
+        let wav = std::env::temp_dir().join(format!("os-pt-{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.5f32; 192000]).unwrap();
+        crate::playlist::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("clip");
+        let len = crate::playlist::clips(&app.state)[0].length;
+        let on0 = |s: &State| crate::playlist::clips(s).iter().filter(|c| c.track == 0).count();
+        // Separate at the position, then heal.
+        app.state.playlist.sel.clear();
+        app.state.playlist.range = None;
+        app.state.playlist.pos = len / 2;
+        assert_eq!(crate::playlist::separate(&mut app.state), 1);
+        assert_eq!(on0(&app.state), 2);
+        assert_eq!(crate::playlist::heal(&mut app.state), 1);
+        assert_eq!(on0(&app.state), 1);
+        assert_eq!(crate::playlist::clips(&app.state)[0].length, len, "healed to the full length");
+        // Trim to selection keeps only the middle.
+        app.state.playlist.range = Some((len / 4, len / 2));
+        assert!(crate::playlist::trim_range(&mut app.state));
+        let cs = crate::playlist::clips(&app.state);
+        assert_eq!(cs.len(), 1);
+        assert!(cs[0].position >= len / 4 - 1 && cs[0].end() <= len / 2 + 1, "trimmed: {}..{}", cs[0].position, cs[0].end());
+        // Shuffle: deleting the first of two clips moves the second left.
+        app.state.playlist.shuffle = true;
+        app.state.playlist.range = None;
+        let c0 = crate::playlist::clips(&app.state)[0];
+        crate::playlist::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, c0.end() + 10).expect("second");
+        let (first_len, second_pos) = (c0.length, c0.end() + 10);
+        let gaps = crate::playlist::shuffle_gaps(&app.state, &[0]);
+        crate::playlist::delete(&mut app.state, vec![0]);
+        crate::playlist::shuffle_close(&mut app.state, gaps);
+        assert_eq!(crate::playlist::clips(&app.state)[0].position, second_pos - first_len);
+        let _ = std::fs::remove_file(&wav);
+    }
+
     /// Audio-clip channels (dropped audio, FL's audio clips) are hosted and opened by Lemon Sampler, never the info
     /// window (spec: plugins/lemon-sampler.md §7).
     #[test]
