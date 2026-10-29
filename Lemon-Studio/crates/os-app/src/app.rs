@@ -965,6 +965,8 @@ pub struct State {
     pub tapper: crate::tapper::TapperUi,
     pub session: views::session::SessionUi,
     pub objects: views::objects::ObjectsUi,
+    /// Linked names and colours of playlist tracks, mixer inserts and their channels (`crate::link`).
+    pub link: crate::link::Linked,
     pub touch: crate::touch::TouchUi,
     /// The piano roll's Strum dialog: where it is, its settings and its preview session.
     pub strum: crate::strum::StrumUi,
@@ -1425,6 +1427,7 @@ impl App {
                 tapper: Default::default(),
                 session: Default::default(),
                 objects: Default::default(),
+                link: Default::default(),
                 touch: Default::default(),
                 strum: Default::default(),
                 arp: Default::default(),
@@ -3849,6 +3852,13 @@ impl App {
     /// Periodic housekeeping; returns whether a repaint is needed.
     pub fn tick(&mut self) -> bool {
         self.plugin_tick();
+        // Names and colours of a playlist track, its mixer insert and their channels move together (`crate::link`).
+        let mut link = std::mem::take(&mut self.state.link);
+        let linked = link.sync(&mut self.state);
+        self.state.link = link;
+        if linked {
+            self.invalidate();
+        }
         // Playback loops over the time selection, as it is now (spec: ui/recording.md §5).
         self.sync_loop_range();
         #[cfg(all(plugin_windows, not(windows)))]
@@ -13402,6 +13412,42 @@ mod tests {
         pl::automate_clip(&mut app.state, ai, 2).unwrap();
         assert_eq!(pl::clips(&app.state).len(), n);
         let _ = std::fs::remove_file(&wav);
+    }
+
+    /// Linked names and colours (Xaza): a playlist track, its mixer insert and their channels change together, whichever
+    /// is edited.
+    #[test]
+    fn playlist_mixer_and_channel_labels_are_linked() {
+        use crate::playlist as pl;
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.project.channels[0].mixer_track = 1;
+        pl::arr_mut(&mut app.state);
+        let mut link = std::mem::take(&mut app.state.link);
+        assert!(!link.sync(&mut app.state), "first sight only notes the labels");
+        let red = os_model::Rgb::new(200, 30, 30);
+        // The playlist track is renamed and recoloured: the insert and the channel follow.
+        {
+            let t = &mut pl::arr_mut(&mut app.state).tracks[0];
+            t.name = Some("Bass".into());
+            t.color = Some(red);
+        }
+        assert!(link.sync(&mut app.state));
+        let m = app.state.project.mixer.iter().find(|m| m.index == 1).unwrap();
+        assert_eq!((m.name.as_deref(), m.color), (Some("Bass"), Some(red)));
+        assert_eq!((app.state.project.channels[0].name.as_deref(), app.state.project.channels[0].color), (Some("Bass"), Some(red)));
+        // The insert is renamed: the track and the channel follow.
+        app.state.project.mixer.iter_mut().find(|m| m.index == 1).unwrap().name = Some("Sub".into());
+        assert!(link.sync(&mut app.state));
+        assert_eq!(pl::arr_mut(&mut app.state).tracks[0].name.as_deref(), Some("Sub"));
+        assert_eq!(app.state.project.channels[0].name.as_deref(), Some("Sub"));
+        // The channel is recoloured: the track and the insert follow.
+        let blue = os_model::Rgb::new(30, 60, 200);
+        app.state.project.channels[0].color = Some(blue);
+        assert!(link.sync(&mut app.state));
+        assert_eq!(pl::arr_mut(&mut app.state).tracks[0].color, Some(blue));
+        assert_eq!(app.state.project.mixer.iter().find(|m| m.index == 1).unwrap().color, Some(blue));
+        assert!(!link.sync(&mut app.state), "settled");
     }
 
     /// Audio-clip channels (dropped audio, FL's audio clips) are hosted and opened by Lemon Sampler, never the info

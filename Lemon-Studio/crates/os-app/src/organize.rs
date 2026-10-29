@@ -107,7 +107,21 @@ pub fn organize(s: &mut State) -> String {
             }
         }
     }
-    // Playlist tracks take the name and colour of the first clip on them.
+    // Playlist track `n` takes the name and colour of mixer insert `n + 1` (they are linked, `crate::link`).
+    let mix: Vec<(u16, Option<String>, Option<Rgb>)> = s.project.mixer.iter().filter(|m| m.index > 0).map(|m| (m.index - 1, m.name.clone(), m.color)).collect();
+    for (t, name, color) in mix {
+        if let Some(tr) = crate::playlist::arr_mut(s).tracks.get_mut(usize::from(t)) {
+            if tr.name.is_none() && name.is_some() {
+                tr.name = name;
+                n += 1;
+            }
+            if tr.color.is_none() && color.is_some() {
+                tr.color = color;
+                n += 1;
+            }
+        }
+    }
+    // Playlist tracks left over take the name and colour of the first clip on them.
     let clips: Vec<(u16, ClipSource)> = crate::playlist::clips(s).iter().map(|c| (c.track, c.source)).collect();
     let mut tags: Vec<(u16, Option<String>, Option<Rgb>)> = Vec::new();
     for (track, src) in clips {
@@ -133,5 +147,8 @@ pub fn organize(s: &mut State) -> String {
         }
     }
     s.piano.dirty = true;
+    let mut link = std::mem::take(&mut s.link);
+    link.resync(s);
+    s.link = link;
     if n == 0 { "Already organized: every name and colour is set".into() } else { format!("Organized: {n} names and colours filled in") }
 }
