@@ -8543,6 +8543,13 @@ impl App {
                 self.transport.stop();
                 self.state.message = Some("Sound stopped".into());
             }
+            (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == "Organize project (names and colors)") => {
+                let s = &mut self.state;
+                let before = crate::organize::Labels::now(s);
+                let msg = crate::organize::organize(s);
+                crate::history::record(s, "Organize project", crate::history::Snap::Labels(Box::new(before)));
+                self.state.message = Some(msg);
+            }
             // spec: ui/unused-channels.md
             (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == "Select unused channels") => {
                 self.state.message = crate::rack::run(self, crate::rack::RCmd::SelectUnused);
@@ -13339,6 +13346,30 @@ mod tests {
         app.mouse_down();
         app.mouse_up();
         assert_eq!(vals(&app).len(), n + 1, "a breakpoint was added");
+    }
+
+    /// Organize (Xaza): channels, mixer tracks, playlist tracks and patterns get names and colours that agree; undo
+    /// puts them back.
+    #[test]
+    fn organize_names_and_colors_and_undoes() {
+        use crate::playlist as pl;
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.project.channels[0].name = Some("Kick".into());
+        app.state.project.channels[0].color = None;
+        app.state.project.channels[0].mixer_track = 1;
+        app.state.project.patterns[0].notes = vec![Note { length: 24, key: 60, ..Note::step(0, 0) }];
+        pl::place(&mut app.state, 0, 0);
+        let before = crate::organize::Labels::now(&app.state);
+        let msg = crate::organize::organize(&mut app.state);
+        assert!(msg.starts_with("Organized"), "{msg}");
+        assert!(app.state.project.channels[0].color.is_some(), "channel coloured");
+        let m = app.state.project.mixer.iter().find(|m| m.index == 1).unwrap();
+        assert_eq!(m.name.as_deref(), Some("Kick"));
+        assert!(app.state.project.arrangement().unwrap().tracks[0].name.is_some(), "playlist track named after its clip");
+        assert!(crate::organize::organize(&mut app.state).starts_with("Already"), "a second run changes nothing");
+        before.put(&mut app.state);
+        assert!(app.state.project.channels[0].color.is_none() && app.state.project.mixer.iter().find(|m| m.index == 1).unwrap().name.is_none());
     }
 
     /// Audio-clip channels (dropped audio, FL's audio clips) are hosted and opened by Lemon Sampler, never the info

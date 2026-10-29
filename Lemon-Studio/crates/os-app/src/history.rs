@@ -101,6 +101,8 @@ pub enum Snap {
     Timebase(Box<Timebase>),
     /// Settings > Info's text (`project_info`).
     Info(Box<os_model::ProjectInfo>),
+    /// The names and colours of channels, mixer tracks, playlist tracks and patterns (`crate::organize`).
+    Labels(Box<crate::organize::Labels>),
     /// Several of these in one step, put back last first ("Create automation clip": the playlist and the initial
     /// value).
     Several(Vec<Snap>),
@@ -353,6 +355,7 @@ impl Snap {
                 None => self.clone(),
             },
             Snap::Timebase(_) => Snap::Timebase(Box::new(Timebase::now(s))),
+            Snap::Labels(_) => Snap::Labels(Box::new(crate::organize::Labels::now(s))),
             Snap::Info(_) => Snap::Info(Box::new(s.project.info.clone())),
             Snap::Several(v) => Snap::Several(v.iter().map(|x| x.now(s)).collect()),
         }
@@ -402,6 +405,7 @@ impl Snap {
             | Snap::Settings(_)
             | Snap::Replace(_)
             | Snap::Timebase(_)
+            | Snap::Labels(_)
             | Snap::Info(_) => {}
             Snap::Rows(r) | Snap::Insert(r, _) => {
                 for p in &mut r.patterns {
@@ -458,6 +462,7 @@ impl Snap {
                 _ => {}
             },
             Snap::Init(t, e) => crate::init::put(s, t, e),
+            Snap::Labels(l) => l.put(s),
             Snap::Patterns { patterns, current } => {
                 s.project.patterns = patterns;
                 s.pattern = current;

@@ -317,6 +317,7 @@ const TOOLS_B: &[Item] = &[
     it("Prepare for performance mode", ""),
     it("Prepare for MIDI export", ""),
     it("Select unused channels", "").on(),
+    it("Organize project (names and colors)", "").on(),
     it("Purge unused audio clips", "").on(),
     it("Switch smart disable for all plugins", ""),
     it(CLIPS_ALL_LABEL, "").sub(),

@@ -59,6 +59,7 @@ mod midi_in;
 mod midi_out;
 mod midi_play;
 mod mixer;
+mod organize;
 mod osc3;
 mod citrus;
 mod monitor;
