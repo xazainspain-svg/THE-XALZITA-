@@ -10,7 +10,7 @@ const ARR_SNAPS = [['Compás', 16], ['Tiempo', 4], ['1/2 tiempo', 2], ['Paso', 1
 
 const laneOf = it => it.lane !== undefined ? it.lane : it.t;
 const patLen = slot => { let L = 16; song.tracks.forEach(t => { const c = t.clips[slot]; if (c) L = Math.max(L, c.bars * 16); }); return L; };
-const itemClip = it => { if (it.pat !== undefined) return { bars: patLen(it.pat) / 16, notes: [], pattern: true }; const t = song.tracks[it.t]; return t && t.clips[it.slot]; };
+const itemClip = it => { if (it.auto !== undefined) return { bars: Math.max(1, Math.ceil(it.l / 16)), notes: [], autoclip: true }; if (it.pat !== undefined) return { bars: patLen(it.pat) / 16, notes: [], pattern: true }; const t = song.tracks[it.t]; return t && t.clips[it.slot]; };
 const itemLoopLen = it => { const c = itemClip(it); return c ? c.bars * 16 : 16; };
 const aSn = () => ARR.mode === 'grid' ? (ARR.snap || 4) : ARR.snap;
 const aSnapF = v => aSn() > 0 ? Math.floor(v / aSn() + 1e-9) * aSn() : v;
@@ -33,7 +33,7 @@ let FOCUS = 'arr';
 document.addEventListener('mousedown', e => { const w = e.target.closest && e.target.closest('.win'); FOCUS = w ? w.id.replace('win-', '') : 'arr'; }, true);
 function arrSelect(it) {
   ARR.sel = it; ARR.sels = it ? new Set([it]) : new Set();
-  if (it) { if (it.pat !== undefined) selSlot = it.pat; else { selTrack = it.t; selSlot = it.slot; } }
+  if (it) { if (it.auto !== undefined) { } else if (it.pat !== undefined) selSlot = it.pat; else { selTrack = it.t; selSlot = it.slot; } }
   document.querySelectorAll('.aclip').forEach(d => d.classList.toggle('sel', ARR.sels.has(d._it)));
   renderBottom();
 }
@@ -137,7 +137,7 @@ function moveCursor() { if (ARR.cur) ARR.cur.style.left = (HEAD_W + ARR.cursor *
 // ----------------------------------------------------------------- clips
 function makeClip(it, t, z) {
   const c = itemClip(it), d = el('div', 'aclip' + (ARR.sels.has(it) || ARR.sel === it ? ' sel' : ''));
-  const P = it.pat !== undefined ? song.patterns[it.pat] : null;
+  const P = it.pat !== undefined ? song.patterns[it.pat] : (it.auto !== undefined ? { name: (autoInfo(it.auto, song) || { label: 'Automatización' }).label, color: '#f6921e' } : null);
   d._it = it; if (it.m) d.classList.add('muted'); if (it.grp) d.classList.add('grouped'); d.style.left = (it.s * z) + 'px'; d.style.width = Math.max(4, it.l * z - 1) + 'px'; d.style.background = P ? P.color : t.color;
   const cv = el('canvas'); cv.width = Math.min(4096, Math.ceil(it.l * z)); cv.height = LANE_H - 18; d.appendChild(cv);
   paintClip(cv, it, t, c, z);
@@ -162,7 +162,7 @@ function makeClip(it, t, z) {
     ARR.drag = drag;
   };
   d.oncontextmenu = e => e.preventDefault();
-  d.ondblclick = e => { e.stopPropagation(); openWin('roll'); };
+  d.ondblclick = e => { e.stopPropagation(); if (it.auto !== undefined) { ARR.editAuto = it; openWin('auto'); } else openWin('roll'); };
   return d;
 }
 function paintPattern(cv, it, z) {
@@ -176,6 +176,7 @@ function paintPattern(cv, it, z) {
   }
 }
 function paintClip(cv, it, t, c, z) {
+  if (c.autoclip) { paintAutoClip(cv, it, z); return; }
   if (c.pattern) { paintPattern(cv, it, z); return; }
   if (c.audio) { drawWave(cv, c.audio.id, (it.off || 0) * stepSec(), it.l * stepSec(), 'rgba(0,0,0,.6)'); return; }
   const g = cv.getContext('2d'), len = c.bars * 16; let lo = 127, hi = 0;
@@ -330,32 +331,59 @@ function bindRuler(cv) {
 }
 
 // ----------------------------------------------------------------- automatización
-function bindAuto(cv, au) {
-  const z = ARR.z, W = cv.width, H = cv.height, T = () => autoInfo(au.target, song);
-  const toY = v => H * (1 - v), toV = y => Math.max(0, Math.min(1, 1 - y / H));
+const CURVES = ['lin', 'smooth', 'in', 'out', 'step'], CURVE_NAMES = { lin: 'lineal', smooth: 'suave', in: 'entrada', out: 'salida', step: 'escalón' };
+function paintCurve(g, pts, z, H, color, steps) {
+  const toY = v => H * (1 - v), e = pts; if (!e.length) return;
+  g.strokeStyle = color; g.lineWidth = 2; g.beginPath(); g.moveTo(0, toY(e[0].v));
+  for (let i = 0; i < e.length; i++) {
+    const a = e[i], b = e[i + 1]; if (!b) { g.lineTo(steps * z, toY(a.v)); break; }
+    if ((a.c || 'lin') === 'lin') { g.lineTo(b.s * z, toY(b.v)); continue; }
+    for (let x = a.s; x <= b.s; x += Math.max(0.25, (b.s - a.s) / 40)) g.lineTo(x * z, toY(segVal(a, b, (x - a.s) / Math.max(1e-6, b.s - a.s)))); g.lineTo(b.s * z, toY(b.v));
+  }
+  g.stroke(); g.lineWidth = 1; g.fillStyle = '#fff';
+  e.forEach(p => { g.beginPath(); g.arc(p.s * z, toY(p.v), 4, 0, 6.3); g.fill(); if (p.c && p.c !== 'lin') { g.fillStyle = '#ffb04a'; g.fillRect(p.s * z - 2, toY(p.v) - 9, 4, 3); g.fillStyle = '#fff'; } });
+}
+// editor de curva (puntos): clic = punto nuevo, arrastrar = mover, doble clic = cambiar forma del tramo, clic derecho = borrar
+function bindCurve(cv, o) {
+  const z = o.z, W = cv.width, H = cv.height, toY = v => H * (1 - v), toV = y => Math.max(0, Math.min(1, 1 - y / H));
   const paint = () => {
-    const g = cv.getContext('2d'), info = T(); g.fillStyle = '#111'; g.fillRect(0, 0, W, H);
-    for (let s = 0; s <= ARR_STEPS; s += 16) { g.fillStyle = '#2a2a2f'; g.fillRect(s * z, 0, 1, H); }
+    const g = cv.getContext('2d'), info = o.info(); g.fillStyle = '#111'; g.fillRect(0, 0, W, H);
+    for (let s = 0; s <= o.steps; s += o.grid || 16) { g.fillStyle = '#2a2a2f'; g.fillRect(s * z, 0, 1, H); }
     if (info) { const base = autoNorm(info, info.get()); g.strokeStyle = '#3a3a40'; g.beginPath(); g.moveTo(0, toY(base)); g.lineTo(W, toY(base)); g.stroke(); }
-    const e = au.pts; if (!e.length) return;
-    g.strokeStyle = '#ffb400'; g.lineWidth = 2; g.beginPath(); g.moveTo(0, toY(e[0].v));
-    e.forEach(p => g.lineTo(p.s * z, toY(p.v))); g.lineTo(W, toY(e[e.length - 1].v)); g.stroke(); g.lineWidth = 1;
-    g.fillStyle = '#fff'; e.forEach(p => { g.beginPath(); g.arc(p.s * z, toY(p.v), 4, 0, 6.3); g.fill(); });
+    paintCurve(g, o.pts(), z, H, '#ffb400', o.steps);
   };
   paint(); let drag = null;
-  const pos = ev => { const r = cv.getBoundingClientRect(); return { x: ev.clientX - r.left, y: ev.clientY - r.top }; };
-  const hitPt = p => au.pts.find(q => Math.hypot(q.s * z - p.x, toY(q.v) - p.y) < 7);
+  const pos = ev => { const r = cv.getBoundingClientRect(); return { x: (ev.clientX - r.left) * (W / r.width), y: (ev.clientY - r.top) * (H / r.height) }; };
+  const hitPt = p => o.pts().find(q => Math.hypot(q.s * z - p.x, toY(q.v) - p.y) < 8);
   cv.oncontextmenu = ev => ev.preventDefault();
   cv.onmousedown = ev => {
     const p = pos(ev), h = hitPt(p);
-    if (ev.button === 2) { if (h) { au.pts = au.pts.filter(q => q !== h); paint(); } return; }
-    if (h) drag = h; else { const np = { s: Math.max(0, Math.min(ARR_STEPS, aSnapR(p.x / z))), v: toV(p.y) }; au.pts = [...au.pts, np].sort((a, b) => a.s - b.s); drag = np; }
+    if (ev.button === 2) { if (h) { o.set(o.pts().filter(q => q !== h)); paint(); } return; }
+    if (h) drag = h; else { const np = { s: Math.max(0, Math.min(o.steps, o.snap(p.x / z))), v: toV(p.y) }; o.set([...o.pts(), np].sort((a, b) => a.s - b.s)); drag = np; }
     paint();
   };
-  cv.ondblclick = ev => { const h = hitPt(pos(ev)); if (h) { au.pts = au.pts.filter(q => q !== h); paint(); } };
-  const mv = ev => { if (!drag) return; const p = pos(ev); drag.s = Math.max(0, Math.min(ARR_STEPS, aSnapR(p.x / z))); drag.v = toV(p.y); paint(); };
-  const up = () => { if (drag) { au.pts.sort((a, b) => a.s - b.s); drag = null; paint(); } };
+  cv.ondblclick = ev => { const h = hitPt(pos(ev)); if (h) { h.c = CURVES[(CURVES.indexOf(h.c || 'lin') + 1) % CURVES.length]; status('Forma del tramo: ' + CURVE_NAMES[h.c], 2500); paint(); } };
+  const mv = ev => { if (!drag) return; const p = pos(ev); drag.s = Math.max(0, Math.min(o.steps, o.snap(p.x / z))); drag.v = toV(p.y); paint(); };
+  const up = () => { if (drag) { o.pts().sort((a, b) => a.s - b.s); drag = null; paint(); } };
   window.addEventListener('mousemove', mv); window.addEventListener('mouseup', up);
+}
+function bindAuto(cv, au) { bindCurve(cv, { z: ARR.z, steps: ARR_STEPS, snap: aSnapR, pts: () => au.pts, set: p => { au.pts = p; }, info: () => autoInfo(au.target, song) }); }
+function paintAutoClip(cv, it, z) {
+  const g = cv.getContext('2d'), H = cv.height; g.clearRect(0, 0, cv.width, H); g.fillStyle = 'rgba(0,0,0,.55)'; if (!it.pts || !it.pts.length) return;
+  paintCurve(g, it.pts.map(p => Object.assign({}, p)), z, H, 'rgba(0,0,0,.75)', it.l);
+}
+// editor de un clip de automatización en su ventana
+function renderAutoEditor() {
+  const pane = $('#autoPane'); pane.innerHTML = ''; const it = ARR.editAuto;
+  if (!it || !song.arr.includes(it)) { pane.appendChild(el('div', '', 'Doble clic en un clip de automatización del Playlist para editarlo. Se crea con clic derecho en cualquier perilla o deslizador.')); return; }
+  const T = autoInfo(it.auto, song); $('#win-auto .wt b').textContent = 'Automatización — ' + (T ? T.label : it.auto);
+  const bar = el('div', 'rollbar'); bar.appendChild(el('span', '', 'Clic: añadir punto · arrastrar: mover · doble clic en un punto: forma del tramo · clic derecho: borrar'));
+  const reset = el('button', '', 'Línea plana'); reset.onclick = () => { const v = T ? autoNorm(T, T.get()) : 0.5; it.pts = [{ s: 0, v }, { s: it.l, v }]; renderAutoEditor(); renderArr(); }; bar.appendChild(reset);
+  const lfo = el('button', '', 'LFO seno'); lfo.title = 'Rellena el clip con una onda seno'; lfo.onclick = () => { const n = Math.max(8, Math.round(it.l)); it.pts = Array.from({ length: n + 1 }, (_, k) => ({ s: k * it.l / n, v: 0.5 + 0.4 * Math.sin(k * 6.2832 / Math.max(1, n / 2)), c: 'smooth' })); renderAutoEditor(); renderArr(); }; bar.appendChild(lfo);
+  pane.appendChild(bar);
+  const W = Math.max(420, Math.min(1100, pane.clientWidth - 20)), cv = el('canvas'); cv.width = W; cv.height = 220; cv.style.cssText = 'display:block;width:' + W + 'px;background:#111;border-radius:3px;cursor:crosshair'; pane.appendChild(cv);
+  bindCurve(cv, { z: W / it.l, steps: it.l, grid: 4, snap: v => Math.round(v * 4) / 4, pts: () => it.pts, set: p => { it.pts = p; }, info: () => autoInfo(it.auto, song) });
+  cv.addEventListener('mouseup', () => setTimeout(renderArr, 0));
 }
 
 // ----------------------------------------------------------------- reproducción

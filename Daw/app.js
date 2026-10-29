@@ -145,7 +145,7 @@ function renderDevPane() {
 function renderBottom() {                              // refresca las ventanas abiertas
   const t = song.tracks[selTrack], info = t.name + (curClip() ? ' — patrón ' + (selSlot + 1) : '');
   $('#selInfo').textContent = info; $('#selInfoRack').textContent = '— patrón ' + (selSlot + 1);
-  ['rack', 'roll', 'dev', 'mixer', 'imm'].forEach(id => { if (winOpen(id)) renderWin(id); });
+  ['rack', 'roll', 'dev', 'mixer', 'imm', 'auto'].forEach(id => { if (winOpen(id)) renderWin(id); });
   if (typeof updatePatName === 'function') updatePatName();
 }
 function renderAll() { if (view === 'session') renderSession(); else renderArr(); renderBottom(); if (typeof renderBrowser === 'function') renderBrowser(); }

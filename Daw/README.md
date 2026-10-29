@@ -33,6 +33,8 @@ Se abre en el navegador, sin instalar: abre `Daw/index.html` (o `python3 -m http
 - **Más flujo del Playlist (FL)**: selección múltiple con marquesina (Selector) o Mayús+clic, mover grupos, Ctrl+arrastrar para copiar, Ctrl+C / Ctrl+V en el cursor, duplicar (Ctrl+D / Ctrl+B), flechas para mover (Mayús = un compás, ↑↓ = de pista), Ctrl+A, Ctrl+rueda para zoom, altura de pista, solo de pista (clic derecho en el LED), Hacer único un patrón, Loop = selección, agrupar clips, varios arreglos (nuevo y clonar) y renderizar un patrón a audio.
 - **Más herramientas del piano roll**: Chop, Flam, azar de velocidades y de notas, escalar velocidades y ajustar a escala.
 - Como referencia de funciones se consultó la lista pública de capacidades de Lemon Studio (GPL-3.0, Rust); no se copió código.
+- **Automatización avanzada**: cada punto guarda la forma de su tramo (lineal, suave, entrada, salida, escalón; doble clic en el punto la cambia). Clic derecho en una perilla crea un **clip de automatización dentro del Playlist** (se mueve, alarga, silencia y borra como cualquier clip) con su propia ventana de edición, botón de línea plana y LFO seno.
+- **Historial de deshacer**: sección Historial en el Navegador con los últimos cambios etiquetados; un clic vuelve al estado anterior a ese cambio y se puede rehacer.
 - **Instrumentos**: sintetizador (onda, corte, resonancia, ataque, release) y caja de ritmos sintetizada (8 sonidos).
 - **Efectos**: filtro, delay, reverb, distorsión, chorus, compresor, EQ 3 bandas.
 - **Proyecto**: Guardar/Abrir (JSON), Exportar WAV (render offline del Arrangement).

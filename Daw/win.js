@@ -4,13 +4,13 @@
 
 // ----------------------------------------------------------------- ventanas flotantes
 const WINS = { rack: { x: 232, y: 112, w: 700, h: 400 }, roll: { x: 300, y: 190, w: 960, h: 500 }, mixer: { x: 232, y: 130, w: 1020, h: 600 },
-  dev: { x: 900, y: 118, w: 330, h: 430 }, imm: { x: 330, y: 150, w: 800, h: 540 } };
+  dev: { x: 900, y: 118, w: 330, h: 430 }, auto: { x: 300, y: 300, w: 760, h: 340 }, imm: { x: 330, y: 150, w: 800, h: 540 } };
 let zTop = 30;
 const winEl = id => $('#win-' + id);
 const winOpen = id => { const e = winEl(id); return !!e && !e.hidden; };
 function renderWin(id) {
   if (id === 'rack') renderRackPane(); else if (id === 'roll') renderClipPane(); else if (id === 'dev') renderDevPane();
-  else if (id === 'mixer') renderMixer(); else if (id === 'imm') renderImm();
+  else if (id === 'mixer') renderMixer(); else if (id === 'imm') renderImm(); else if (id === 'auto') renderAutoEditor();
 }
 function focusWin(id) { FOCUS = id; winEl(id).style.zIndex = ++zTop; document.querySelectorAll('.win').forEach(w => w.classList.toggle('active', w === winEl(id))); }
 function openWin(id) { const e = winEl(id); if (!e) return; e.hidden = false; focusWin(id); updateWinButtons(); renderWin(id); }
@@ -100,7 +100,7 @@ function buildMenus() {
 }
 
 // ----------------------------------------------------------------- navegador
-const BR = { open: { Proyecto: true, Patrones: true, Instrumentos: true, Efectos: false, Samples: true } };
+const BR = { open: { Proyecto: true, Patrones: true, Instrumentos: true, Efectos: false, Samples: true, Historial: false } };
 function renderBrowser() {
   const root = $('#browser'); root.innerHTML = '';
   const sec = (name, fill) => {
@@ -114,6 +114,11 @@ function renderBrowser() {
   sec('Efectos', b => Object.keys(FX_DEFS).forEach(k => item(b, FX_DEFS[k].name, '#35c9c9', () => status('Doble clic para insertarlo en el insert de la pista seleccionada.'), () => {
     const ins = song.inserts[song.tracks[selTrack].insert], slot = ins.fx.findIndex(f => !f); if (slot < 0) { status('El insert no tiene ranuras libres.'); return; }
     ins.fx[slot] = fxNew(k); if (eng) eng.rebuildInsert(song.tracks[selTrack].insert); mixSel = song.tracks[selTrack].insert; MIXG = false; openWin('mixer'); status(FX_DEFS[k].name + ' añadido al ' + ins.name + '.'); })));
+  sec('Historial', b => {
+    if (!UNDO.stack.length) { b.appendChild(el('div', 'bnote', 'Aún no hay cambios.')); return; }
+    UNDO.stack.map((e, i) => [e, i]).slice(-30).reverse().forEach(([e, i]) => { const tm = new Date(e.t), d = item(b, tm.toLocaleTimeString().slice(0, 8) + '  ' + e.label, '#8995a0', () => gotoHistory(i)); d.title = 'Clic: volver al estado anterior a este cambio'; });
+    const cur = el('div', 'bnote', 'Clic en un cambio para volver antes de él (puedes rehacer).'); b.appendChild(cur);
+  });
   sec('Samples', b => {
     const ids = Object.keys(AUDIO); if (!ids.length) b.appendChild(el('div', 'bnote', 'Sin samples. Importa uno.'));
     ids.forEach(id => { const d0 = item(b, '♪ ' + AUDIO[id].name, '#9ecb6a', () => { ensureEngine(); const s = eng.ctx.createBufferSource(); s.buffer = AUDIO[id].buf; s.connect(eng.master); s.start(); },
@@ -138,12 +143,15 @@ function initToolbar() {
 }
 
 // ----------------------------------------------------------------- clips de automatización (clic derecho en un control)
+function freeLane(s, l) {                                      // pista del Playlist sin nada en ese tramo (de abajo hacia arriba)
+  for (let i = song.lanes.length - 1; i >= 0; i--) if (!song.arr.some(it => laneOf(it) === i && it.s < s + l && it.s + it.l > s)) return i;
+  return ARR.lane || 0;
+}
 function createAutoClip(id) {
   const T = autoInfo(id, song); if (!T) { status('Ese parámetro no se puede automatizar.'); return; }
-  let lane = song.autos.find(a => a.target === id);
-  if (!lane) { lane = { target: id, pts: [{ s: ARR.cursor, v: autoNorm(T, T.get()) }] }; song.autos.push(lane); }
-  setView('arr'); status('Clip de automatización creado para: ' + T.label + '. Dibuja la curva en el carril inferior del Playlist.', 6000);
-  setTimeout(() => { const m = $('main'); m.scrollTop = m.scrollHeight; }, 50);
+  const s = aSnapF(ARR.cursor), l = 32, v = autoNorm(T, T.get()), it = { lane: freeLane(s, l), auto: id, s, l, off: 0, pts: [{ s: 0, v }, { s: l, v }] };
+  song.arr.push(it); ARR.editAuto = it; ARR.sel = it; ARR.sels = new Set([it]); setView('arr'); openWin('auto');
+  status('Clip de automatización creado en el Playlist para: ' + T.label + '. Edítalo en su ventana; muévelo y alárgalo como cualquier clip.', 7000);
 }
 document.addEventListener('contextmenu', e => {
   const t = e.target.closest && e.target.closest('[data-auto]'); document.querySelectorAll('.ctxmenu').forEach(x => x.remove()); if (!t) return;

@@ -225,13 +225,17 @@ function autoTargets(S) {                    // lista agrupada para el selector
 const autoMap = (T, v) => T.log ? T.min * Math.pow(T.max / T.min, v) : T.min + (T.max - T.min) * v;
 const autoNorm = (T, x) => Math.max(0, Math.min(1, T.log ? Math.log(x / T.min) / Math.log(T.max / T.min) : (x - T.min) / (T.max - T.min)));
 
-// valor de una envolvente [{s, v}] (ordenada por s) en el paso x; interpola linealmente
+// forma de un tramo entre dos puntos: lin, smooth, in, out, step (la curva la guarda el punto de inicio)
+function segVal(a, b, t) {
+  const c = a.c || 'lin'; let u = t;
+  if (c === 'step') u = 0; else if (c === 'smooth') u = t * t * (3 - 2 * t); else if (c === 'in') u = t * t; else if (c === 'out') u = 1 - (1 - t) * (1 - t);
+  return a.v + (b.v - a.v) * u;
+}
+// valor de una envolvente [{s, v, c}] (ordenada por s) en el paso x
 function envAt(env, x, def) {
   if (!env || !env.length) return def;
   if (x <= env[0].s) return env[0].v;
-  for (let i = 1; i < env.length; i++) if (x <= env[i].s) {
-    const a = env[i - 1], b = env[i]; return b.s === a.s ? b.v : a.v + (b.v - a.v) * (x - a.s) / (b.s - a.s);
-  }
+  for (let i = 1; i < env.length; i++) if (x <= env[i].s) { const a = env[i - 1], b = env[i]; return b.s === a.s ? b.v : segVal(a, b, (x - a.s) / (b.s - a.s)); }
   return env[env.length - 1].v;
 }
 
@@ -450,6 +454,7 @@ class Engine {
       (s.autos || []).forEach(au => { if (au.pts && au.pts.length) this.applyAuto(au, step, time, sd); });
       const anyLS = s.lanes && s.lanes.some(l => l.solo);
       s.arr.forEach(it => {
+        if (it.auto !== undefined) { if (!it.m && step >= it.s && step < it.s + it.l && it.pts && it.pts.length) this.applyAuto({ target: it.auto, pts: it.pts.map(p => ({ s: p.s + it.s, v: p.v, c: p.c })) }, step, time, sd); return; }
         if (anyLS && !(s.lanes[it.lane !== undefined ? it.lane : it.t] && s.lanes[it.lane !== undefined ? it.lane : it.t].solo)) return;
         if (it.pat !== undefined) {                                   // patrón completo: suenan todos los canales
           if (it.m || step < it.s || step >= it.s + it.l || (s.lanes && s.lanes[it.lane] && s.lanes[it.lane].mute)) return;

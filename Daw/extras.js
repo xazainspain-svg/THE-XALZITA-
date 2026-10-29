@@ -4,20 +4,31 @@
 
 const stepSec = () => 60 / song.bpm / 4;
 
-// ----------------------------------------------------------------- deshacer / rehacer (instantáneas del proyecto)
-const UNDO = { stack: [], redo: [], pre: null };
+// ----------------------------------------------------------------- deshacer / rehacer con historial (instantáneas con etiqueta)
+const UNDO = { stack: [], redo: [], pre: null, label: 'Cambio' };
 const snap = () => JSON.stringify(song);
-document.addEventListener('pointerdown', () => { UNDO.pre = snap(); }, true);
-document.addEventListener('keydown', e => { if (!(e.ctrlKey || e.metaKey) || !['z', 'y'].includes(e.key.toLowerCase())) UNDO.pre = snap(); }, true);
+function describe(t) {
+  if (!t || !t.closest) return 'Cambio'; const b = t.closest('button,select,input,.aclip,.arrlane,.cell,.rs,canvas,.knobw'); if (!b) return 'Cambio';
+  if (b.classList.contains('aclip')) return 'Clip del Playlist'; if (b.classList.contains('arrlane')) return 'Playlist'; if (b.classList.contains('rs')) return 'Paso del Channel Rack'; if (b.classList.contains('cell')) return 'Clip en Session';
+  if (b.classList.contains('knobw')) return 'Perilla ' + (b.title || ''); if (b.tagName === 'CANVAS') return b.closest('#win-roll') ? 'Piano roll' : (b.closest('#win-auto') ? 'Automatización' : 'Edición');
+  return (b.title || b.textContent || b.id || 'Cambio').trim().slice(0, 34) || 'Cambio';
+}
+document.addEventListener('pointerdown', e => { UNDO.pre = snap(); UNDO.label = describe(e.target); }, true);
+document.addEventListener('keydown', e => { if (!(e.ctrlKey || e.metaKey) || !['z', 'y'].includes(e.key.toLowerCase())) { UNDO.pre = snap(); UNDO.label = 'Tecla ' + (e.ctrlKey ? 'Ctrl+' : '') + e.key; } }, true);
 const commit = () => setTimeout(() => {
   if (UNDO.pre === null) return; const cur = snap();
-  if (cur !== UNDO.pre) { UNDO.stack.push(UNDO.pre); if (UNDO.stack.length > 100) UNDO.stack.shift(); UNDO.redo = []; }
+  if (cur !== UNDO.pre) { UNDO.stack.push({ snap: UNDO.pre, label: UNDO.label, t: Date.now() }); if (UNDO.stack.length > 100) UNDO.stack.shift(); UNDO.redo = []; if (typeof renderBrowser === 'function' && BR.open['Historial']) renderBrowser(); }
   UNDO.pre = null; updateUndoBtns();
 }, 0);
 ['pointerup', 'keyup', 'change'].forEach(ev => document.addEventListener(ev, commit, true));
 function updateUndoBtns() { $('#btnUndo').disabled = !UNDO.stack.length; $('#btnRedo').disabled = !UNDO.redo.length; }
-function undo() { if (!UNDO.stack.length) return; UNDO.redo.push(snap()); setSong(upgradeSong(JSON.parse(UNDO.stack.pop())), true); UNDO.pre = null; updateUndoBtns(); status('Deshacer'); }
-function redo() { if (!UNDO.redo.length) return; UNDO.stack.push(snap()); setSong(upgradeSong(JSON.parse(UNDO.redo.pop())), true); UNDO.pre = null; updateUndoBtns(); status('Rehacer'); }
+function undo() { if (!UNDO.stack.length) return; UNDO.redo.push(snap()); setSong(upgradeSong(JSON.parse(UNDO.stack.pop().snap)), true); UNDO.pre = null; updateUndoBtns(); status('Deshacer'); }
+function redo() { if (!UNDO.redo.length) return; UNDO.stack.push({ snap: snap(), label: 'Rehacer', t: Date.now() }); setSong(upgradeSong(JSON.parse(UNDO.redo.pop())), true); UNDO.pre = null; updateUndoBtns(); status('Rehacer'); }
+function gotoHistory(i) {                                      // volver al estado anterior a la acción i del historial
+  if (i < 0 || i >= UNDO.stack.length) return; const now = snap(), target = UNDO.stack[i].snap;
+  UNDO.redo = [now]; for (let k = UNDO.stack.length - 1; k > i; k--) UNDO.redo.push(UNDO.stack[k].snap); UNDO.stack.length = i;
+  setSong(upgradeSong(JSON.parse(target)), true); UNDO.pre = null; updateUndoBtns(); status('Historial: vuelto antes de "' + (UNDO.redo.length ? 'esa acción' : '') + '".', 3000);
+}
 $('#btnUndo').onclick = undo; $('#btnRedo').onclick = redo; updateUndoBtns();
 
 // ----------------------------------------------------------------- pistas: añadir / quitar
