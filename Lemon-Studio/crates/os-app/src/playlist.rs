@@ -244,6 +244,10 @@ pub enum Cmd {
     SectionDelete,
     /// Scratch pad (Studio One): a second arrangement to try ideas in, and back.
     ScratchSend,
+    /// Chord track (Studio One): chords live as markers named Chord Dm; clips follow them.
+    ChordSet(u8, bool),
+    ChordRemove,
+    ChordFollow,
     ScratchBring,
     ScratchToggle,
     /// Comp (Xaza): inside the time selection only the last selected take (its track) plays.
@@ -605,6 +609,8 @@ pub struct PlaylistState {
     pub independent: bool,
     /// The arrangement to go back to from the scratch pad.
     pub scratch_back: Option<u16>,
+    /// Semitones each pattern was last transposed to by the chord track (so following twice does not transpose twice).
+    pub chord_applied: std::collections::HashMap<u16, i32>,
     /// Time selection (ticks).
     pub range: Option<(u32, u32)>,
     pub clipboard: Vec<Clip>,
@@ -675,6 +681,7 @@ impl Default for PlaylistState {
             auto_mode: false,
             independent: true,
             scratch_back: None,
+            chord_applied: Default::default(),
             lock_len: None,
             row_h: ROW_H,
             last_header: None,
@@ -2192,6 +2199,70 @@ fn make_unique_lane(s: &mut State, j: usize, old: u16, new: u16) {
     arr_mut(s).clips[j].source = ClipSource::Channel(idx);
 }
 
+const NOTE_NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+/// A chord marker's name ("Chord D", "Chord Dm") as (root 0..=11, minor).
+pub fn parse_chord(name: &str) -> Option<(u8, bool)> {
+    let rest = name.strip_prefix("Chord ")?.trim();
+    let (root, minor) = match rest.strip_suffix('m') {
+        Some(r) => (r, true),
+        None => (rest, false),
+    };
+    NOTE_NAMES.iter().position(|n| *n == root).map(|r| (r as u8, minor))
+}
+
+/// The chord track: the chord markers, in time order, as (tick, root, minor).
+pub fn chords(s: &State) -> Vec<(u32, u8, bool)> {
+    let mut v: Vec<(u32, u8, bool)> = markers(s).iter().filter_map(|m| parse_chord(&m.name).map(|(r, mi)| (m.position, r, mi))).collect();
+    v.sort_by_key(|c| c.0);
+    v
+}
+
+/// Puts a chord at `tick`, replacing the one there.
+pub fn set_chord(s: &mut State, tick: u32, root: u8, minor: bool) {
+    let arr = arr_mut(s);
+    arr.markers.retain(|m| !(m.position == tick && parse_chord(&m.name).is_some()));
+    arr.markers.push(TimeMarker::new(tick, &format!("Chord {}{}", NOTE_NAMES[usize::from(root % 12)], if minor { "m" } else { "" })));
+    arr.markers.sort_by_key(|m| m.position);
+    s.piano.dirty = true;
+}
+
+/// Transposes the selected pattern clips (else all) to the chord in force where each starts: a clip's pattern is written
+/// in C, and the chord's root moves it up or down (the nearest way, -5..=6 semitones). A pattern shared with other clips
+/// is first made independent. Returns the clips that follow a chord.
+pub fn follow_chords(s: &mut State) -> usize {
+    let list = chords(s);
+    let mut done = 0;
+    let (pat, source) = (s.pattern, s.playlist.source);
+    for i in targets(s) {
+        let Some(c) = clips(s).get(i).copied() else { continue };
+        let ClipSource::Pattern(n) = c.source else { continue };
+        let Some(&(_, root, _)) = list.iter().rev().find(|ch| ch.0 <= c.position) else { continue };
+        let semis = if root > 6 { i32::from(root) - 12 } else { i32::from(root) };
+        let mut p = n;
+        if clips(s).iter().filter(|o| o.source == c.source).count() > 1 {
+            if let Some(new) = make_unique(s, i) {
+                if let Some(a) = s.playlist.chord_applied.get(&n).copied() {
+                    s.playlist.chord_applied.insert(new, a);
+                }
+                p = new;
+            }
+        }
+        let delta = semis - s.playlist.chord_applied.get(&p).copied().unwrap_or(0);
+        if let Some(pt) = s.project.patterns.iter_mut().find(|x| x.number == p) {
+            for nt in &mut pt.notes {
+                nt.key = (i32::from(nt.key) + delta).clamp(0, 131) as u16;
+            }
+        }
+        s.playlist.chord_applied.insert(p, semis);
+        done += 1;
+    }
+    s.pattern = pat;
+    s.playlist.source = source;
+    s.piano.dirty = true;
+    done
+}
+
 const SCRATCH: &str = "Scratch pad";
 
 fn scratch_number(s: &State) -> Option<u16> {
@@ -2255,7 +2326,7 @@ pub struct Section {
 }
 
 pub fn sections(s: &State) -> Vec<Section> {
-    let mut m: Vec<&TimeMarker> = markers(s).iter().filter(|m| m.kind == TimeMarker::PLAIN).collect();
+    let mut m: Vec<&TimeMarker> = markers(s).iter().filter(|m| m.kind == TimeMarker::PLAIN && parse_chord(&m.name).is_none()).collect();
     m.sort_by_key(|m| m.position);
     let end = clips(s).iter().map(Clip::end).max().unwrap_or(0);
     m.iter()
@@ -2952,6 +3023,18 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
                 PItem::new("Delete space", Cmd::DeleteSpace).key("Ctrl+Del"),
             ],
         ),
+        PItem::sub("Chords", {
+            let mut v = vec![PItem::head("Set the chord at the song position")];
+            for minor in [false, true] {
+                for root in 0..12u8 {
+                    v.push(PItem::new(format!("{}{}", NOTE_NAMES[usize::from(root)], if minor { "m" } else { "" }), Cmd::ChordSet(root, minor)));
+                }
+            }
+            v.push(PItem::sep());
+            v.push(PItem::new("Remove the chord here", Cmd::ChordRemove));
+            v.push(PItem::new("Follow chords (selected pattern clips)", Cmd::ChordFollow));
+            v
+        }),
         PItem::sub(
             "Tools",
             vec![
@@ -4893,6 +4976,24 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::SectionDuplicate => {
             snapshot_as(s, "Duplicate section");
             Some(if duplicate_section(s) { "Section duplicated".to_string() } else { "No section at the song position".to_string() })
+        }
+        Cmd::ChordSet(root, minor) => {
+            snapshot_as(s, "Set chord");
+            set_chord(s, s.playlist.pos, root, minor);
+            Some(format!("Chord {}{} at the song position", NOTE_NAMES[usize::from(root)], if minor { "m" } else { "" }))
+        }
+        Cmd::ChordRemove => {
+            snapshot_as(s, "Remove chord");
+            let at = s.playlist.pos;
+            arr_mut(s).markers.retain(|m| !(m.position == at && parse_chord(&m.name).is_some()));
+            Some("Chord removed".to_string())
+        }
+        Cmd::ChordFollow => {
+            snapshot_as(s, "Follow chords");
+            Some(match follow_chords(s) {
+                0 => "No chords before the selected clips: set one with Chords".to_string(),
+                n => format!("{n} clip(s) now follow the chord track"),
+            })
         }
         Cmd::ScratchSend => {
             snapshot_as(s, "Send to scratch pad");

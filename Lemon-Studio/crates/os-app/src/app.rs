@@ -13595,6 +13595,30 @@ mod tests {
         assert_eq!(pl::clips(&app.state).len(), 2);
     }
 
+    /// Chord track (Xaza, after Studio One): clips follow the chord markers, once, and shared patterns become their own.
+    #[test]
+    fn chord_track_transposes_clips() {
+        use crate::playlist as pl;
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.project.patterns[0].notes = vec![Note { length: 24, key: 60, ..Note::step(0, 0) }];
+        let bar = 4 * u32::from(app.state.project.ppq);
+        pl::place(&mut app.state, 0, 0);
+        pl::place(&mut app.state, 0, 2 * bar);
+        pl::set_chord(&mut app.state, 0, 0, false);
+        pl::set_chord(&mut app.state, 2 * bar, 7, true);
+        assert_eq!(pl::chords(&app.state), vec![(0, 0, false), (2 * bar, 7, true)]);
+        assert_eq!(pl::parse_chord("Chord G#m"), Some((8, true)));
+        app.state.playlist.sel.clear();
+        assert_eq!(pl::follow_chords(&mut app.state), 2);
+        let key_of = |app: &App| -> Vec<u16> { pl::clips(&app.state).iter().map(|c| match c.source { os_model::ClipSource::Pattern(n) => app.state.project.pattern(n).unwrap().notes[0].key, _ => 0 }).collect() };
+        let keys = key_of(&app);
+        assert_eq!(keys, vec![60, 55], "the second clip goes down five semitones on G");
+        assert_eq!(pl::follow_chords(&mut app.state), 2);
+        assert_eq!(key_of(&app), keys, "following twice does not transpose twice");
+        assert!(pl::sections(&app.state).is_empty(), "chord markers are not song sections");
+    }
+
     /// Audio-clip channels (dropped audio, FL's audio clips) are hosted and opened by Lemon Sampler, never the info
     /// window (spec: plugins/lemon-sampler.md §7).
     #[test]
