@@ -18190,6 +18190,33 @@ mod tests {
         }
     }
 
+    /// Look check for the playlist's automation line in Automation mode: `OS_SHOT_DIR=dir cargo test -p os-app auto_line_shot -- --ignored`.
+    #[test]
+    #[ignore]
+    fn auto_line_shot() {
+        use crate::playlist as pl;
+        let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.playlist.reset();
+        app.state.z = vec![Win::Playlist];
+        let ws = &mut app.state.wins[Win::Playlist.slot().unwrap()];
+        ws.maxed = true;
+        let ch = pl::create_automation(&mut app.state, 0, "Filter cutoff", 0.2);
+        for (b, v) in [(2.0, 0.8), (4.0, 0.35), (6.0, 0.9), (9.0, 0.15), (12.0, 0.6)] {
+            pl::add_point(&mut app.state, ch, b, v);
+        }
+        let ci = pl::clips(&app.state).iter().position(|c| c.source == os_model::ClipSource::Channel(ch)).unwrap();
+        pl::arr_mut(&mut app.state).clips[ci].length = 16 * u32::from(app.state.project.ppq);
+        app.state.playlist.row_h = 110.0;
+        app.state.playlist.auto_mode = true;
+        app.state.playlist.sel = vec![ci];
+        app.state.playlist_bar_w = 120.0;
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(std::path::PathBuf::from(dir).join("auto_line.png")).unwrap();
+    }
+
     /// Look check for the piano roll's vertical zoom, time markers, Tools menu and snap menus (spec: ui/piano-roll.md
     /// §3a, §10a, §11; ui/piano-snap.md): `OS_SHOT_DIR=dir cargo test -p os-app piano_shots -- --ignored`.
     #[test]
