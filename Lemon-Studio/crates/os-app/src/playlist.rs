@@ -737,6 +737,9 @@ impl PlaylistState {
 /// Height of a member row of a collapsed group: a thin strip showing its clips as bars (§6a).
 pub const STRIP_H: f32 = 6.0;
 
+/// Height of a track's automation lane in Automation mode.
+pub const AUTO_LANE_H: f32 = 124.0;
+
 /// Vertical layout of the tracks (§6a): every track's top in content pixels. Rows are `row_h` tall (`ROW_H` unless
 /// zoomed); members of a collapsed group are `STRIP_H` strips.
 #[derive(Debug, Clone, PartialEq)]
@@ -752,6 +755,13 @@ impl Rows {
         let row_h = snap(f64::from(s.playlist.row_h.clamp(ROW_MIN, ROW_MAX)));
         let mut top = Vec::with_capacity(usize::from(TRACKS) + 1);
         let (mut y, mut collapsed) = (0.0, false);
+        // Automation mode (Ableton): a track holding an automation clip opens into a tall lane.
+        let lanes: Vec<u16> = if s.playlist.auto_mode {
+            let clips = s.project.arrangement().map(|a| a.clips.as_slice()).unwrap_or(&[]);
+            clips.iter().filter(|c| matches!(c.source, ClipSource::Channel(ch) if s.project.automation(ch).is_some())).map(|c| c.track).collect()
+        } else {
+            Vec::new()
+        };
         for t in 0..usize::from(TRACKS) {
             top.push(y);
             let tr = tracks.get(t);
@@ -759,7 +769,7 @@ impl Rows {
             if !grouped {
                 collapsed = tr.is_some_and(|x| x.collapsed);
             }
-            y += if grouped && collapsed { STRIP_H } else { row_h };
+            y += if grouped && collapsed { STRIP_H } else if lanes.contains(&(t as u16)) { row_h.max(AUTO_LANE_H) } else { row_h };
         }
         top.push(y);
         Rows { top, row_h }
@@ -865,7 +875,7 @@ impl PGeom {
         if self.rows.strip(c.track) {
             return Rect::new(x, self.y_of(c.track) + 1.0, w, STRIP_H - 2.0);
         }
-        Rect::new(x, self.y_of(c.track), w, self.rows.clip_h())
+        Rect::new(x, self.y_of(c.track), w, self.rows.height(c.track) - 3.0)
     }
 
     /// `clip_rect` for drawing: an edge further than 2048 px outside the grid is pulled in to that distance, so every
@@ -883,7 +893,7 @@ impl PGeom {
     /// The body of a clip below its title strip (automation curves, notes, waveforms).
     pub fn body(&self, c: &Clip) -> Rect {
         let r = self.clip_rect(c);
-        Rect::new(r.x, r.y + TITLE_H, r.w, (self.rows.clip_h() - TITLE_H - 1.0).max(1.0))
+        Rect::new(r.x, r.y + TITLE_H, r.w, (r.h - TITLE_H - 1.0).max(1.0))
     }
 }
 

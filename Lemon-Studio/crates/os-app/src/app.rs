@@ -18209,7 +18209,6 @@ mod tests {
         }
         let ci = pl::clips(&app.state).iter().position(|c| c.source == os_model::ClipSource::Channel(ch)).unwrap();
         pl::arr_mut(&mut app.state).clips[ci].length = 16 * u32::from(app.state.project.ppq);
-        app.state.playlist.row_h = 110.0;
         app.state.playlist.auto_mode = true;
         app.state.playlist.sel = vec![ci];
         app.state.playlist_bar_w = 120.0;
