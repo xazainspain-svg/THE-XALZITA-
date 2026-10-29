@@ -2141,6 +2141,46 @@ pub fn make_unique(s: &mut State, i: usize) -> Option<u16> {
     Some(next)
 }
 
+/// Makes audio clip `i` independent: its channel is copied (sample, pitch, stretch, reverse, mixer track) and the clip
+/// plays the copy, so changing one clip's tone or speed never changes another's. Returns the new channel.
+pub fn make_unique_audio(s: &mut State, i: usize) -> Option<u16> {
+    let c = *clips(s).get(i)?;
+    let ClipSource::Channel(old) = c.source else { return None };
+    if source_kind(s, c.source) != PickKind::Audio {
+        return None;
+    }
+    let mut ch = s.project.channel(old)?.clone();
+    let base = ch.name.clone().unwrap_or_else(|| "Audio".into());
+    let root = base.split(" #").next().unwrap_or(&base).to_string();
+    ch.name = Some(unique_channel_name(s, &root));
+    ch.index = s.project.channels.len() as u16;
+    let new = ch.index;
+    s.project.channels.push(ch);
+    arr_mut(s).clips[i].source = ClipSource::Channel(new);
+    s.piano.dirty = true;
+    Some(new)
+}
+
+/// The same for an automation clip copied with its audio clip: its curve is copied, and what it drove on the old audio
+/// channel it drives on the new one.
+fn make_unique_lane(s: &mut State, j: usize, old: u16, new: u16) {
+    let ClipSource::Channel(lch) = clips(s)[j].source else { return };
+    let Some(mut a) = s.project.automation(lch).cloned() else { return };
+    let Some(mut ch) = s.project.channel(lch).cloned() else { return };
+    ch.index = s.project.channels.len() as u16;
+    ch.name = Some(unique_channel_name(s, &ch.name.clone().unwrap_or_else(|| "Automation".into())));
+    a.channel = ch.index;
+    for t in &mut a.targets {
+        if (*t >> 16) == u32::from(old) {
+            *t = (u32::from(new) << 16) | (*t & 0xFFFF);
+        }
+    }
+    let idx = ch.index;
+    s.project.channels.push(ch);
+    s.project.automations.push(a);
+    arr_mut(s).clips[j].source = ClipSource::Channel(idx);
+}
+
 /// Independent clips: each pattern clip added since `from` (a duplicate or a paste) gets a pattern of its own, so that
 /// editing one never changes the other.
 pub fn independent_copies(s: &mut State, from: usize) {
@@ -2148,9 +2188,28 @@ pub fn independent_copies(s: &mut State, from: usize) {
         return;
     }
     let (pat, source) = (s.pattern, s.playlist.source);
+    let mut moved: Vec<(u16, u16)> = Vec::new();
     for i in from..clips(s).len() {
-        if matches!(clips(s)[i].source, ClipSource::Pattern(_)) {
-            let _ = make_unique(s, i);
+        match clips(s)[i].source {
+            ClipSource::Pattern(_) => {
+                let _ = make_unique(s, i);
+            }
+            ClipSource::Channel(old) if source_kind(s, clips(s)[i].source) == PickKind::Audio => {
+                if let Some(new) = make_unique_audio(s, i) {
+                    moved.push((old, new));
+                }
+            }
+            _ => {}
+        }
+    }
+    // Automation lanes copied with an audio clip follow it onto the copy's channel.
+    for (old, new) in moved {
+        for i in from..clips(s).len() {
+            if clips(s)[i].source == ClipSource::Channel(new) {
+                if let Some(j) = embedded_lane(s, i).filter(|&j| j >= from) {
+                    make_unique_lane(s, j, old, new);
+                }
+            }
         }
     }
     s.pattern = pat;
@@ -2177,6 +2236,11 @@ pub enum ClipProp {
     Mute,
     Unique,
     Independent,
+    /// Audio clips (their channel): transpose in semitones, detune in cents, reverse, speed.
+    Transpose(i32),
+    Detune(i32),
+    Reverse,
+    Speed(i32),
 }
 
 fn bar_beat(s: &State, t: u32) -> String {
@@ -2204,6 +2268,18 @@ pub fn clip_rows(s: &State) -> Vec<ClipRow> {
         v.push(ClipRow { label: "Gain", value: format!("{:+.1} dB", 20.0 * c.gain().log10()), minus: Some(ClipProp::Gain(-1)), plus: Some(ClipProp::Gain(1)) });
         v.push(ClipRow { label: "Fade in", value: format!("{:.0} ms", c.fade_in().map_or(0.0, |f| f.0)), minus: Some(ClipProp::FadeIn(-1)), plus: Some(ClipProp::FadeIn(1)) });
         v.push(ClipRow { label: "Fade out", value: format!("{:.0} ms", c.fade_out().map_or(0.0, |f| f.0)), minus: Some(ClipProp::FadeOut(-1)), plus: Some(ClipProp::FadeOut(1)) });
+        if let ClipSource::Channel(ch) = c.source {
+            if let Some(chan) = s.project.channel(ch) {
+                let cents = i32::from(chan.pitch_cents);
+                let st = (cents as f32 / 100.0).round() as i32;
+                v.push(ClipRow { label: "Transpose", value: format!("{st:+} st"), minus: Some(ClipProp::Transpose(-1)), plus: Some(ClipProp::Transpose(1)) });
+                v.push(ClipRow { label: "Detune", value: format!("{:+} ct", cents - st * 100), minus: Some(ClipProp::Detune(-1)), plus: Some(ClipProp::Detune(1)) });
+                v.push(ClipRow { label: "Reverse", value: if chan.sound.fx.flags & os_model::SampleFx::REVERSE != 0 { "on".into() } else { "off".into() }, minus: Some(ClipProp::Reverse), plus: None });
+                v.push(ClipRow { label: "Speed", value: format!("x{:.2}", chan.sound.stretch_multiplier()), minus: Some(ClipProp::Speed(-1)), plus: Some(ClipProp::Speed(1)) });
+                let n = clips(s).iter().filter(|o| o.source == c.source).count();
+                v.push(ClipRow { label: "Sample", value: if n > 1 { format!("shared by {n} clips") } else { "independent".into() }, minus: Some(ClipProp::Unique), plus: None });
+            }
+        }
     }
     v.push(ClipRow { label: "Muted", value: if c.muted { "yes".into() } else { "no".into() }, minus: Some(ClipProp::Mute), plus: None });
     if kind == PickKind::Pattern {
@@ -2255,11 +2331,33 @@ pub fn clip_prop(s: &mut State, p: ClipProp) -> Option<String> {
             let ms = (ms + 50.0 * d as f32).max(0.0);
             arr_mut(s).clips[i].set_fade_out((ms > 0.0).then_some((ms, t)));
         }
+        ClipProp::Transpose(_) | ClipProp::Detune(_) | ClipProp::Reverse | ClipProp::Speed(_) => {
+            let ClipSource::Channel(ch) = c.source else { return None };
+            let d = match p {
+                ClipProp::Transpose(d) | ClipProp::Detune(d) | ClipProp::Speed(d) => d,
+                _ => 0,
+            };
+            if let Some(chan) = s.project.channels.iter_mut().find(|x| x.index == ch) {
+                match p {
+                    ClipProp::Transpose(_) => chan.pitch_cents = (i32::from(chan.pitch_cents) + 100 * d).clamp(-4800, 4800) as _,
+                    ClipProp::Detune(_) => chan.pitch_cents = (i32::from(chan.pitch_cents) + 10 * d).clamp(-4800, 4800) as _,
+                    ClipProp::Reverse => chan.sound.fx.flags ^= os_model::SampleFx::REVERSE,
+                    _ => {
+                        let m = chan.sound.stretch_multiplier() * 2f64.powf(f64::from(d) / 24.0);
+                        chan.sound.set_stretch_multiplier(m.clamp(0.25, 4.0));
+                    }
+                }
+            }
+        }
         ClipProp::Mute => arr_mut(s).clips[i].muted = !c.muted,
         ClipProp::Unique => {
             let pat = s.pattern;
             let src = s.playlist.source;
-            let _ = make_unique(s, i);
+            if source_kind(s, c.source) == PickKind::Audio {
+                let _ = make_unique_audio(s, i);
+            } else {
+                let _ = make_unique(s, i);
+            }
             s.pattern = pat;
             s.playlist.source = src;
         }

@@ -11,7 +11,7 @@ use crate::playlist::ClipProp;
 const W: f32 = 330.0;
 const HEAD: f32 = 28.0;
 const ROW: f32 = 26.0;
-pub const SIZE: (f32, f32) = (W, HEAD + 12.0 + 9.0 * ROW);
+pub const SIZE: (f32, f32) = (W, HEAD + 12.0 + 15.0 * ROW);
 
 pub struct ClipViewUi {
     pub pos: (f32, f32),

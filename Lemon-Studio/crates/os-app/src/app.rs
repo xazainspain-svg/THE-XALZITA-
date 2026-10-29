@@ -13496,6 +13496,45 @@ mod tests {
         assert!(pl::clips(&app.state)[1].muted);
     }
 
+    /// Independent audio clips (Xaza): a duplicate plays a copy of the channel, so tone and speed are its own; the Clip
+    /// view edits them; a lane inside the clip goes with its copy.
+    #[test]
+    fn independent_audio_clips_have_their_own_tone() {
+        use crate::playlist as pl;
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::default();
+        app.plugins.available = crate::plugins::builtin();
+        let wav = std::env::temp_dir().join(format!("os-indep-{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.5f32; 96000]).unwrap();
+        let ai = pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("clip");
+        pl::automate_clip(&mut app.state, ai, 0).expect("lane");
+        let n_channels = app.state.project.channels.len();
+        app.state.playlist.sel = (0..pl::clips(&app.state).len()).collect();
+        app.state.playlist.range = None;
+        pl::duplicate(&mut app.state);
+        let audio: Vec<usize> = (0..pl::clips(&app.state).len()).filter(|&i| pl::source_kind(&app.state, pl::clips(&app.state)[i].source) == pl::PickKind::Audio).collect();
+        assert_eq!(audio.len(), 2);
+        let (a, b) = (pl::clips(&app.state)[audio[0]], pl::clips(&app.state)[audio[1]]);
+        assert_ne!(a.source, b.source, "the copy has a channel of its own");
+        assert!(app.state.project.channels.len() >= n_channels + 2, "the audio channel and its lane were copied");
+        // Transpose and reverse on the copy leave the original alone.
+        app.state.playlist.sel = vec![audio[1]];
+        pl::clip_prop(&mut app.state, pl::ClipProp::Transpose(1));
+        pl::clip_prop(&mut app.state, pl::ClipProp::Reverse);
+        let (os_model::ClipSource::Channel(ca), os_model::ClipSource::Channel(cb)) = (a.source, b.source) else { panic!() };
+        assert_eq!(app.state.project.channel(cb).unwrap().pitch_cents, 100);
+        assert_eq!(app.state.project.channel(ca).unwrap().pitch_cents, 0);
+        assert_ne!(app.state.project.channel(cb).unwrap().sound.fx.flags & os_model::SampleFx::REVERSE, 0);
+        assert_eq!(app.state.project.channel(ca).unwrap().sound.fx.flags & os_model::SampleFx::REVERSE, 0);
+        // The copy's lane drives the copy's channel.
+        let lane = pl::embedded_lane(&app.state, audio[1]).expect("lane on the copy");
+        let os_model::ClipSource::Channel(lch) = pl::clips(&app.state)[lane].source else { panic!() };
+        let t = app.state.project.automation(lch).unwrap().targets[0];
+        assert_eq!(t >> 16, u32::from(cb), "retargeted to the copy");
+        assert!(pl::clip_rows(&app.state).iter().any(|r| r.label == "Transpose"));
+        let _ = std::fs::remove_file(&wav);
+    }
+
     /// Audio-clip channels (dropped audio, FL's audio clips) are hosted and opened by Lemon Sampler, never the info
     /// window (spec: plugins/lemon-sampler.md §7).
     #[test]
@@ -18406,6 +18445,38 @@ mod tests {
         app.state.wins[Win::Playlist.slot().unwrap()].maxed = true;
         frame(&mut app, &mut c, None);
         c.pixmap.save_png(std::path::PathBuf::from(dir).join("clip_view.png")).unwrap();
+    }
+
+    /// Look check for the Clip view on an audio clip.
+    #[test]
+    #[ignore]
+    fn audio_clip_view_shot() {
+        use crate::playlist as pl;
+        let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.playlist.reset();
+        app.add_clip_channel(ChannelKind::AudioClip);
+        let ach = app.state.project.channels.iter().rfind(|c| c.kind == ChannelKind::AudioClip).unwrap().index;
+        {
+            let ch = app.state.project.channels.iter_mut().find(|c| c.index == ach).unwrap();
+            ch.sample_path = Some("shot.wav".into());
+            ch.name = Some("Vocal take".into());
+        }
+        let peaks = (0..800).map(|i| ((i as f32 / 7.0).sin() * (i as f32 / 90.0).cos()).abs() * 0.8).map(|a| (-a, a)).collect();
+        app.state.playlist.waves.borrow_mut().insert("shot.wav".into(), Some(std::rc::Rc::new(pl::Wave { rate: 44100, frames: 800 * 2000, per: 2000, peaks })));
+        let bar = 4 * u32::from(app.state.project.ppq);
+        pl::arr_mut(&mut app.state).clips.push(os_model::Clip::new(0, 2 * bar, 0, os_model::ClipSource::Channel(ach)));
+        app.state.playlist.sel = vec![0];
+        pl::duplicate(&mut app.state);
+        app.state.playlist.sel = vec![1];
+        pl::clip_prop(&mut app.state, pl::ClipProp::Transpose(3));
+        pl::clip_prop(&mut app.state, pl::ClipProp::Reverse);
+        app.state.z = vec![Win::Playlist, Win::ClipView];
+        app.state.wins[Win::Playlist.slot().unwrap()].maxed = true;
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(std::path::PathBuf::from(dir).join("audio_clip_view.png")).unwrap();
     }
 
     /// Look check for the piano roll's vertical zoom, time markers, Tools menu and snap menus (spec: ui/piano-roll.md
