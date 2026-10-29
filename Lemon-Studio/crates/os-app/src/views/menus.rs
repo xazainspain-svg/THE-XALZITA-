@@ -239,6 +239,7 @@ const VIEW_ITEMS: &[Item] = &[
     it("Tempo tapper", "Ctrl+F5").tick(),
     it("Touch controller", "Alt+F7").tick(),
     it("Session view", "").on().tick(),
+    it("Object mixer", "").on().tick(),
     it("Script output", ""),
     it("Toolbars", "").sub(),
     it("Plugin performance monitor", ""),
@@ -393,6 +394,7 @@ fn win_of(label: &str) -> Option<Win> {
         // spec: ui/tempo-tapper.md §1
         "Tempo tapper" => Win::Tapper,
         "Session view" => Win::Session,
+        "Object mixer" => Win::Objects,
         // spec: ui/touch-controller.md §2
         "Touch controller" => Win::Touch,
         _ => return None,

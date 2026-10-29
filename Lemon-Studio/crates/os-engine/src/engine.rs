@@ -686,6 +686,8 @@ struct MixTrack {
     slots_enabled: bool,
     /// The three-band equaliser, after the slots and before the fader.
     eq: os_dsp::mixer::TrackEq,
+    /// Object mixer (Xaza): the track placed in space, after the equaliser.
+    spatial: Option<os_dsp::spatial::Spatial>,
     /// Insert effects in slot order (applied before the fader).
     effects: Vec<FxSlot>,
     /// Slot switches and stored mix levels (0..12800) by slot, for hosted effects attached later.
@@ -844,6 +846,7 @@ impl MixTrack {
             polarity: false,
             slots_enabled: true,
             eq: os_dsp::mixer::TrackEq::default(),
+            spatial: None,
             effects: Vec::new(),
             slot_on: [true; 10],
             slot_mix: [12800; 10],
@@ -1372,6 +1375,7 @@ impl Engine {
                         polarity: m.polarity,
                         slots_enabled: m.slots_enabled,
                         eq: os_dsp::mixer::TrackEq::new(m.eq, rate),
+                        spatial: m.spatial.map(|(azimuth, distance)| os_dsp::spatial::Spatial::new(rate, os_dsp::spatial::Position { azimuth, distance })),
                         effects,
                         slot_on: m.slot_on,
                         slot_mix: m.slot_mix.map(mix_level),
@@ -2351,6 +2355,12 @@ impl Engine {
         if self.rate == old.rate && self.tracks.len() == old.tracks.len() {
             for (new, o) in self.tracks.iter_mut().zip(&mut old.tracks) {
                 new.gains = o.gains;
+                // A track still placed in space keeps its delay line, so a rebuild does not click.
+                if let (Some(n), Some(old)) = (new.spatial.as_mut(), o.spatial.take()) {
+                    let p = n.position();
+                    *n = old;
+                    n.set(p);
+                }
                 // The pads keep what they hold while the mixer is laid out as before.
                 new.pad = std::mem::take(&mut o.pad);
                 // Sends and slot mix levels glide on from where they were.
@@ -3376,6 +3386,9 @@ impl Engine {
                 }
             }
             track.eq.process(&mut buf);
+            if let Some(sp) = track.spatial.as_mut() {
+                sp.process(&mut buf);
+            }
             // The four gains glide to their targets: a per-sample step for this tick, at most `limit`, applied as a
             // running sum (spec: audio/mixer.md "Gains ramp").
             let to = track.matrix;
@@ -7375,6 +7388,23 @@ mod tests {
         let m = t.compute_matrix();
         assert!(m[0][1].abs() < 1e-6 && m[1][0].abs() < 1e-6, "original: {m:?}");
     }
+    /// Object mixer (Xaza): a track placed hard right plays louder on the right and a track behind and far is quieter.
+    #[test]
+    fn object_mixer_places_a_track() {
+        let p = insert_project();
+        let base = render_with(&p, false);
+        let side = |buf: &[f32]| buf.chunks_exact(2).fold((0.0f64, 0.0f64), |(l, r), f| (l + f64::from(f[0]).powi(2), r + f64::from(f[1]).powi(2)));
+        let (bl, br) = side(&base);
+        assert!((bl - br).abs() < 1e-6 * bl.max(1.0), "centred to start with: {bl} {br}");
+        let mut q = p.clone();
+        q.mixer[1].spatial = Some((90.0, 0.0));
+        let (l, r) = side(&render_with(&q, false));
+        assert!(r > 2.0 * l, "right: {l} {r}");
+        q.mixer[1].spatial = Some((0.0, 1.0));
+        let (l, r) = side(&render_with(&q, false));
+        assert!(l + r < 0.6 * (bl + br), "far is quieter: {} vs {}", l + r, bl + br);
+    }
+
     /// spec: audio/mixer.md "Main volume", audio/timing.md "Where the file ends": an export's samples never carry the
     /// main volume, only its tail test does; playback hears it.
     #[test]

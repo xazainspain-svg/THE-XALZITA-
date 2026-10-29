@@ -306,6 +306,14 @@ pub fn select(s: &mut State, n: u16, ctrl: bool) {
     s.selected_mixer = n;
 }
 
+/// Object mixer (Xaza): place track `n` in space, or take it out (`None`).
+pub fn set_spatial(s: &mut State, n: u16, pos: Option<(f32, f32)>) {
+    if let Some(m) = track_mut(s, n) {
+        m.spatial = pos;
+        changed(s);
+    }
+}
+
 /// Left click (or press) on a mixer control.
 pub fn hit(app: &mut App, h: MHit) -> Option<String> {
     let (ctrl, shift) = (app.ctrl, app.shift);

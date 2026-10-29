@@ -25,6 +25,7 @@ pub mod curve;
 pub mod glide;
 pub mod level;
 pub mod mixer;
+pub mod spatial;
 pub mod num;
 pub mod resample;
 pub mod stretch;

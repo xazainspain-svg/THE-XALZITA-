@@ -1348,6 +1348,9 @@ pub struct MixerTrack {
     /// Armed for disk recording (the strip's record button). Not saved, and not part of the track: tracks that differ
     /// only here are equal (spec: audio/track-io.md §1.5).
     pub armed: bool,
+    /// Object mixer (Xaza): the track placed in space for headphones, `(azimuth in degrees, distance 0..=1)`; `None` =
+    /// off. Not saved in the project file.
+    pub spatial: Option<(f32, f32)>,
     /// Position of the file's track block this track was loaded from (`None` = made in Lemon Studio). When tracks are
     /// moved, deleted or trimmed, the writer takes the track's effect-slot events from that block (spec:
     /// flp/events/mixer.md "Removing tracks"). Bookkeeping, not part of the track: tracks that differ only here are
@@ -1383,6 +1386,7 @@ impl PartialEq for MixerTrack {
             rec_source,
             monitor,
             armed: _,
+            spatial,
             origin: _,
         } = self;
         *index == o.index
@@ -1408,6 +1412,7 @@ impl PartialEq for MixerTrack {
             && *audio_out == o.audio_out
             && *rec_source == o.rec_source
             && *monitor == o.monitor
+            && *spatial == o.spatial
     }
 }
 
@@ -1450,6 +1455,7 @@ impl MixerTrack {
             rec_source: REC_POST_EQ,
             monitor: MONITOR_ARMED,
             armed: false,
+            spatial: None,
             origin: None,
         }
     }
