@@ -35,7 +35,7 @@ function arrSelect(it) {
   ARR.sel = it; ARR.sels = it ? new Set([it]) : new Set();
   if (it) { if (it.auto !== undefined) { } else if (it.pat !== undefined) selSlot = it.pat; else { selTrack = it.t; selSlot = it.slot; } }
   document.querySelectorAll('.aclip').forEach(d => d.classList.toggle('sel', ARR.sels.has(d._it)));
-  renderBottom();
+  renderAudProps(); renderBottom();
 }
 
 function renderArr() {
@@ -54,6 +54,7 @@ function renderArr() {
   const fol = el('label', ''), fc = el('input'); fc.type = 'checkbox'; fc.checked = ARR.follow; fc.onchange = () => { ARR.follow = fc.checked; }; fol.append(fc, ' Seguir');
   const ttl = el('div', 'ptitle', 'Playlist — Arrangement'); root.insertBefore(ttl, bar);
   makePalette(bar);
+  const ap = el('div', 'audprops'); ap.id = 'audprops'; ap.hidden = true; root.insertBefore(ap, bar.nextSibling);
   const more = el('button', ARR.more ? 'on' : '', 'Más ▾'); more.title = 'Modos, fundidos, strip silence, marcadores, punch y automatización'; more.onclick = () => { ARR.more = !ARR.more; renderArr(); };
   const hs = el('select'); [['36', 'Pista baja'], ['62', 'Pista normal'], ['96', 'Pista alta']].forEach(([v, l]) => { const o = el('option', '', l); o.value = v; hs.appendChild(o); }); hs.value = String(LANE_H); hs.title = 'Altura de las pistas'; hs.onchange = () => { LANE_H = +hs.value; renderArr(); };
   const ar = el('select'); song.arrangements.forEach((a, k) => { const o = el('option', '', a.name); o.value = k; ar.appendChild(o); }); ar.value = song.arrIdx; ar.title = 'Arreglos: varias versiones de la canción';
@@ -109,12 +110,10 @@ function renderArr() {
     lane.ondragover = e => { e.preventDefault(); };
     lane.ondrop = e => {                                  // arrastrar desde el navegador: patrón o sample
       e.preventDefault(); const pat = e.dataTransfer.getData('xaza/pat'), smp = e.dataTransfer.getData('xaza/sample');
-      if (pat !== '') place(e, +pat); else if (smp) {
-        const id = smp, a2 = AUDIO[id]; if (!a2) return; const n = song.tracks.length; if (n >= 16) { status('Máximo 16 pistas.'); return; }
-        const t = trackNew(a2.name, 'audio', COLORS[n % COLORS.length], null, Math.min(n, NINS - 1)); t.clips[selSlot] = audioClipFromId(id); song.tracks.push(t); rebuildEngine();
-        const r = lane.getBoundingClientRect(), L = t.clips[selSlot].bars * 16, s0 = Math.max(0, aSnapF((e.clientX - r.left) / z)), it = { lane: i, t: n, slot: selSlot, s: s0, l: L, off: 0 };
-        song.arr.push(it); resolveOverlap(it); renderAll(); status('Sample colocado en el Playlist (nuevo canal de audio ' + t.name + ').');
-      }
+      const r = lane.getBoundingClientRect(), s0 = Math.max(0, aSnapF((e.clientX - r.left) / z));
+      if (pat !== '') place(e, +pat);
+      else if (smp) { if (placeSampleOnLane(smp, i, s0)) { renderAll(); status('Sample colocado en el Playlist.'); } }
+      else if (e.dataTransfer.files && e.dataTransfer.files.length) dropFiles([...e.dataTransfer.files], i, s0);
     };
     song.arr.filter(it => laneOf(it) === i && itemClip(it)).forEach(it => lane.appendChild(makeClip(it, it.pat !== undefined ? null : song.tracks[it.t], z)));
     if (ARR.range && ARR.range.t === i) { const rb = el('div', 'rangesel'); rb.style.left = ARR.range.s * z + 'px'; rb.style.width = (ARR.range.e - ARR.range.s) * z + 'px'; lane.appendChild(rb); }
@@ -129,10 +128,53 @@ function renderArr() {
     ah.append(sel, del, el('div', 'hint', T ? T.label : 'parámetro no disponible')); board.appendChild(ah);
     const cv = el('canvas'); cv.width = W; cv.height = AUTO_H; cv.className = 'autocv'; board.appendChild(cv); bindAuto(cv, au);
   });
+  renderAudProps();
   ARR.ph = el('div', 'phead'); ARR.ph.style.display = 'none'; board.appendChild(ARR.ph);
   ARR.cur = el('div', 'curmark'); board.appendChild(ARR.cur); moveCursor();
 }
 function moveCursor() { if (ARR.cur) ARR.cur.style.left = (HEAD_W + ARR.cursor * ARR.z) + 'px'; }
+
+
+// ----------------------------------------------------------------- clips de audio
+function placeSampleOnLane(id, lane, step) {
+  const a2 = AUDIO[id]; if (!a2) return null;
+  let n = song.tracks.findIndex(t => t.kind === 'audio' && t.clips.some(c => c && c.audio && c.audio.id === id)), slot;
+  if (n >= 0) slot = song.tracks[n].clips.findIndex(c => c && c.audio && c.audio.id === id);
+  else {
+    n = song.tracks.length; if (n >= 16) { status('Máximo 16 pistas.'); return null; }
+    const t = trackNew(a2.name, 'audio', COLORS[n % COLORS.length], null, Math.min(n, NINS - 1)); slot = selSlot;
+    t.clips[slot] = audioClipFromId(id); song.tracks.push(t); rebuildEngine();
+  }
+  const c = song.tracks[n].clips[slot], it = { lane, t: n, slot, s: Math.max(0, step), l: c.bars * 16, off: 0 };
+  song.arr.push(it); resolveOverlap(it); ARR.sels = new Set([it]); ARR.sel = it; return it;
+}
+async function dropFiles(files, lane, step) {
+  ensureEngine(); let s = step, n = 0;
+  for (const f of files) {
+    if (!/^audio\//.test(f.type) && !/\.(wav|mp3|ogg|flac|m4a|aac)$/i.test(f.name)) continue;
+    try { const buf = await eng.ctx.decodeAudioData(await f.arrayBuffer()), id = newId(); AUDIO[id] = { buf, name: f.name.replace(/\.[^.]+$/, '') };
+      const it = placeSampleOnLane(id, lane, s); if (it) { s = it.s + it.l; n++; } } catch (err) { status('No se pudo decodificar ' + f.name); }
+  }
+  if (n) { renderAll(); status(n + ' archivo(s) de audio colocados en el Playlist.'); }
+}
+const dB = g => g <= 0.001 ? '-∞' : (20 * Math.log10(g)).toFixed(1);
+function renderAudProps() {
+  const box = $('#audprops'); if (!box) return; box.innerHTML = '';
+  const it = ARR.sel, c = it && it.auto === undefined && it.pat === undefined ? itemClip(it) : null, au = c && c.audio;
+  box.hidden = !au; if (!au) return;
+  const A = AUDIO[au.id], ch = () => { renderArr(); };
+  box.appendChild(el('b', '', '♪ ' + (A ? A.name : 'Audio')));
+  const gl = el('label', '', 'Ganancia '), gr = el('input'), gv = el('span', '', dB(it.gain ?? 1) + ' dB'); gr.type = 'range'; gr.min = 0; gr.max = 2; gr.step = 0.01; gr.value = it.gain ?? 1; gr.style.width = '90px';
+  gr.oninput = () => { it.gain = +gr.value; gv.textContent = dB(it.gain) + ' dB'; }; gr.onchange = ch; gl.append(gr, gv);
+  const pl = el('label', '', 'Tono '), pr = el('input'), pv = el('span', '', (it.pitch || 0) + ' st'); pr.type = 'range'; pr.min = -12; pr.max = 12; pr.step = 1; pr.value = it.pitch || 0; pr.style.width = '80px';
+  pr.oninput = () => { it.pitch = +pr.value; pv.textContent = it.pitch + ' st'; }; pl.append(pr, pv);
+  const rv = el('button', (it.rev ?? au.rev) ? 'on' : '', 'Invertir'); rv.onclick = () => { it.rev = !(it.rev ?? au.rev); ch(); };
+  const wp = el('button', (it.warp ?? au.warp) ? 'on' : '', 'Estirar al tempo'); wp.title = 'Ajusta la velocidad al BPM del proyecto (BPM original abajo)'; wp.onclick = () => { it.warp = !(it.warp ?? au.warp); if (it.warp && !(it.ob || au.ob)) it.ob = song.bpm; ch(); };
+  const ob = el('input'); ob.type = 'number'; ob.min = 40; ob.max = 300; ob.value = it.ob || au.ob || song.bpm; ob.style.width = '52px'; ob.title = 'BPM original del sample'; ob.onchange = () => { it.ob = +ob.value; ch(); };
+  const nm = el('button', '', 'Normalizar'); nm.onclick = () => { let pk = 0; for (let k = 0; k < A.buf.numberOfChannels; k++) { const d = A.buf.getChannelData(k); for (let i = 0; i < d.length; i += 4) pk = Math.max(pk, Math.abs(d[i])); } it.gain = pk > 0 ? Math.min(2, 0.99 / pk) : 1; ch(); };
+  const fi = el('button', '', 'Fundido ↗'); fi.onclick = () => { it.fi = Math.min(it.l / 2, 4); ch(); }; const fo = el('button', '', 'Fundido ↘'); fo.onclick = () => { it.fo = Math.min(it.l / 2, 4); ch(); };
+  box.append(gl, pl, rv, wp, ob, nm, fi, fo);
+}
 
 // ----------------------------------------------------------------- clips
 function makeClip(it, t, z) {
@@ -143,7 +185,13 @@ function makeClip(it, t, z) {
   paintClip(cv, it, t, c, z);
   if (c.audio) { const f = el('canvas'); f.width = Math.min(4096, Math.ceil(it.l * z)); f.height = LANE_H; f.style.cssText = 'position:absolute;left:0;top:0;pointer-events:none'; d.appendChild(f); const g = f.getContext('2d'); g.fillStyle = 'rgba(0,0,0,.45)';
     const fi = (it.fi || 0) * z, fo = (it.fo || 0) * z, W = f.width, H = f.height; if (fi > 1) { g.beginPath(); g.moveTo(0, 0); g.lineTo(fi, 0); g.lineTo(0, H); g.fill(); } if (fo > 1) { g.beginPath(); g.moveTo(W, 0); g.lineTo(W - fo, 0); g.lineTo(W, H); g.fill(); } }
-  d.appendChild(el('span', 'lbl', P ? P.name : (c.name || ('Clip ' + (it.slot + 1)))));
+  d.appendChild(el('span', 'lbl', P ? P.name : (c.audio && AUDIO[c.audio.id] ? AUDIO[c.audio.id].name : (c.name || ('Clip ' + (it.slot + 1))))));
+  if (c.audio) {
+    const mk = (cls, ttl, type, st) => { const h = el('div', 'ah ' + cls); h.title = ttl; h.style.cssText = st; h.onmousedown = e => { e.stopPropagation(); if (!ARR.sels.has(it)) arrSelect(it); ARR.sel = it; ARR.drag = { type, it, d, x0: e.clientX, y0: e.clientY, fi0: it.fi || 0, fo0: it.fo || 0, g0: it.gain ?? 1 }; }; d.appendChild(h); };
+    mk('hfi', 'Fundido de entrada', 'fadeIn', 'left:' + Math.max(0, (it.fi || 0) * z - 4) + 'px;top:0');
+    mk('hfo', 'Fundido de salida', 'fadeOut', 'right:' + Math.max(0, (it.fo || 0) * z - 4) + 'px;top:0');
+    mk('hg', 'Ganancia (arrastra arriba/abajo)', 'gain', 'left:50%;top:0');
+  }
   d.onmousedown = e => {
     if (ARR.tool !== 'select') e.stopPropagation();
     if (e.button === 2 || ARR.tool === 'del') { song.arr.splice(song.arr.indexOf(it), 1); if (ARR.sel === it) ARR.sel = null; renderArr(); return; }
@@ -209,6 +257,9 @@ window.addEventListener('mousemove', e => {
     const delta = Math.max(-minS, Math.min(ARR_STEPS - maxE, delta0));
     grp.forEach(g => { g.s = d.orig.get(g) + delta; const n = d.nodes && d.nodes.get(g); if (n) n.style.left = g.s * z + 'px'; });
   }
+  else if (d.type === 'fadeIn') { it.fi = Math.max(0, Math.min(it.l - (it.fo || 0), Math.round((d.fi0 + dx) * 4) / 4)); d.d.querySelector('.hfi').style.left = Math.max(0, it.fi * z - 4) + 'px'; }
+  else if (d.type === 'fadeOut') { it.fo = Math.max(0, Math.min(it.l - (it.fi || 0), Math.round((d.fo0 - dx) * 4) / 4)); d.d.querySelector('.hfo').style.right = Math.max(0, it.fo * z - 4) + 'px'; }
+  else if (d.type === 'gain') { it.gain = Math.max(0, Math.min(2, d.g0 - (e.clientY - d.y0) / 60)); const gr = document.querySelector('#audprops input[type=range]'); if (gr) { gr.value = it.gain; gr.nextSibling.textContent = dB(it.gain) + ' dB'; } d.d.style.opacity = 0.55 + 0.45 * Math.min(1, it.gain); }
   else if (d.type === 'resize') { const e2 = Math.max(it.s + minL, Math.min(ARR_STEPS, aSnapR(d.s0 + d.l0 + dx))); it.l = e2 - it.s; d.d.style.width = Math.max(4, it.l * z - 1) + 'px'; }
   else if (d.type === 'trim') {
     const ns = Math.max(0, Math.min(d.s0 + d.l0 - minL, aSnapR(d.s0 + dx))), ll = itemLoopLen(it);
@@ -237,6 +288,7 @@ window.addEventListener('mouseup', () => {
     else if (ARR.mode === 'shuffle') new Set(d.group.map(laneOf)).forEach(shufflePack); else d.group.forEach(g => resolveOverlap(g));
     renderArr(); return;
   }
+  if (d.type === 'fadeIn' || d.type === 'fadeOut' || d.type === 'gain') { renderArr(); return; }
   if (d.type === 'resize' || d.type === 'trim') {
     if (ARR.mode === 'shuffle') shufflePack(laneOf(d.it)); else resolveOverlap(d.it); renderArr();
   }

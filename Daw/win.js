@@ -122,7 +122,7 @@ function renderBrowser() {
   sec('Samples', b => {
     const ids = Object.keys(AUDIO); if (!ids.length) b.appendChild(el('div', 'bnote', 'Sin samples. Importa uno.'));
     ids.forEach(id => { const d0 = item(b, '♪ ' + AUDIO[id].name, '#9ecb6a', () => { ensureEngine(); const s = eng.ctx.createBufferSource(); s.buffer = AUDIO[id].buf; s.connect(eng.master); s.start(); },
-      () => { const t = song.tracks[selTrack]; if (t.kind === 'sampler') { t.inst.id = id; status('Sample asignado a ' + t.name); renderAll(); } else if (t.kind === 'audio') { t.clips[selSlot] = audioClipFromId(id); renderAll(); } else status('Selecciona una pista sampler o de audio.'); }); d0.draggable = true; d0.title = 'Clic: escuchar · arrástralo al Playlist'; d0.ondragstart = e => { e.dataTransfer.setData('xaza/sample', id); }; });
+      () => { const t = song.tracks[selTrack]; if (t.kind === 'sampler') { t.inst.id = id; status('Sample asignado a ' + t.name); renderAll(); } else if (t.kind === 'audio') { t.clips[selSlot] = audioClipFromId(id); renderAll(); } else { const it = placeSampleOnLane(id, ARR.lane || 0, aSnapF(ARR.cursor)); if (it) { renderAll(); status('Sample insertado en el Playlist en el cursor.'); } } }); d0.draggable = true; d0.title = 'Clic: escuchar · arrástralo al Playlist'; d0.ondragstart = e => { e.dataTransfer.setData('xaza/sample', id); }; });
     const imp = el('button', 'bbtn', 'Importar sample…'); imp.onclick = () => importLibrary(); b.appendChild(imp);
   });
 }

@@ -138,7 +138,7 @@ function renderSamplesPane() {
     row.append(pv, toS, toA); pane.appendChild(row);
   });
 }
-function audioClipFromId(id) { const a = AUDIO[id]; return { bars: Math.min(16, Math.max(1, Math.ceil(a.buf.duration / (stepSec() * 16)))), notes: [], audio: { id } }; }
+function audioClipFromId(id) { const a = AUDIO[id]; return { bars: Math.min(16, Math.max(1, Math.ceil(a.buf.duration / (stepSec() * 16)))), notes: [], name: a.name, audio: { id } }; }
 function importLibrary() { pendingImport = null; $('#audioIn').click(); }
 
 // ----------------------------------------------------------------- MIDI (SMF) importar / exportar

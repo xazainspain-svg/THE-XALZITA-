@@ -171,9 +171,9 @@ function stretchBuf(buf, ratio) {            // estiramiento granular (mantiene 
   }
   return out;
 }
-function audioBuffer(au, bpm) {
+function audioBuffer(au, bpm, pitch = 0) {
   const a = AUDIO[au.id]; if (!a) return null;
-  const start = au.start || 0, end = au.end || a.buf.duration, ratio = au.warp ? (au.ob || 120) / bpm : 1;
+  const start = au.start || 0, end = au.end || a.buf.duration, ratio = au.warp ? ((au.ob || 120) / bpm) * Math.pow(2, pitch / 12) : 1;
   const key = [start.toFixed(3), end.toFixed(3), au.rev ? 1 : 0, ratio.toFixed(3)].join('|'); a.cache = a.cache || {};
   if (!a.cache[key]) {
     const keys = Object.keys(a.cache); if (keys.length > 6) delete a.cache[keys[0]];
@@ -423,16 +423,16 @@ class Engine {
   fire(t, i, clip, local, time, sd, isStart, remain, ex) {
     if (clip.audio) {                                   // clip de audio: se dispara al inicio del clip (o del tramo en el Arrangement)
       if (local !== 0 && !isStart) return;
-      const au = clip.audio, buf = audioBuffer(au, this.song.bpm); if (!buf) return;
-      const off = local * sd; if (off >= buf.duration) return;
-      const src = this.ctx.createBufferSource(), g = this.ctx.createGain(), gain = au.gain === undefined ? 1 : au.gain; src.buffer = buf;
+      const au = clip.audio, pitch = (ex && ex.pitch) || 0, rate = Math.pow(2, pitch / 12), buf = audioBuffer(au, this.song.bpm, pitch); if (!buf) return;
+      const off = local * sd * rate; if (off >= buf.duration) return;
+      const src = this.ctx.createBufferSource(), g = this.ctx.createGain(), gain = au.gain === undefined ? 1 : au.gain; src.buffer = buf; src.playbackRate.value = rate;
       src.connect(g); g.connect(this.tr[i].in);
-      const left = Math.min(remain === undefined ? Infinity : remain * sd, buf.duration - off);
+      const bleft = Math.min(remain === undefined ? Infinity : remain * sd * rate, buf.duration - off), left = bleft / rate;
       let fi = (au.fi === undefined ? 0.003 : au.fi) + ((ex && ex.fi) || 0) * sd, fo = (au.fo === undefined ? 0.003 : au.fo) + ((ex && ex.fo) || 0) * sd;
       if (fi + fo > left) { const k = left / (fi + fo); fi *= k; fo *= k; }
       g.gain.setValueAtTime(fi > 0 ? 0 : gain, time); if (fi > 0) g.gain.linearRampToValueAtTime(gain, time + fi);
       if (fo > 0 && isFinite(left)) { g.gain.setValueAtTime(gain, time + left - fo); g.gain.linearRampToValueAtTime(0, time + left); }
-      src.start(time, off, left); this.srcs.add(src); src.onended = () => this.srcs.delete(src); return;
+      src.start(time, off, bleft); this.srcs.add(src); src.onended = () => this.srcs.delete(src); return;
     }
     const sw = (Math.floor(local + 1e-9) % 2 === 1) ? (this.song.swing || 0) * sd : 0;
     for (const n of clip.notes) {
@@ -467,8 +467,14 @@ class Engine {
         const t = s.tracks[it.t]; let c = t && t.clips[it.slot];
         if (!c || it.m || step < it.s || step >= it.s + it.l) return;
         if (c.audio && it.take !== undefined && c.takes && c.takes[it.take]) c = Object.assign({}, c, { audio: c.takes[it.take] });
+        let ex = null;
+        if (c.audio) {                                              // propiedades propias del clip de audio en el Playlist
+          const au = c.audio; if (it.gain !== undefined || it.rev !== undefined || it.warp !== undefined || it.ob !== undefined)
+            c = Object.assign({}, c, { audio: Object.assign({}, au, { gain: (au.gain === undefined ? 1 : au.gain) * (it.gain === undefined ? 1 : it.gain), rev: it.rev !== undefined ? it.rev : au.rev, warp: it.warp !== undefined ? it.warp : au.warp, ob: it.ob || au.ob }) });
+          ex = { fi: it.fi, fo: it.fo, pitch: it.pitch || 0 };
+        }
         const len = c.bars * 16, local = (step - it.s + (it.off || 0)) % len;
-        this.fire(t, it.t, c, local, time, sd, step === it.s, it.s + it.l - step, c.audio ? { fi: it.fi, fo: it.fo } : null);
+        this.fire(t, it.t, c, local, time, sd, step === it.s, it.s + it.l - step, ex);
       });
     }
     if (this.metro && step % 4 === 0) this.click(time, step % 16 === 0);
