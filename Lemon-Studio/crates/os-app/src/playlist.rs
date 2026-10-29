@@ -233,6 +233,9 @@ pub enum Cmd {
     Heal,
     TrimRange,
     Shuffle,
+    /// Automation mode (Ableton's A): automation clips edit with any tool, a click on the curve moves its segment,
+    /// a click elsewhere in the clip adds a breakpoint.
+    AutoMode,
     /// Comp (Xaza): inside the time selection only the last selected take (its track) plays.
     Comp,
     Delete,
@@ -582,6 +585,8 @@ pub struct PlaylistState {
     pub pos: u32,
     /// Shuffle edit mode (Pro Tools): deleting clips closes the gap they leave on their track.
     pub shuffle: bool,
+    /// Automation mode (key A).
+    pub auto_mode: bool,
     /// Time selection (ticks).
     pub range: Option<(u32, u32)>,
     pub clipboard: Vec<Clip>,
@@ -649,6 +654,7 @@ impl Default for PlaylistState {
             stretch: false,
             stretch_base: Vec::new(),
             shuffle: false,
+            auto_mode: false,
             lock_len: None,
             row_h: ROW_H,
             last_header: None,
@@ -2471,6 +2477,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
                 PItem::new("Heal separation", Cmd::Heal).key("Alt+H"),
                 PItem::new("Trim to time selection", Cmd::TrimRange).key("Alt+R"),
                 PItem::new("Shuffle mode (close gaps on delete)", Cmd::Shuffle).key("Alt+J"),
+                PItem::new("Automation mode (edit curves with any tool)", Cmd::AutoMode).key("A"),
                 PItem::new("Comp: use this take in the selection", Cmd::Comp).key("Alt+K"),
                 PItem::new("Delete", Cmd::Delete).key("Del"),
                 PItem::sep(),
@@ -2858,6 +2865,8 @@ pub enum PlDrag {
     TimeSel { t0: u32 },
     Marker { i: usize, dt: i64, t0: u32 },
     Point { ch: u16, clip: usize, i: usize, x0: f32, y0: f32, beat0: f64, v0: f64, lock: Option<bool> },
+    /// Automation mode: the segment from point `i` to the next one moves up or down as one.
+    Segment { ch: u16, clip: usize, i: usize, y0: f32, va: f64, vb: f64 },
     Tension { ch: u16, i: usize, y0: f32, t0: f32 },
     /// An audio clip's fade-in (`out` false) or fade-out handle (§9a).
     Fade { clip: usize, out: bool },
@@ -3091,7 +3100,8 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
             }
         }
         let auto_clip = matches!(c.source, ClipSource::Channel(ch) if s.project.automation(ch).is_some());
-        if auto_clip && matches!(tool, PlTool::Draw | PlTool::Paint | PlTool::Select) && !app.ctrl && g.body(&c).contains(x, y) {
+        let amode = s.playlist.auto_mode;
+        if auto_clip && (amode || matches!(tool, PlTool::Draw | PlTool::Paint | PlTool::Select)) && !app.ctrl && g.body(&c).contains(x, y) {
             let ClipSource::Channel(ch) = c.source else { return };
             if let Some(i) = point_near(s, &g, ci, x, y) {
                 if right {
@@ -3109,6 +3119,32 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                     snapshot(s);
                     let t0 = s.project.automation(ch).map_or(0.0, |a| a.points[i].tension);
                     app.drag = Some(Drag::Pl(PlDrag::Tension { ch, i, y0: y, t0 }));
+                    return;
+                }
+            }
+            // Automation mode (Ableton): the segment under the click moves as one; elsewhere a click adds a breakpoint.
+            if amode && !right && edge(g.clip_rect(&c), x) == 0 {
+                if curve_dist(s, &g, ci, x, y).is_some_and(|d| d <= 6.0) {
+                    let beat = beat_at(s, &g, &c, x);
+                    if let Some(a) = s.project.automation(ch) {
+                        let k = a.points.partition_point(|p| p.beat <= beat).saturating_sub(1);
+                        if k < a.points.len() {
+                            let (va, vb) = (a.points[k].value, a.points.get(k + 1).map_or(a.points[k].value, |q| q.value));
+                            snapshot(s);
+                            app.drag = Some(Drag::Pl(PlDrag::Segment { ch, clip: ci, i: k, y0: y, va, vb }));
+                            app.hint = Cow::Owned(value_text(s, ch, va));
+                            return;
+                        }
+                    }
+                } else {
+                    snapshot(s);
+                    let beat = beat_at(s, &g, &c, x);
+                    let v = value_at_y(g.body(&c), y);
+                    if let Some(i) = add_point(s, ch, beat, v) {
+                        app.drag = Some(Drag::Pl(PlDrag::Point { ch, clip: ci, i, x0: x, y0: y, beat0: beat, v0: v, lock: None }));
+                        app.hint = Cow::Owned(value_text(s, ch, v));
+                    }
+                    app.invalidate();
                     return;
                 }
             }
@@ -3347,6 +3383,7 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
             | PlDrag::TimeSel { .. }
             | PlDrag::Marker { .. }
             | PlDrag::Point { .. }
+            | PlDrag::Segment { .. }
             | PlDrag::Tension { .. }
     );
     // Moving, resizing or slipping clips changes only those clips and the overview's miniature; an audio clip's fade,
@@ -3500,6 +3537,24 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
             move_point(s, ch, i, beat, v);
             let v = s.project.automation(ch).and_then(|a| a.points.get(i)).map_or(v, |p| p.value);
             app.hint = Cow::Owned(value_text(&app.state, ch, v));
+        }
+        PlDrag::Segment { ch, clip, i, y0, va, vb } => {
+            let Some(c) = clips(s).get(clip).copied() else { return };
+            let body = g.body(&c);
+            // Both ends move by the same amount, kept inside 0..=1 together.
+            let lo = -va.min(vb);
+            let hi = 1.0 - va.max(vb);
+            let dv = (f64::from((y0 - y) / (body.h - 4.0).max(1.0))).clamp(lo, hi);
+            if let Some(a) = s.project.automation_mut(ch) {
+                if let Some(p) = a.points.get_mut(i) {
+                    p.value = va + dv;
+                }
+                if let Some(q) = a.points.get_mut(i + 1) {
+                    q.value = vb + dv;
+                }
+                s.piano.dirty = true;
+            }
+            app.hint = Cow::Owned(value_text(&app.state, ch, va + dv));
         }
         PlDrag::Tension { ch, i, y0, t0 } => {
             if let Some(p) = s.project.automation_mut(ch).and_then(|a| a.points.get_mut(i)) {
@@ -4252,6 +4307,10 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             trim_range(s);
             None
         }
+        Cmd::AutoMode => {
+            s.playlist.auto_mode = !s.playlist.auto_mode;
+            Some(if s.playlist.auto_mode { "Automation mode on: click a curve to move its segment, click the clip to add a breakpoint, Alt+drag the handle for the curve" } else { "Automation mode off" }.into())
+        }
         Cmd::Shuffle => {
             s.playlist.shuffle = !s.playlist.shuffle;
             Some(if s.playlist.shuffle { "Shuffle mode on: deleting closes the gap" } else { "Shuffle mode off" }.into())
@@ -4934,6 +4993,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Character(c) if alt && !ctrl && c.eq_ignore_ascii_case("h") => Cmd::Heal,
         Key::Character(c) if alt && !ctrl && c.eq_ignore_ascii_case("r") => Cmd::TrimRange,
         Key::Character(c) if alt && !ctrl && c.eq_ignore_ascii_case("j") => Cmd::Shuffle,
+        Key::Character(c) if !alt && !ctrl && !shift && c.eq_ignore_ascii_case("a") => Cmd::AutoMode,
         Key::Character(c) if alt && !ctrl && c.eq_ignore_ascii_case("k") => Cmd::Comp,
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("z") => Cmd::Undo,
         Key::Character(c) if alt && !ctrl && c.eq_ignore_ascii_case("m") => Cmd::Mute(!shift),

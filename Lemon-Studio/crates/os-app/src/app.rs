@@ -13294,6 +13294,53 @@ mod tests {
         let _ = std::fs::remove_file(&wav);
     }
 
+    /// Automation mode (Xaza, Ableton's A): a click on the curve moves its segment as one, a click elsewhere in the clip
+    /// adds a breakpoint, with any tool.
+    #[test]
+    fn automation_mode_moves_segments_and_adds_breakpoints() {
+        use crate::playlist as pl;
+        let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        let ch = pl::create_automation(&mut app.state, 0, "Auto", 0.5);
+        pl::add_point(&mut app.state, ch, 3.0, 0.9);
+        pl::add_point(&mut app.state, ch, 7.5, 0.1);
+        app.state.playlist.tool = pl::PlTool::Slip;
+        app.state.playlist.auto_mode = true;
+        let ws = &mut app.state.wins[Win::Playlist.slot().unwrap()];
+        ws.maxed = false;
+        ws.rect = Rect::new(150.0, 90.0, 1600.0, 900.0);
+        app.state.z = vec![Win::Playlist];
+        frame(&mut app, &mut a, None);
+        let g = app.pl_grid.unwrap();
+        let geom = pl::PGeom::new(&app.state, g);
+        let ci = pl::clips(&app.state).iter().position(|c| c.source == os_model::ClipSource::Channel(ch)).expect("automation clip");
+        let c = pl::clips(&app.state)[ci];
+        let body = geom.body(&c);
+        let vals = |app: &App| app.state.project.automation(ch).unwrap().points.iter().map(|p| p.value).collect::<Vec<_>>();
+        let before = vals(&app);
+        // Drag the segment between the points at beats 3 and 4 (their midpoint) down by 6 px.
+        let beat = 3.5;
+        let v = app.state.project.automation(ch).unwrap().value_at(beat).unwrap();
+        let (x, y) = (pl::point_x(&app.state, &geom, &c, beat), pl::value_y(body, v));
+        app.mouse_move(x, y);
+        app.mouse_down();
+        app.mouse_move(x, y + 6.0);
+        app.mouse_up();
+        let after = vals(&app);
+        assert_eq!(after.len(), before.len(), "no breakpoint added: {before:?} -> {after:?}");
+        let (d1, d2) = (after[1] - before[1], after[2] - before[2]);
+        assert!(d1 < -0.01 && (d1 - d2).abs() < 1e-9, "both ends moved down together: {before:?} -> {after:?}");
+        // A click away from the curve adds a breakpoint.
+        let n = after.len();
+        let far = body.y + 3.0;
+        let x2 = pl::point_x(&app.state, &geom, &c, 1.0);
+        app.mouse_move(x2, far);
+        app.mouse_down();
+        app.mouse_up();
+        assert_eq!(vals(&app).len(), n + 1, "a breakpoint was added");
+    }
+
     /// Audio-clip channels (dropped audio, FL's audio clips) are hosted and opened by Lemon Sampler, never the info
     /// window (spec: plugins/lemon-sampler.md §7).
     #[test]
