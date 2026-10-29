@@ -13151,6 +13151,29 @@ mod tests {
         assert!(buf.iter().any(|v| v.abs() > 0.05), "preview is silent");
     }
 
+    /// Strip silence (Xaza): a clip of tone, one second of silence, tone is cut into the two tones.
+    #[test]
+    fn strip_silence_cuts_quiet_stretch() {
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::default();
+        app.plugins.available = crate::plugins::builtin();
+        let mut buf = vec![0.5f32; 96000];
+        buf.extend(vec![0.0f32; 96000]);
+        buf.extend(vec![0.5f32; 96000]);
+        let wav = std::env::temp_dir().join(format!("os-strip-silence-{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &buf).unwrap();
+        crate::playlist::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("audio clip");
+        let before = crate::playlist::clips(&app.state).iter().filter(|c| c.track == 0).map(|c| c.length).sum::<u32>();
+        app.state.playlist.sel.clear();
+        let n = crate::playlist::strip_silence(&mut app.state, -50.0, 150.0);
+        let cs: Vec<_> = crate::playlist::clips(&app.state).iter().filter(|c| c.track == 0).copied().collect();
+        let after: u32 = cs.iter().map(|c| c.length).sum();
+        assert_eq!(n, 1, "one silent stretch removed");
+        assert_eq!(cs.len(), 2, "two pieces remain");
+        assert!(after < before * 3 / 4, "length shrank: {before} -> {after}");
+        let _ = std::fs::remove_file(&wav);
+    }
+
     /// Audio-clip channels (dropped audio, FL's audio clips) are hosted and opened by Lemon Sampler, never the info
     /// window (spec: plugins/lemon-sampler.md §7).
     #[test]

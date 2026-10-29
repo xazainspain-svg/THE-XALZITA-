@@ -225,6 +225,8 @@ pub enum Cmd {
     Copy,
     Paste,
     Duplicate,
+    /// Strip silence (Xaza): cuts the quiet stretches out of the selected audio clips.
+    StripSilence,
     Delete,
     ShiftTime(i32),
     ShiftTracks(i32),
@@ -1592,6 +1594,66 @@ pub fn slice(s: &mut State, tick: u32, t0: u16, t1: u16) -> usize {
     hit.iter().filter(|&&i| split(s, i, tick).is_some()).count()
 }
 
+/// Strip silence: quiet below this level (dBFS) ...
+pub const STRIP_DB: f32 = -50.0;
+/// ... for at least this long (milliseconds) is cut out of an audio clip.
+pub const STRIP_MIN_MS: f64 = 150.0;
+
+/// Cuts the silent stretches out of the selected (else all) audio clips: each clip is split around every run of
+/// at least `min_ms` whose level stays under `db`, and the silent pieces are deleted. Returns the pieces removed.
+pub fn strip_silence(s: &mut State, db: f32, min_ms: f64) -> usize {
+    let thr = 10f32.powf(db / 20.0);
+    let mut idx: Vec<usize> = targets(s).into_iter().filter(|&i| clips(s).get(i).is_some_and(|c| source_kind(s, c.source) == PickKind::Audio)).collect();
+    idx.sort_unstable();
+    let mut removed = 0;
+    for &i in idx.iter().rev() {
+        let Some(c) = clips(s).get(i).copied() else { continue };
+        let ClipSource::Channel(ch) = c.source else { continue };
+        let Some(path) = channel_of(s, ch).and_then(|x| x.sample_path.clone()) else { continue };
+        let Some(w) = s.playlist.wave(&path) else { continue };
+        let (w0, w1) = window(s, &c);
+        let ms_tick = to_src(s, c.source, 1.0);
+        if ms_tick <= 0.0 || w.per == 0 { continue }
+        let chunk_ms = w.per as f64 * 1000.0 / f64::from(w.rate.max(1));
+        // Silent runs in the clip's window, as (start ms, end ms).
+        let mut runs: Vec<(f64, f64)> = Vec::new();
+        let mut open: Option<f64> = None;
+        let mut k = (w0 / chunk_ms).floor().max(0.0) as usize;
+        loop {
+            let t0 = (k as f64 * chunk_ms).max(w0);
+            if t0 >= w1 || k >= w.peaks.len() { break }
+            let t1 = ((k + 1) as f64 * chunk_ms).min(w1);
+            let (lo, hi) = w.peaks[k];
+            if lo.abs().max(hi.abs()) < thr {
+                open.get_or_insert(t0);
+            } else if let Some(a) = open.take() {
+                if t0 - a >= min_ms { runs.push((a, t0)) }
+            }
+            if t1 >= w1 {
+                if let Some(a) = open.take() { if t1 - a >= min_ms { runs.push((a, w1)) } }
+                break;
+            }
+            k += 1;
+        }
+        // Back to front so earlier cuts keep their ticks.
+        for &(a, b) in runs.iter().rev() {
+            let ta = c.position + ((a - w0) / ms_tick).round() as u32;
+            let tb = (c.position + ((b - w0) / ms_tick).round() as u32).min(c.end());
+            if tb <= ta { continue }
+            if tb < c.end() { let _ = split(s, i, tb); }
+            if ta > c.position {
+                if let Some(mid) = split(s, i, ta) { delete(s, vec![mid]); removed += 1; }
+            } else {
+                delete(s, vec![i]);
+                removed += 1;
+                break;
+            }
+        }
+    }
+    s.piano.dirty = true;
+    removed
+}
+
 /// Move the content of a clip by `dt` ticks inside it (Slip tool).
 pub fn slip(s: &mut State, i: usize, orig: &Clip, dt: i64) {
     let (w0, w1) = window(s, orig);
@@ -2268,6 +2330,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
                 PItem::new("Copy", Cmd::Copy).key("Ctrl+C"),
                 PItem::new("Paste", Cmd::Paste).key("Ctrl+V"),
                 PItem::new("Duplicate", Cmd::Duplicate).key("Ctrl+B"),
+                PItem::new("Strip silence", Cmd::StripSilence).key("Alt+S"),
                 PItem::new("Delete", Cmd::Delete).key("Del"),
                 PItem::sep(),
                 PItem::new("Shift left", Cmd::ShiftTime(-1)).key("Shift+Left"),
@@ -4028,6 +4091,11 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             duplicate(s);
             None
         }
+        Cmd::StripSilence => {
+            snapshot_as(s, "Strip silence");
+            strip_silence(s, STRIP_DB, STRIP_MIN_MS);
+            None
+        }
         Cmd::Delete => {
             snapshot(s);
             let sel = s.playlist.sel.clone();
@@ -4694,6 +4762,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("x") => Cmd::Cut,
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("v") => Cmd::Paste,
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("b") => Cmd::Duplicate,
+        Key::Character(c) if alt && !ctrl && c.eq_ignore_ascii_case("s") => Cmd::StripSilence,
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("z") => Cmd::Undo,
         Key::Character(c) if alt && !ctrl && c.eq_ignore_ascii_case("m") => Cmd::Mute(!shift),
         Key::Character(c) if alt && !ctrl && shift && c.eq_ignore_ascii_case("t") => Cmd::AddSignature,
