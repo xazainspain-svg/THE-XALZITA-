@@ -448,7 +448,9 @@ class Engine {
     } else {
       const anySolo = s.tracks.some(t => t.solo);
       (s.autos || []).forEach(au => { if (au.pts && au.pts.length) this.applyAuto(au, step, time, sd); });
+      const anyLS = s.lanes && s.lanes.some(l => l.solo);
       s.arr.forEach(it => {
+        if (anyLS && !(s.lanes[it.lane !== undefined ? it.lane : it.t] && s.lanes[it.lane !== undefined ? it.lane : it.t].solo)) return;
         if (it.pat !== undefined) {                                   // patrón completo: suenan todos los canales
           if (it.m || step < it.s || step >= it.s + it.l || (s.lanes && s.lanes[it.lane] && s.lanes[it.lane].mute)) return;
           let patLen = 16; s.tracks.forEach(tt => { const cc = tt.clips[it.pat]; if (cc) patLen = Math.max(patLen, cc.bars * 16); });

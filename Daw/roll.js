@@ -172,7 +172,7 @@ function bindRoll(t, c, R, nw) {
 
 // ----------------------------------------------------------------- teclado del piano roll
 function rollKey(e) {
-  const c = curClip(); if (!c || !winOpen('roll') || !ROLL.cv) return false;
+  const c = curClip(); if (!c || !winOpen('roll') || !ROLL.cv || FOCUS !== 'roll') return false;
   const k = e.key, ctrl = e.ctrlKey || e.metaKey;
   if (!ctrl && ['1', '2', '3', '4', '5', '6'].includes(k)) { ROLL.tool = TOOLS[+k - 1][0]; renderClipPane(); return true; }
   if (k === 'Delete' || k === 'Backspace') { if (!ROLL.sel.size) return false; c.notes = c.notes.filter(n => !ROLL.sel.has(n)); ROLL.sel.clear(); drawRoll(); return true; }

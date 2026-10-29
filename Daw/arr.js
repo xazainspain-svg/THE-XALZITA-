@@ -4,8 +4,8 @@
 // (volumen y panorama) con puntos editables.
 
 const ARR = { z: 6, snap: 4, sel: null, cursor: 0, follow: true, autoOpen: {}, autoParam: {}, slotSel: {}, drag: null, ph: null,
-  chainOpen: {}, more: false, mode: 'slip', tool: 'draw', range: null, amode: 'read', fade: 2, silDb: -40, silMs: 150 };
-const LANE_H = 62, AUTO_H = 72, HEAD_W = 150, RULER_H2 = 26, ARR_STEPS = ARR_BARS * 16;
+  sels: new Set(), clip: null, chainOpen: {}, more: false, mode: 'slip', tool: 'draw', range: null, amode: 'read', fade: 2, silDb: -40, silMs: 150 };
+let LANE_H = 62; const AUTO_H = 72, HEAD_W = 150, RULER_H2 = 26, ARR_STEPS = ARR_BARS * 16;
 const ARR_SNAPS = [['Compás', 16], ['Tiempo', 4], ['1/2 tiempo', 2], ['Paso', 1], ['Sin snap', 0]];
 
 const laneOf = it => it.lane !== undefined ? it.lane : it.t;
@@ -29,10 +29,12 @@ function resolveOverlap(it) {
   });
 }
 
+let FOCUS = 'arr';
+document.addEventListener('mousedown', e => { const w = e.target.closest && e.target.closest('.win'); FOCUS = w ? w.id.replace('win-', '') : 'arr'; }, true);
 function arrSelect(it) {
-  ARR.sel = it;
+  ARR.sel = it; ARR.sels = it ? new Set([it]) : new Set();
   if (it) { if (it.pat !== undefined) selSlot = it.pat; else { selTrack = it.t; selSlot = it.slot; } }
-  document.querySelectorAll('.aclip').forEach(d => d.classList.toggle('sel', d._it === it));
+  document.querySelectorAll('.aclip').forEach(d => d.classList.toggle('sel', ARR.sels.has(d._it)));
   renderBottom();
 }
 
@@ -53,10 +55,20 @@ function renderArr() {
   const ttl = el('div', 'ptitle', 'Playlist — Arrangement'); root.insertBefore(ttl, bar);
   makePalette(bar);
   const more = el('button', ARR.more ? 'on' : '', 'Más ▾'); more.title = 'Modos, fundidos, strip silence, marcadores, punch y automatización'; more.onclick = () => { ARR.more = !ARR.more; renderArr(); };
-  bar.append(el('span', 'sep', 'Snap'), sn, zl, zr, loop, more, cap, dup, spl, del, aa, fol);
+  const hs = el('select'); [['36', 'Pista baja'], ['62', 'Pista normal'], ['96', 'Pista alta']].forEach(([v, l]) => { const o = el('option', '', l); o.value = v; hs.appendChild(o); }); hs.value = String(LANE_H); hs.title = 'Altura de las pistas'; hs.onchange = () => { LANE_H = +hs.value; renderArr(); };
+  const ar = el('select'); song.arrangements.forEach((a, k) => { const o = el('option', '', a.name); o.value = k; ar.appendChild(o); }); ar.value = song.arrIdx; ar.title = 'Arreglos: varias versiones de la canción';
+  ar.onchange = () => arrSwitch(+ar.value);
+  const an = el('button', '', '+ Arreglo'); an.title = 'Nuevo arreglo vacío'; an.onclick = () => arrNew(false);
+  const ac = el('button', '', 'Clonar arreglo'); ac.onclick = () => arrNew(true);
+  const gp = el('button', '', 'Agrupar'); gp.title = 'Los clips agrupados se seleccionan y mueven juntos'; gp.onclick = groupItems;
+  const ug = el('button', '', 'Desagrupar'); ug.onclick = ungroupItems;
+  const un = el('button', '', 'Hacer único'); un.title = 'El patrón seleccionado deja de compartir contenido con sus copias'; un.onclick = makeUnique;
+  const ls = el('button', '', 'Loop = selección'); ls.onclick = loopToSelection;
+  bar.append(ar, an, ac, el('span', 'sep', 'Snap'), sn, zl, zr, hs, loop, ls, more, cap, dup, spl, del, gp, ug, un, aa, fol);
   bar.title = 'Clic en una pista: colocar el patrón seleccionado · arrastra para mover · bordes: recortar · regla: cursor · Mayús+arrastrar en la regla: loop';
 
   arrBar2(root);
+  root.onwheel = e => { if (!e.ctrlKey) return; e.preventDefault(); ARR.z = Math.max(2, Math.min(24, ARR.z * (e.deltaY < 0 ? 1.15 : 1 / 1.15))); renderArr(); };
   const board = el('div', 'arrboard'); board.style.width = (HEAD_W + W) + 'px'; root.appendChild(board);
   const corner = el('div', 'arrcorner', 'Arrangement'); board.appendChild(corner);
   const rcv = el('canvas'); rcv.width = W; rcv.height = RULER_H2; rcv.className = 'arrruler'; board.appendChild(rcv);
@@ -72,6 +84,7 @@ function renderArr() {
     const chev = el('span', 'chev', ARR.chainOpen[i] ? '▾' : '▸'); chev.title = 'Cadena de plugins'; chev.onclick = nm.ondblclick;
     const led = el('button', 'led' + (ln.mute ? '' : ' on')); led.title = 'Activar / silenciar pista';
     led.onclick = () => { ln.mute = !ln.mute; led.classList.toggle('on', !ln.mute); };
+    led.title = 'Activar / silenciar pista (clic derecho: solo)'; led.oncontextmenu = e => { e.preventDefault(); ln.solo = !ln.solo; renderArr(); }; if (ln.solo) led.style.outline = '2px solid #f6921e';
     const arm = el('button', 'arm' + (ln.arm ? ' on' : ''), 'R'); arm.title = 'Armar la pista para grabar audio (luego ● en el transporte)'; arm.onclick = () => { ln.arm = !ln.arm; arm.classList.toggle('on', ln.arm); armChanged(); };
     top.append(led, chev, nm, arm); head.appendChild(top); board.appendChild(head);
 
@@ -85,9 +98,8 @@ function renderArr() {
     };
     lane.onmousedown = e => {
       if (ARR.tool === 'select' && (e.target === lane || e.target.classList.contains('aclip') || e.target.parentNode.classList.contains('aclip'))) {
-        const r = lane.getBoundingClientRect(), a = Math.max(0, aSnapF((e.clientX - r.left) / z)), box = el('div', 'rangesel');
-        lane.querySelectorAll('.rangesel').forEach(x => x.remove()); box.style.left = a * z + 'px'; box.style.width = '0px'; lane.appendChild(box);
-        ARR.range = { t: i, s: a, e: a }; ARR.drag = { type: 'rangeSel', t: i, a, rect: r, box }; ARR.cursor = a; moveCursor(); return;
+        const brd = lane.parentNode, br = brd.getBoundingClientRect(), box = el('div', 'marquee'); brd.appendChild(box);
+        ARR.drag = { type: 'marquee', x0: e.clientX, y0: e.clientY, add: e.shiftKey, box, br, lane: i }; ARR.range = null; if (!e.shiftKey) ARR.sels = new Set(); return;
       }
       if (e.target !== lane) return;
       if (ARR.tool === 'draw' && e.button === 0) { const s0 = aSnapF((e.clientX - lane.getBoundingClientRect().left) / z), slot = selSlot, len = patLen(slot); place(e); if (song.tracks.some(t => t.clips[slot])) ARR.drag = { type: 'paintPat', lane: i, pat: slot, len, last: s0, rect: lane.getBoundingClientRect() }; return; }
@@ -124,9 +136,9 @@ function moveCursor() { if (ARR.cur) ARR.cur.style.left = (HEAD_W + ARR.cursor *
 
 // ----------------------------------------------------------------- clips
 function makeClip(it, t, z) {
-  const c = itemClip(it), d = el('div', 'aclip' + (ARR.sel === it ? ' sel' : ''));
+  const c = itemClip(it), d = el('div', 'aclip' + (ARR.sels.has(it) || ARR.sel === it ? ' sel' : ''));
   const P = it.pat !== undefined ? song.patterns[it.pat] : null;
-  d._it = it; if (it.m) d.classList.add('muted'); d.style.left = (it.s * z) + 'px'; d.style.width = Math.max(4, it.l * z - 1) + 'px'; d.style.background = P ? P.color : t.color;
+  d._it = it; if (it.m) d.classList.add('muted'); if (it.grp) d.classList.add('grouped'); d.style.left = (it.s * z) + 'px'; d.style.width = Math.max(4, it.l * z - 1) + 'px'; d.style.background = P ? P.color : t.color;
   const cv = el('canvas'); cv.width = Math.min(4096, Math.ceil(it.l * z)); cv.height = LANE_H - 18; d.appendChild(cv);
   paintClip(cv, it, t, c, z);
   if (c.audio) { const f = el('canvas'); f.width = Math.min(4096, Math.ceil(it.l * z)); f.height = LANE_H; f.style.cssText = 'position:absolute;left:0;top:0;pointer-events:none'; d.appendChild(f); const g = f.getContext('2d'); g.fillStyle = 'rgba(0,0,0,.45)';
@@ -142,7 +154,12 @@ function makeClip(it, t, z) {
     }
     const x = e.offsetX, w = d.offsetWidth; let type = x > w - 7 ? 'resize' : (x < 7 ? 'trim' : 'move');
     if (ARR.tool === 'trim') type = x < w / 2 ? 'trim' : 'resize'; else if (ARR.tool === 'select') type = 'none';
-    arrSelect(it); if (type === 'none') return; ARR.drag = { type, it, d, x0: e.clientX, s0: it.s, l0: it.l, off0: it.off || 0 };
+    if (e.shiftKey) { if (ARR.sels.has(it)) ARR.sels.delete(it); else ARR.sels.add(it); ARR.sel = it; renderArr(); return; }
+    if (!ARR.sels.has(it)) { arrSelect(it); if (it.grp) { ARR.sels = new Set(expandGroup(it)); document.querySelectorAll('.aclip').forEach(n => n.classList.toggle('sel', ARR.sels.has(n._it))); } } else ARR.sel = it;
+    if (type === 'none') return;
+    const drag = { type, it, d, x0: e.clientX, s0: it.s, l0: it.l, off0: it.off || 0 };
+    if (type === 'move') { const grp = [...ARR.sels]; drag.group = grp; drag.copy = e.ctrlKey; drag.orig = new Map(grp.map(g => [g, g.s])); drag.nodes = new Map(); document.querySelectorAll('.aclip').forEach(n => { if (grp.includes(n._it)) drag.nodes.set(n._it, n); }); }
+    ARR.drag = drag;
   };
   d.oncontextmenu = e => e.preventDefault();
   d.ondblclick = e => { e.stopPropagation(); openWin('roll'); };
@@ -182,10 +199,15 @@ window.addEventListener('mousemove', e => {
     while (x >= d.last + 2 * d.len && d.last + 2 * d.len <= ARR_STEPS) { d.last += d.len; const it = { lane: d.lane, pat: d.pat, s: d.last, l: d.len, off: 0 }; song.arr.push(it); resolveOverlap(it); d.painted = true; }
     return;
   }
+  if (d.type === 'marquee') { const x = Math.min(d.x0, e.clientX) - d.br.left, y = Math.min(d.y0, e.clientY) - d.br.top; d.box.style.cssText = 'left:' + x + 'px;top:' + y + 'px;width:' + Math.abs(e.clientX - d.x0) + 'px;height:' + Math.abs(e.clientY - d.y0) + 'px'; d.cx = e.clientX; d.cy = e.clientY; return; }
   if (d.type === 'rangeSel') { const v = Math.max(0, Math.min(ARR_STEPS, aSnapR((e.clientX - d.rect.left) / ARR.z))); ARR.range = { t: d.t, s: Math.min(d.a, v), e: Math.max(d.a, v) }; d.box.style.left = ARR.range.s * ARR.z + 'px'; d.box.style.width = (ARR.range.e - ARR.range.s) * ARR.z + 'px'; return; }
   const z = ARR.z, dx = (e.clientX - d.x0) / z, it = d.it;
   const minL = ARR.snap > 0 ? ARR.snap : 1;
-  if (d.type === 'move') { it.s = Math.max(0, Math.min(ARR_STEPS - it.l, aSnapR(d.s0 + dx))); d.d.style.left = it.s * z + 'px'; }
+  if (d.type === 'move') {
+    const grp = d.group || [it], delta0 = aSnapR(d.s0 + dx) - d.s0, minS = Math.min(...grp.map(g => d.orig.get(g))), maxE = Math.max(...grp.map(g => d.orig.get(g) + g.l));
+    const delta = Math.max(-minS, Math.min(ARR_STEPS - maxE, delta0));
+    grp.forEach(g => { g.s = d.orig.get(g) + delta; const n = d.nodes && d.nodes.get(g); if (n) n.style.left = g.s * z + 'px'; });
+  }
   else if (d.type === 'resize') { const e2 = Math.max(it.s + minL, Math.min(ARR_STEPS, aSnapR(d.s0 + d.l0 + dx))); it.l = e2 - it.s; d.d.style.width = Math.max(4, it.l * z - 1) + 'px'; }
   else if (d.type === 'trim') {
     const ns = Math.max(0, Math.min(d.s0 + d.l0 - minL, aSnapR(d.s0 + dx))), ll = itemLoopLen(it);
@@ -201,19 +223,57 @@ window.addEventListener('mousemove', e => {
 window.addEventListener('mouseup', () => {
   const d = ARR.drag; if (!d) return; ARR.drag = null;
   if (d.type.startsWith('loop')) { renderArr(); return; }
+  if (d.type === 'marquee') {
+    d.box.remove(); const cx = d.cx === undefined ? d.x0 : d.cx, cy = d.cy === undefined ? d.y0 : d.cy, x1 = Math.min(d.x0, cx), x2 = Math.max(d.x0, cx), y1 = Math.min(d.y0, cy), y2 = Math.max(d.y0, cy), z = ARR.z;
+    const hit = song.arr.filter(it => { const ln = ARR.laneEls && ARR.laneEls[laneOf(it)]; if (!ln) return false; const r = ln.getBoundingClientRect(); return r.bottom > y1 && r.top < y2 && r.left + it.s * z < x2 && r.left + (it.s + it.l) * z > x1; });
+    if (hit.length) { hit.forEach(h => ARR.sels.add(h)); ARR.sel = hit[0]; }
+    else if (Math.abs(x2 - x1) > 4) { const ln = ARR.laneEls[d.lane], r = ln.getBoundingClientRect(); ARR.range = { t: d.lane, s: Math.max(0, aSnapF((x1 - r.left) / z)), e: Math.max(0, aSnapR((x2 - r.left) / z)) }; }
+    renderArr(); renderBottom(); return;
+  }
   if (d.type === 'rangeSel' || d.type === 'paintPat') { renderArr(); renderBottom(); return; }
-  if (d.type === 'move' || d.type === 'resize' || d.type === 'trim') {
+  if (d.type === 'move' && d.group) {
+    if (d.copy) { const copies = []; d.group.forEach(g => { const cp = Object.assign({}, g); g.s = d.orig.get(g); copies.push(cp); }); copies.forEach(cp => { song.arr.push(cp); }); copies.forEach(cp => resolveOverlap(cp)); ARR.sels = new Set(copies); ARR.sel = copies[0]; }
+    else if (ARR.mode === 'shuffle') new Set(d.group.map(laneOf)).forEach(shufflePack); else d.group.forEach(g => resolveOverlap(g));
+    renderArr(); return;
+  }
+  if (d.type === 'resize' || d.type === 'trim') {
     if (ARR.mode === 'shuffle') shufflePack(laneOf(d.it)); else resolveOverlap(d.it); renderArr();
   }
 });
 
 // ----------------------------------------------------------------- acciones
 function arrDelete() {
+  if (ARR.sels.size > 1 || (ARR.sels.size === 1 && ARR.tool !== 'select')) { song.arr = song.arr.filter(it => !ARR.sels.has(it)); ARR.sels = new Set(); ARR.sel = null; renderArr(); return; }
   if (ARR.tool === 'select' && ARR.range && ARR.range.e > ARR.range.s) { deleteRange(ARR.range.t, ARR.range.s, ARR.range.e); ARR.range = null; renderArr(); return; }
-  if (!ARR.sel) return; song.arr.splice(song.arr.indexOf(ARR.sel), 1); ARR.sel = null; renderArr(); }
+  if (!ARR.sel) return; song.arr.splice(song.arr.indexOf(ARR.sel), 1); ARR.sel = null; ARR.sels = new Set(); renderArr();
+}
+const selItems = () => (ARR.sels.size ? [...ARR.sels] : (ARR.sel ? [ARR.sel] : []));
 function arrDuplicate() {
-  const it = ARR.sel; if (!it) return; if (it.s + it.l * 2 > ARR_STEPS) { status('No hay sitio a la derecha.'); return; }
-  const cp = Object.assign({}, it, { s: it.s + it.l }); song.arr.push(cp); resolveOverlap(cp); ARR.sel = cp; renderArr();
+  const g = selItems(); if (!g.length) return; const minS = Math.min(...g.map(i => i.s)), maxE = Math.max(...g.map(i => i.s + i.l)), span = maxE - minS;
+  if (maxE + span > ARR_STEPS) { status('No hay sitio a la derecha.'); return; }
+  const gm = {}; const cps = g.map(i => { const c = Object.assign({}, i, { s: i.s + span }); if (c.grp) { gm[c.grp] = gm[c.grp] || (Date.now() % 1000000 + (GRP_ID++)); c.grp = gm[c.grp]; } return c; }); cps.forEach(c => song.arr.push(c)); cps.forEach(c => resolveOverlap(c)); ARR.sels = new Set(cps); ARR.sel = cps[0]; renderArr();
+}
+function arrCopy() { const g = selItems(); if (!g.length) { status('Selecciona clips (herramienta Selector o Mayús+clic).'); return; } const minS = Math.min(...g.map(i => i.s)), minL = Math.min(...g.map(laneOf)); ARR.clip = g.map(i => ({ it: Object.assign({}, i), ds: i.s - minS, dl: laneOf(i) - minL })); status(g.length + ' clip(s) copiados.'); }
+function arrPaste() {
+  if (!ARR.clip || !ARR.clip.length) { status('No hay nada copiado.'); return; } const base = aSnapF(ARR.cursor), lane0 = ARR.lane || 0, out = [];
+  ARR.clip.forEach(c => { const it = Object.assign({}, c.it, { s: base + c.ds }); if (it.s + it.l > ARR_STEPS) return; if (it.pat !== undefined || it.lane !== undefined) it.lane = Math.min(song.lanes.length - 1, lane0 + c.dl); song.arr.push(it); out.push(it); });
+  out.forEach(it => resolveOverlap(it)); ARR.sels = new Set(out); ARR.sel = out[0] || null; renderArr(); status(out.length + ' clip(s) pegados en el cursor.');
+}
+function arrSelectAll() { ARR.sels = new Set(song.arr); ARR.sel = song.arr[0] || null; renderArr(); }
+function arrNudge(ds, dl) {
+  const g = selItems(); if (!g.length) return; const minS = Math.min(...g.map(i => i.s)), maxE = Math.max(...g.map(i => i.s + i.l));
+  if (minS + ds < 0 || maxE + ds > ARR_STEPS) return;
+  g.forEach(i => { i.s += ds; if (dl && (i.pat !== undefined || i.lane !== undefined)) i.lane = Math.max(0, Math.min(song.lanes.length - 1, laneOf(i) + dl)); }); g.forEach(i => resolveOverlap(i)); renderArr();
+}
+function makeUnique() {
+  const it = ARR.sel; if (!it || it.pat === undefined) { status('Selecciona un patrón del Playlist.'); return; }
+  const to = Array.from({ length: SCENES }, (_, k) => k).find(k => !song.tracks.some(t => t.clips[k])); if (to === undefined) { status('No hay patrones vacíos para clonar.'); return; }
+  song.tracks.forEach(t => { t.clips[to] = t.clips[it.pat] ? JSON.parse(JSON.stringify(t.clips[it.pat])) : null; }); song.patterns[to] = { name: song.patterns[it.pat].name + ' (único)', color: song.patterns[it.pat].color };
+  it.pat = to; selSlot = to; renderAll(); status('Patrón hecho único: ' + song.patterns[to].name + '. Ya puedes editarlo sin afectar a las otras copias.');
+}
+function loopToSelection() {
+  const g = selItems(); let a, b; if (ARR.range && ARR.range.e > ARR.range.s) { a = ARR.range.s; b = ARR.range.e; } else if (g.length) { a = Math.min(...g.map(i => i.s)); b = Math.max(...g.map(i => i.s + i.l)); } else { status('Selecciona clips o un rango.'); return; }
+  song.loop = { on: true, start: a, end: b }; renderArr(); status('Loop = selección.');
 }
 function arrSplit() {
   const it = ARR.sel; if (!it) { status('Selecciona un clip y coloca el cursor sobre él.'); return; }
@@ -230,10 +290,14 @@ function captureScenes() {
   status(n + ' patrón(es) colocados en el Playlist.'); renderArr();
 }
 function arrKey(e) {
-  if (view !== 'arr') return false; const k = e.key, ctrl = e.ctrlKey || e.metaKey;
+  if (view !== 'arr' || FOCUS !== 'arr') return false; const k = e.key, ctrl = e.ctrlKey || e.metaKey, kl = k.toLowerCase();
   if (k === 'Delete' || k === 'Backspace') { arrDelete(); return true; }
-  if (ctrl && k.toLowerCase() === 'd') { arrDuplicate(); return true; }
-  if (ctrl && k.toLowerCase() === 'e') { arrSplit(); return true; }
+  if (ctrl && (kl === 'd' || kl === 'b')) { arrDuplicate(); return true; }
+  if (ctrl && kl === 'e') { arrSplit(); return true; }
+  if (ctrl && kl === 'a') { arrSelectAll(); return true; }
+  if (ctrl && kl === 'c') { arrCopy(); return true; }
+  if (ctrl && kl === 'v') { arrPaste(); return true; }
+  if (k.startsWith('Arrow') && selItems().length) { const st = e.shiftKey ? 16 : (aSn() || 1); arrNudge(k === 'ArrowLeft' ? -st : k === 'ArrowRight' ? st : 0, k === 'ArrowUp' ? -1 : k === 'ArrowDown' ? 1 : 0); return true; }
   return false;
 }
 
@@ -422,3 +486,20 @@ function chainPanel(i) {                                        // fila fina de 
   });
   return row;
 }
+
+// ----------------------------------------------------------------- varios arreglos y grupos de clips (idea tomada de la lista de funciones de Lemon Studio)
+function arrSaveCurrent() { const a = song.arrangements[song.arrIdx]; a.arr = song.arr; a.autos = song.autos; a.markers = song.markers; a.loop = song.loop; }
+function arrSwitch(i) {
+  if (i === song.arrIdx) return; arrSaveCurrent(); const a = song.arrangements[i]; song.arrIdx = i;
+  song.arr = a.arr || []; song.autos = a.autos || []; song.markers = a.markers || [{ s: 0, name: 'Inicio' }]; song.loop = a.loop || { on: false, start: 0, end: 64 };
+  ARR.sel = null; ARR.sels = new Set(); ARR.range = null; if (eng && eng.playing) { eng.stop(); updatePlayBtn(); } renderAll(); status('Arreglo: ' + a.name);
+}
+function arrNew(clone) {
+  arrSaveCurrent(); const n = song.arrangements.length + 1, base = song.arrangements[song.arrIdx];
+  song.arrangements.push({ name: (clone ? base.name + ' copia' : 'Arreglo ' + n), arr: clone ? JSON.parse(JSON.stringify(song.arr)) : [], autos: clone ? JSON.parse(JSON.stringify(song.autos)) : [], markers: clone ? JSON.parse(JSON.stringify(song.markers)) : [{ s: 0, name: 'Inicio' }], loop: { on: false, start: 0, end: 64 } });
+  arrSwitch(song.arrangements.length - 1);
+}
+let GRP_ID = 1;
+function groupItems() { const g = selItems(); if (g.length < 2) { status('Selecciona al menos dos clips.'); return; } const id = Date.now() % 1000000 + (GRP_ID++); g.forEach(i => { i.grp = id; }); renderArr(); status(g.length + ' clips agrupados.'); }
+function ungroupItems() { const g = selItems(); g.forEach(i => { delete i.grp; }); renderArr(); }
+function expandGroup(it) { return it.grp ? song.arr.filter(o => o.grp === it.grp) : [it]; }

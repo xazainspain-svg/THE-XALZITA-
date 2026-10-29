@@ -12,9 +12,9 @@ function renderWin(id) {
   if (id === 'rack') renderRackPane(); else if (id === 'roll') renderClipPane(); else if (id === 'dev') renderDevPane();
   else if (id === 'mixer') renderMixer(); else if (id === 'imm') renderImm();
 }
-function focusWin(id) { winEl(id).style.zIndex = ++zTop; document.querySelectorAll('.win').forEach(w => w.classList.toggle('active', w === winEl(id))); }
+function focusWin(id) { FOCUS = id; winEl(id).style.zIndex = ++zTop; document.querySelectorAll('.win').forEach(w => w.classList.toggle('active', w === winEl(id))); }
 function openWin(id) { const e = winEl(id); if (!e) return; e.hidden = false; focusWin(id); updateWinButtons(); renderWin(id); }
-function closeWin(id) { winEl(id).hidden = true; updateWinButtons(); }
+function closeWin(id) { winEl(id).hidden = true; if (FOCUS === id) FOCUS = 'arr'; updateWinButtons(); }
 function toggleWin(id) { winOpen(id) ? closeWin(id) : openWin(id); }
 function updateWinButtons() {
   const on = { wbPlaylist: view === 'arr', wbRack: winOpen('rack'), wbRoll: winOpen('roll'), wbBrowser: !$('#browser').hidden, wbMixer: winOpen('mixer'), wbDev: winOpen('dev') };
@@ -83,7 +83,7 @@ function buildMenus() {
       ['Exportar WAV', click('btnExport')], ['Exportar stems', click('btnStems')]]],
     ['Editar', [['Deshacer  Ctrl+Z', click('btnUndo')], ['Rehacer  Ctrl+Y', click('btnRedo')]]],
     ['Añadir', [['Sintetizador', click('btnAddM')], ['Sintetizador FM', click('btnAddF')], ['Sampler…', click('btnAddS')], ['Pista de audio', click('btnAddA')], ['Batería', () => addTrack('drums')]]],
-    ['Patrones', Array.from({ length: SCENES }, (_, i) => [song.patterns[i].name, () => { selSlot = i; renderAll(); }])],
+    ['Patrones', Array.from({ length: SCENES }, (_, i) => [song.patterns[i].name, () => { selSlot = i; renderAll(); }]).concat([null, ['Renderizar patrón a audio', () => renderPatternToAudio(selSlot)]])],
     ['Ver', [['Playlist  F5', () => setView('arr')], ['Channel Rack  F6', () => toggleWin('rack')], ['Piano roll  F7', () => toggleWin('roll')], ['Navegador  F8', () => { $('#browser').hidden = !$('#browser').hidden; updateWinButtons(); }],
       ['Mixer  F9', () => toggleWin('mixer')], ['Instrumento  F10', () => toggleWin('dev')], null, ['Inmersivo 3D', () => toggleWin('imm')], ['Vista Session (clips)', () => setView('session')]]],
     ['Opciones', [['Metrónomo', click('btnMetro')], ['Tap tempo', click('btnTap')], ['Grabar con micrófono', click('btnMic')]]],

@@ -17,7 +17,8 @@ function renderRackPane() {
     song.tracks.forEach(tt => { tt.clips[to] = tt.clips[selSlot] ? JSON.parse(JSON.stringify(tt.clips[selSlot])) : null; }); song.patterns[to] = { name: P.name + ' copia', color: P.color }; selSlot = to; renderAll(); status('Patrón clonado.');
   };
   const cr = el('button', 'mini', 'Limpiar'); cr.title = 'Vacía todos los canales de este patrón'; cr.onclick = () => { song.tracks.forEach(tt => { tt.clips[selSlot] = null; }); renderAll(); };
-  hb.append(pv, nm, nx, col, cl, cr); hb.title = 'Clic: activar/desactivar paso (arrastra para pintar) · Mayús+clic: acento'; pane.appendChild(hb);
+  const ra = el('button', 'mini', '→ Audio'); ra.title = 'Renderiza este patrón a un clip de audio en otro patrón'; ra.onclick = () => renderPatternToAudio(selSlot);
+  hb.append(pv, nm, nx, col, cl, cr, ra); hb.title = 'Clic: activar/desactivar paso (arrastra para pintar) · Mayús+clic: acento'; pane.appendChild(hb);
   const wrap = el('div', 'rack'); pane.appendChild(wrap); let drag = null;
   const stepCell = (ti, pitchFn, c, s) => {
     const b = el('div', 'rs g' + (Math.floor(s / 4) % 2)); b.dataset.s = s;
@@ -85,6 +86,14 @@ function rollToolsRow(pane, c, t) {
         out.push({ s: st, l: Math.random() < 0.3 ? 2 : 1, n: 60 + ROLL.root + sc[idx] + 12 * oct - (ROLL.root > 6 ? 12 : 0), v: 0.6 + Math.random() * 0.35 }); } } }
     out.forEach(n => { n.l = Math.min(n.l, L - n.s); }); c.notes = out; ROLL.sel.clear();
   });
+  const cs = el('select'); [[2, 'Chop ÷2'], [3, 'Chop ÷3'], [4, 'Chop ÷4']].forEach(([v, l]) => { const o = el('option', '', l); o.value = v; cs.appendChild(o); }); cs.value = TOOLSET.chop || 2; cs.onchange = () => { TOOLSET.chop = +cs.value; }; row.appendChild(cs);
+  act('Chop', 'Parte cada nota en partes iguales', () => { const n = TOOLSET.chop || 2, tg = rollTargets(c), out = []; tg.forEach(x => { const w = x.l / n; for (let k = 0; k < n; k++) out.push(Object.assign({}, x, { s: x.s + k * w, l: w })); }); c.notes = c.notes.filter(x => !tg.includes(x)).concat(out); ROLL.sel = new Set(out); });
+  act('Flam', 'Añade una nota de adorno justo antes de cada nota', () => { const tg = rollTargets(c), out = []; tg.forEach(x => { if (x.s >= 0.25) out.push({ s: x.s - 0.25, l: 0.25, n: x.n, v: Math.max(0.2, (x.v === undefined ? 0.8 : x.v) * 0.5) }); }); c.notes.push(...out); });
+  act('Azar vel.', 'Aleatoriza las velocidades', () => rollTargets(c).forEach(x => { x.v = 0.3 + Math.random() * 0.7; }));
+  act('Azar notas', 'Cambia las alturas al azar dentro de la escala', () => { const sc = SCALES[ROLL.scale] || SCALES.chromatic; rollTargets(c).forEach(x => { if (t.kind === 'drums') { x.n = Math.floor(Math.random() * 8); return; } const oct = Math.floor(x.n / 12), pick = sc[Math.floor(Math.random() * sc.length)]; x.n = Math.max(24, Math.min(96, oct * 12 + ((ROLL.root + pick) % 12))); }); });
+  const sv = el('input'); sv.type = 'number'; sv.min = 10; sv.max = 200; sv.value = TOOLSET.pct || 80; sv.style.width = '48px'; sv.title = 'Porcentaje'; sv.onchange = () => { TOOLSET.pct = +sv.value; }; row.appendChild(sv);
+  act('Escalar vel. %', 'Multiplica las velocidades por el porcentaje', () => rollTargets(c).forEach(x => { x.v = Math.max(0.05, Math.min(1, (x.v === undefined ? 0.8 : x.v) * (TOOLSET.pct || 80) / 100)); }));
+  act('A escala', 'Lleva cada nota a la nota más cercana de la escala elegida', () => { if (t.kind === 'drums') return; rollTargets(c).forEach(x => { for (let d = 0; d < 7; d++) { if (inScale(x.n + d)) { x.n += d; break; } if (inScale(x.n - d)) { x.n -= d; break; } } }); });
   act('Cuantizar', 'Ajusta inicio y duración al snap', () => { const sn = ROLL.snap > 0 ? ROLL.snap : 1; rollTargets(c).forEach(n => { n.s = Math.max(0, Math.round(n.s / sn) * sn); n.l = Math.max(sn, Math.round(n.l / sn) * sn); n.s = Math.min(n.s, c.bars * 16 - sn); n.l = Math.min(n.l, c.bars * 16 - n.s); }); });
   act('Humanizar', 'Variación aleatoria de tiempo y velocidad', () => rollTargets(c).forEach(n => { n.s = Math.max(0, Math.min(c.bars * 16 - n.l, n.s + (Math.random() - 0.5) * 0.3)); n.v = Math.max(0.2, Math.min(1, (n.v === undefined ? 0.8 : n.v) + (Math.random() - 0.5) * 0.3)); }));
   const pat = el('select'); [['up', 'Arp ↑'], ['down', 'Arp ↓'], ['updown', 'Arp ↑↓'], ['rand', 'Arp azar']].forEach(([v, l]) => { const o = el('option', '', l); o.value = v; pat.appendChild(o); }); pat.value = TOOLSET.arp; pat.onchange = () => { TOOLSET.arp = pat.value; };
@@ -201,3 +210,20 @@ $('#btnStems').onclick = async () => {
     status(used.length + ' stems exportados.', 5000);
   } catch (e) { status(e.message, 5000); }
 };
+
+// ----------------------------------------------------------------- renderizar un patrón como clip de audio (idea de "Quick render")
+async function renderPatternToAudio(slot) {
+  try {
+    let len = 16; song.tracks.forEach(t => { const c = t.clips[slot]; if (c) len = Math.max(len, c.bars * 16); }); if (!song.tracks.some(t => t.clips[slot])) throw new Error('El patrón está vacío.');
+    const to = Array.from({ length: SCENES }, (_, k) => k).find(k => !song.tracks.some(t => t.clips[k])); if (to === undefined) throw new Error('No hay patrones vacíos donde guardar el audio.');
+    if (song.tracks.length >= 16) throw new Error('Máximo 16 pistas.');
+    status('Renderizando el patrón…', 0);
+    const s = upgradeSong(JSON.parse(JSON.stringify(song))); s.autos = []; s.arr = [{ lane: 0, pat: slot, s: 0, l: len, off: 0 }]; s.lanes.forEach(l => { l.mute = false; l.solo = false; });
+    const sr = 44100, sd = 60 / s.bpm / 4, off = new OfflineAudioContext(2, Math.ceil((len * sd + 2) * sr), sr), e = new Engine(off, s);
+    for (let k = 0; k < len; k++) e.scheduleStep(k, k * sd, 'arr');
+    const buf = await off.startRendering(), id = newId(), name = song.patterns[slot].name + ' (audio)'; AUDIO[id] = { buf, name };
+    const n = song.tracks.length, t = trackNew(name, 'audio', song.patterns[slot].color, null, Math.min(n, NINS - 1));
+    t.clips[to] = { bars: Math.min(16, Math.max(1, Math.ceil(len / 16))), notes: [], audio: { id } }; song.tracks.push(t); song.patterns[to] = { name, color: song.patterns[slot].color }; rebuildEngine(); selSlot = to; renderAll();
+    status('Patrón renderizado a audio: ' + name + ' (' + buf.duration.toFixed(1) + ' s). Ya puedes colocarlo en el Playlist.', 7000);
+  } catch (err) { status('No se pudo renderizar: ' + err.message, 6000); }
+}

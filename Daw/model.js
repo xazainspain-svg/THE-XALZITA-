@@ -60,7 +60,7 @@ function demoSong() {
   T[1].clips[1].bars = 1; T[2].clips[1] = clipNew(1); T[3].clips[1] = null;
   const arr = [{ lane: 0, pat: 0, s: 0, l: 8 * 16, off: 0 }, { lane: 0, pat: 1, s: 8 * 16, l: 8 * 16, off: 0 }, { lane: 1, pat: 0, s: 8 * 16, l: 8 * 16, off: 0 }];
   T[3].sends = [0.35, 0]; T[2].sends = [0, 0.25];
-  return { patterns: defPatterns(), lanes: defLanes(), groups: [], markers: [{ s: 0, name: 'Inicio' }, { s: 64, name: 'Estribillo' }], punch: { on: false, start: 0, end: 16, pre: 1 }, bpm: 118, swing: 0, masterVol: 0.9, tracks: T, inserts, returns: defReturns(), autos: [{ target: 't3.vol', pts: [{ s: 0, v: 0.16 }, { s: 64, v: 0.8 }, { s: 224, v: 0.8 }, { s: 256, v: 0.24 }] }], arr, loop: { on: false, start: 0, end: 64 } };
+  return { arrangements: [{ name: 'Arreglo 1' }], arrIdx: 0, patterns: defPatterns(), lanes: defLanes(), groups: [], markers: [{ s: 0, name: 'Inicio' }, { s: 64, name: 'Estribillo' }], punch: { on: false, start: 0, end: 16, pre: 1 }, bpm: 118, swing: 0, masterVol: 0.9, tracks: T, inserts, returns: defReturns(), autos: [{ target: 't3.vol', pts: [{ s: 0, v: 0.16 }, { s: 64, v: 0.8 }, { s: 224, v: 0.8 }, { s: 256, v: 0.24 }] }], arr, loop: { on: false, start: 0, end: 64 } };
 }
 
 // Acepta proyectos antiguos (formato por compases / efectos por pista) y completa lo que falte.
@@ -90,6 +90,7 @@ function upgradeSong(s) {
   if (!Array.isArray(s.returns) || s.returns.length < 2) s.returns = defReturns();
   s.tracks.forEach(t => { t.sends = t.sends || [0, 0]; t.preSend = t.preSend || [false, false]; t.group = t.group === undefined ? -1 : t.group; });
   s.patterns = (s.patterns || []).concat(defPatterns().slice((s.patterns || []).length)).slice(0, SCENES); s.lanes = (s.lanes || []).concat(defLanes().slice((s.lanes || []).length)).slice(0, NLANES);
+  s.arrangements = s.arrangements && s.arrangements.length ? s.arrangements : [{ name: 'Arreglo 1' }]; s.arrIdx = Math.min(s.arrIdx || 0, s.arrangements.length - 1);
   s.groups = s.groups || []; s.markers = s.markers || []; s.punch = s.punch || { on: false, start: 0, end: 16, pre: 1 };
   return s;
 }

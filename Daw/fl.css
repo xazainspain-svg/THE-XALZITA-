@@ -132,3 +132,6 @@ main{flex:1;overflow:auto;background:#1a1f23;padding:0}
 .dk{display:flex;flex-direction:column;align-items:center;width:62px}.dk .knobw span{display:none}
 .dval{font:10px ui-monospace,Consolas,monospace;color:var(--ac);margin-top:1px}.dlab{font-size:9px;color:var(--mut);text-align:center;line-height:1.1;height:20px}
 .dadd{flex:none;display:flex;align-items:center;padding:0 8px}.dgrp{align-self:flex-start;margin-left:auto;flex:none}
+.marquee{position:absolute;border:1px solid #fff;background:rgba(255,255,255,.14);pointer-events:none;z-index:8}
+.arrboard{position:relative}
+.aclip.grouped{outline:1px dashed #fff;outline-offset:-3px}
