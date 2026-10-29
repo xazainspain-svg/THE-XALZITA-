@@ -227,6 +227,8 @@ pub enum Cmd {
     Duplicate,
     /// Strip silence (Xaza): cuts the quiet stretches out of the selected audio clips.
     StripSilence,
+    /// Comp (Xaza): inside the time selection only the last selected take (its track) plays.
+    Comp,
     Delete,
     ShiftTime(i32),
     ShiftTracks(i32),
@@ -1654,6 +1656,36 @@ pub fn strip_silence(s: &mut State, db: f32, min_ms: f64) -> usize {
     removed
 }
 
+/// Comp: the selected audio clips are takes on their own tracks. Inside the time selection (`range`) the takes are
+/// cut at its edges and every take but the last selected one is muted; that take's pieces are unmuted. Returns
+/// false without a time selection or a selected audio clip.
+pub fn comp(s: &mut State) -> bool {
+    let Some((r0, r1)) = s.playlist.range.filter(|r| r.1 > r.0) else { return false };
+    let audio = |s: &State, i: usize| clips(s).get(i).is_some_and(|c| source_kind(s, c.source) == PickKind::Audio);
+    let sel: Vec<usize> = s.playlist.sel.iter().copied().filter(|&i| audio(s, i)).collect();
+    let Some(&pick) = sel.last() else { return false };
+    let chosen = clips(s)[pick].track;
+    let mut tracks: Vec<u16> = sel.iter().map(|&i| clips(s)[i].track).collect();
+    tracks.sort_unstable();
+    tracks.dedup();
+    for t in &tracks {
+        for tick in [r1, r0] {
+            let hit: Vec<usize> = (0..clips(s).len()).filter(|&i| { let c = clips(s)[i]; c.track == *t && c.position < tick && c.end() > tick && source_kind(s, c.source) == PickKind::Audio }).collect();
+            for i in hit { let _ = split(s, i, tick); }
+        }
+    }
+    let mut now = Vec::new();
+    for (i, c) in arr_mut(s).clips.iter_mut().enumerate() {
+        if tracks.contains(&c.track) && c.position >= r0 && c.end() <= r1 {
+            c.muted = c.track != chosen;
+            if c.track == chosen { now.push(i); }
+        }
+    }
+    s.playlist.sel = now;
+    s.piano.dirty = true;
+    true
+}
+
 /// Move the content of a clip by `dt` ticks inside it (Slip tool).
 pub fn slip(s: &mut State, i: usize, orig: &Clip, dt: i64) {
     let (w0, w1) = window(s, orig);
@@ -2331,6 +2363,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
                 PItem::new("Paste", Cmd::Paste).key("Ctrl+V"),
                 PItem::new("Duplicate", Cmd::Duplicate).key("Ctrl+B"),
                 PItem::new("Strip silence", Cmd::StripSilence).key("Alt+S"),
+                PItem::new("Comp: use this take in the selection", Cmd::Comp).key("Alt+K"),
                 PItem::new("Delete", Cmd::Delete).key("Del"),
                 PItem::sep(),
                 PItem::new("Shift left", Cmd::ShiftTime(-1)).key("Shift+Left"),
@@ -4091,6 +4124,11 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             duplicate(s);
             None
         }
+        Cmd::Comp => {
+            snapshot_as(s, "Comp");
+            comp(s);
+            None
+        }
         Cmd::StripSilence => {
             snapshot_as(s, "Strip silence");
             strip_silence(s, STRIP_DB, STRIP_MIN_MS);
@@ -4763,6 +4801,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("v") => Cmd::Paste,
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("b") => Cmd::Duplicate,
         Key::Character(c) if alt && !ctrl && c.eq_ignore_ascii_case("s") => Cmd::StripSilence,
+        Key::Character(c) if alt && !ctrl && c.eq_ignore_ascii_case("k") => Cmd::Comp,
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("z") => Cmd::Undo,
         Key::Character(c) if alt && !ctrl && c.eq_ignore_ascii_case("m") => Cmd::Mute(!shift),
         Key::Character(c) if alt && !ctrl && shift && c.eq_ignore_ascii_case("t") => Cmd::AddSignature,

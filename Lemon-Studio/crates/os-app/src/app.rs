@@ -13174,6 +13174,29 @@ mod tests {
         let _ = std::fs::remove_file(&wav);
     }
 
+    /// Comp (Xaza): two takes on two tracks, a time selection inside them; only the picked take plays there.
+    #[test]
+    fn comp_mutes_other_takes_in_range() {
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::default();
+        app.plugins.available = crate::plugins::builtin();
+        let wav = std::env::temp_dir().join(format!("os-comp-{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.5f32; 192000]).unwrap();
+        let p = wav.to_string_lossy().into_owned();
+        let a = crate::playlist::add_audio_clip(&mut app.state, &p, 0, 0).expect("take 1");
+        let b = crate::playlist::add_audio_clip(&mut app.state, &p, 1, 0).expect("take 2");
+        let len = crate::playlist::clips(&app.state)[a].length;
+        app.state.playlist.sel = vec![a, b];
+        app.state.playlist.range = Some((len / 4, len / 2));
+        assert!(crate::playlist::comp(&mut app.state));
+        let cs = crate::playlist::clips(&app.state);
+        let inside = |t: u16| cs.iter().filter(|c| c.track == t && c.position >= len / 4 && c.end() <= len / 2).collect::<Vec<_>>();
+        assert!(!inside(1).is_empty() && inside(1).iter().all(|c| !c.muted), "picked take plays in range");
+        assert!(!inside(0).is_empty() && inside(0).iter().all(|c| c.muted), "other take muted in range");
+        assert!(cs.iter().any(|c| c.track == 0 && !c.muted), "other take still plays outside the range");
+        let _ = std::fs::remove_file(&wav);
+    }
+
     /// Audio-clip channels (dropped audio, FL's audio clips) are hosted and opened by Lemon Sampler, never the info
     /// window (spec: plugins/lemon-sampler.md §7).
     #[test]
