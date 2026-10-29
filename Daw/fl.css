@@ -100,11 +100,16 @@ main{flex:1;overflow:auto;background:#1a1f23;padding:0}
 #gRec{gap:6px}#gRec .chk{display:flex;align-items:center;gap:3px;font-size:11px;color:var(--mut)}#gRec select{max-width:120px;font-size:11px}
 #inMeter{background:#0d1114;border:1px solid #070a0c;border-radius:2px}
 .recblock{position:absolute;top:3px;bottom:3px;background:rgba(255,59,48,.45);border:1px solid #ff3b30;border-radius:2px;pointer-events:none;z-index:4}
-/* cadena de plugins desplegable en el Playlist */
-.chainrow{grid-column:1 / -1;position:sticky;left:0;z-index:6;background:#232a30;border-top:1px solid #0e1114;border-bottom:2px solid var(--ac);max-width:calc(100vw - 230px)}
-.chainbox{padding:6px 10px 8px}.chainhead{font-weight:700;letter-spacing:.5px;color:var(--ac);margin-bottom:4px}
-.chainins{color:var(--mut);font-size:11px;margin:4px 0}
-.chainslots{display:flex;gap:4px;overflow-x:auto;padding-bottom:6px;align-items:flex-start}
-.chainslots .slot{min-width:186px;width:186px;flex:none;margin:0}
-.chainslots .shead{flex-wrap:wrap}.chainslots .shead select{min-width:0;max-width:100%}
+/* cadena de plugins compacta en el Playlist (estilo sección de inserts) */
+.chainrow{grid-column:1 / -1;position:sticky;left:0;z-index:6;background:#232a30;border-top:1px solid #0e1114;border-bottom:1px solid #0e1114;max-width:calc(100vw - 230px)}
+.chainbox.compact{padding:3px 8px;display:flex;flex-direction:column;gap:2px}
+.chainline{display:flex;align-items:center;gap:8px}.chainlab{width:170px;flex:none;font-size:10px;letter-spacing:.5px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pills{display:flex;gap:2px}
+.pill{width:50px;height:20px;padding:0;font:700 10px "Segoe UI",sans-serif;letter-spacing:.5px;border-radius:2px;border:1px solid #11151a;background:linear-gradient(#2b3238,#242a30);color:#5f6b76}
+.pill.on{background:linear-gradient(#5b8fc6,#3f6f9f);color:#fff;border-color:#27465f}
+.pill.off{background:linear-gradient(#59636c,#47515a);color:#aeb7bf;text-decoration:line-through}
+.pill:hover{filter:brightness(1.25)}
+.fxpop{position:fixed;z-index:500;background:#2c333a;border:1px solid #0b0e10;box-shadow:0 8px 20px rgba(0,0,0,.65);width:260px;padding:6px}
+.fxph{display:flex;gap:4px;align-items:center;margin-bottom:4px}.fxph b{flex:1;font-size:11px}.fxph select{width:70px;font-size:10px}.fxph button{padding:1px 6px}
+.fxpop .prm{display:grid;grid-template-columns:78px 1fr;gap:4px;align-items:center;margin:2px 0;color:var(--mut);font-size:10px}
 .chev{cursor:pointer;color:var(--ac);width:10px;text-align:center}

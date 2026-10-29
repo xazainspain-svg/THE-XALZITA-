@@ -383,14 +383,42 @@ function laneInserts(i) {
   });
   return out.size ? [...out].sort((a, b) => a - b) : [Math.min(i, NINS - 1)];
 }
-function chainPanel(i) {
-  const row = el('div', 'chainrow'), box = el('div', 'chainbox'); row.appendChild(box);
+const FX_SHORT = { filter: 'FILT', delay: 'DLY', reverb: 'REV', dist: 'DIST', chorus: 'CHO', comp: 'COMP', eq: 'EQ3', peq: 'PEQ', duck: 'DUCK' };
+function chainRerender() { renderArr(); if (winOpen('mixer')) renderMixer(); }
+function closeFxPop() { document.querySelectorAll('.fxpop,.ctxmenu').forEach(x => x.remove()); }
+function placeNear(box, btn) { const r = btn.getBoundingClientRect(); box.style.left = Math.min(window.innerWidth - 270, r.left) + 'px'; box.style.top = (r.bottom + 2) + 'px'; document.body.appendChild(box); }
+function onOutside(box) { const f = ev => { if (!box.contains(ev.target)) { box.remove(); document.removeEventListener('mousedown', f, true); } }; setTimeout(() => document.addEventListener('mousedown', f, true), 0); }
+function fxMenu(btn, k, s) {                                    // elegir un plugin para una ranura vacía
+  closeFxPop(); const m = el('div', 'ctxmenu'); m.style.minWidth = '170px';
+  Object.keys(FX_DEFS).forEach(key => { const b = el('button', 'mitem', FX_DEFS[key].name); b.onclick = () => { m.remove(); song.inserts[k].fx[s] = fxNew(key); if (eng) eng.rebuildInsert(k); chainRerender(); }; m.appendChild(b); });
+  placeNear(m, btn); onOutside(m);
+}
+function fxPop(btn, k, s) {                                     // parámetros del plugin en una ventanita
+  closeFxPop(); const ins = song.inserts[k], f = ins.fx[s]; if (!f) return;
+  const pop = el('div', 'fxpop'), head = el('div', 'fxph'); head.appendChild(el('b', '', FX_DEFS[f.type].name));
+  if (FX_PRESETS[f.type]) { const ps = el('select'); const p0 = el('option', '', 'preset'); p0.value = ''; ps.appendChild(p0); Object.keys(FX_PRESETS[f.type]).forEach(n => { const o = el('option', '', n); o.value = n; ps.appendChild(o); });
+    ps.onchange = () => { if (!ps.value) return; Object.assign(f.p, FX_PRESETS[f.type][ps.value]); if (eng) eng.rebuildInsert(k); pop.remove(); chainRerender(); setTimeout(() => { const b = document.querySelector('.pill[data-k="' + k + '"][data-s="' + s + '"]'); if (b) fxPop(b, k, s); }, 0); }; head.appendChild(ps); }
+  const pw = el('button', f.on !== false ? 'on' : '', '⏻'); pw.title = 'Bypass'; pw.onclick = () => { f.on = f.on === false; if (eng) eng.rebuildInsert(k); pop.remove(); chainRerender(); };
+  const rm = el('button', '', '✕'); rm.title = 'Quitar'; rm.onclick = () => { ins.fx[s] = null; if (eng) eng.rebuildInsert(k); pop.remove(); chainRerender(); };
+  const sw = el('button', '', '⇄'); sw.title = 'Cambiar de plugin'; sw.onclick = () => { pop.remove(); ins.fx[s] = null; if (eng) eng.rebuildInsert(k); renderArr(); setTimeout(() => { const b = document.querySelector('.pill[data-k="' + k + '"][data-s="' + s + '"]'); if (b) fxMenu(b, k, s); }, 0); };
+  head.append(pw, sw, rm); pop.appendChild(head);
+  FX_DEFS[f.type].params.forEach(d => slider(pop, d.n, d.min, d.max, f.p[d.k], d.step, v => { f.p[d.k] = v; const nodes = eng && eng.ins[k].fx[s]; if (nodes) nodes.update(); autoRec('i' + k + '.f' + s + '.' + d.k, v); }, d.log, 'i' + k + '.f' + s + '.' + d.k));
+  placeNear(pop, btn); onOutside(pop);
+}
+function chainPanel(i) {                                        // fila fina de inserts, como la sección de inserts de Pro Tools
+  const row = el('div', 'chainrow'), box = el('div', 'chainbox compact'); row.appendChild(box);
   const ks = laneInserts(i), used = song.arr.some(it => laneOf(it) === i);
-  box.appendChild(el('div', 'chainhead', 'Cadena de plugins — ' + song.lanes[i].name + (used ? '' : ' (sin clips: se muestra el Insert ' + (ks[0] + 1) + ')')));
   ks.forEach(k => {
-    const ins = song.inserts[k], sec = el('div', 'chainsec'), t = song.tracks.filter(tt => tt.insert === k).map(tt => tt.name).join(', ');
-    sec.appendChild(el('div', 'chainins', 'Insert ' + (k + 1) + ' · ' + ins.name + (t ? '   ← ' + t : '')));
-    const slots = el('div', 'chainslots'); buildFxSlots(slots, k, () => { renderArr(); if (winOpen('mixer')) renderMixer(); }); sec.appendChild(slots); box.appendChild(sec);
+    const ins = song.inserts[k], line = el('div', 'chainline'), t = song.tracks.filter(tt => tt.insert === k).map(tt => tt.name).join(', ');
+    const lab = el('span', 'chainlab', 'INSERTS · ' + (k + 1) + ' ' + ins.name); lab.title = (t ? 'Recibe: ' + t : 'Sin canales') + (used ? '' : ' (pista sin clips: insert ' + (k + 1) + ')'); line.appendChild(lab);
+    const pills = el('div', 'pills');
+    for (let s = 0; s < NSLOTS; s++) {
+      const f = ins.fx[s], b = el('button', 'pill' + (f ? (f.on === false ? ' off' : ' on') : ''), f ? (FX_SHORT[f.type] || f.type) : String.fromCharCode(65 + s)); b.dataset.k = k; b.dataset.s = s;
+      b.title = f ? FX_DEFS[f.type].name + ' — clic: parámetros · Mayús+clic: bypass' : 'Ranura ' + String.fromCharCode(65 + s) + ' vacía — clic para elegir un plugin';
+      b.onclick = e => { if (!f) fxMenu(b, k, s); else if (e.shiftKey) { f.on = f.on === false; if (eng) eng.rebuildInsert(k); chainRerender(); } else fxPop(b, k, s); };
+      pills.appendChild(b);
+    }
+    line.appendChild(pills); box.appendChild(line);
   });
   return row;
 }
