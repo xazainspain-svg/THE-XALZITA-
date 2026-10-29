@@ -1,0 +1,15 @@
+/target
+/target-*/
+target-dev/
+
+# Project files and audio never belong in the repo
+*.flp
+*.wav
+
+# Local notes and secrets
+.env
+CLAUDE.md
+.claude/
+
+# macOS Finder metadata
+.DS_Store

@@ -1,0 +1,2 @@
+Copia de https://github.com/ItsAlphaNeon/Lemon-Studio (GPL-3.0-or-later, ver LICENSE). Es una app Rust independiente; no está integrada en Daw/.
+Commit: db6b14393306655fa34fedb27cdefe145d17e9f2
