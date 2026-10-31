@@ -1,0 +1,27 @@
+[Script Info]
+ScriptType: v4.00+
+PlayResX: 1600
+PlayResY: 900
+
+[V4+ Styles]
+Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
+Style: Cap,DejaVu Sans,30,&H00FFFFFF,&H00FFFFFF,&H00000000,&HB0000000,1,0,0,0,100,100,0,0,3,6,0,2,40,40,50,1
+Style: Ring,DejaVu Sans,20,&H00FFFFFF,&H00FFFFFF,&H0000E5FF,&H00000000,0,0,0,0,100,100,0,0,1,3,0,7,0,0,0,1
+Style: Key,DejaVu Sans,22,&H0000E5FF,&H0000E5FF,&H00000000,&HB0000000,1,0,0,0,100,100,0,0,3,5,0,7,24,24,24,1
+
+[Events]
+Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
+Dialogue: 1,0:00:00.20,0:00:05.90,Cap,,0,0,0,,Bienvenido a Xadaw: te muestro la vista Session y el mezclador.
+Dialogue: 1,0:00:05.90,0:00:08.32,Cap,,0,0,0,,Abre el menu VIEW
+Dialogue: 2,0:00:06.52,0:00:06.66,Ring,,0,0,0,,{\an7\pos(146,49)\1a&HFF&\3c&H0000E5FF&\bord3\p1}m 28 14 l 28 17 l 27 20 l 25 23 l 23 25 l 20 27 l 17 28 l 14 28 l 11 28 l 8 27 l 5 25 l 3 23 l 1 20 l 0 17 l 0 14 l 0 11 l 1 8 l 3 5 l 5 3 l 8 1 l 11 0 l 14 0 l 17 0 l 20 1 l 23 3 l 25 5 l 27 8 l 28 11{\p0}
+Dialogue: 2,0:00:06.64,0:00:06.78,Ring,,0,0,0,,{\an7\pos(134,37)\1a&HFF&\3c&H0000E5FF&\bord3\p1}m 52 26 l 51 32 l 49 37 l 46 42 l 42 46 l 37 49 l 32 51 l 26 52 l 20 51 l 15 49 l 10 46 l 6 42 l 3 37 l 1 32 l 0 26 l 1 20 l 3 15 l 6 10 l 10 6 l 15 3 l 20 1 l 26 0 l 32 1 l 37 3 l 42 6 l 46 10 l 49 15 l 51 20{\p0}
+Dialogue: 2,0:00:06.76,0:00:06.90,Ring,,0,0,0,,{\an7\pos(122,25)\1a&HFF&\3c&H0000E5FF&\bord3\p1}m 76 38 l 75 46 l 72 54 l 68 62 l 62 68 l 54 72 l 46 75 l 38 76 l 30 75 l 22 72 l 14 68 l 8 62 l 4 54 l 1 46 l 0 38 l 1 30 l 4 22 l 8 14 l 14 8 l 22 4 l 30 1 l 38 0 l 46 1 l 54 4 l 62 8 l 68 14 l 72 22 l 75 30{\p0}
+Dialogue: 1,0:00:08.83,0:00:13.24,Cap,,0,0,0,,Elige Session view: pads para lanzar patrones
+Dialogue: 2,0:00:09.46,0:00:09.60,Ring,,0,0,0,,{\an7\pos(186,265)\1a&HFF&\3c&H0000E5FF&\bord3\p1}m 28 14 l 28 17 l 27 20 l 25 23 l 23 25 l 20 27 l 17 28 l 14 28 l 11 28 l 8 27 l 5 25 l 3 23 l 1 20 l 0 17 l 0 14 l 0 11 l 1 8 l 3 5 l 5 3 l 8 1 l 11 0 l 14 0 l 17 0 l 20 1 l 23 3 l 25 5 l 27 8 l 28 11{\p0}
+Dialogue: 2,0:00:09.57,0:00:09.71,Ring,,0,0,0,,{\an7\pos(174,253)\1a&HFF&\3c&H0000E5FF&\bord3\p1}m 52 26 l 51 32 l 49 37 l 46 42 l 42 46 l 37 49 l 32 51 l 26 52 l 20 51 l 15 49 l 10 46 l 6 42 l 3 37 l 1 32 l 0 26 l 1 20 l 3 15 l 6 10 l 10 6 l 15 3 l 20 1 l 26 0 l 32 1 l 37 3 l 42 6 l 46 10 l 49 15 l 51 20{\p0}
+Dialogue: 2,0:00:09.70,0:00:09.84,Ring,,0,0,0,,{\an7\pos(162,241)\1a&HFF&\3c&H0000E5FF&\bord3\p1}m 76 38 l 75 46 l 72 54 l 68 62 l 62 68 l 54 72 l 46 75 l 38 76 l 30 75 l 22 72 l 14 68 l 8 62 l 4 54 l 1 46 l 0 38 l 1 30 l 4 22 l 8 14 l 14 8 l 22 4 l 30 1 l 38 0 l 46 1 l 54 4 l 62 8 l 68 14 l 72 22 l 75 30{\p0}
+Dialogue: 1,0:00:13.77,0:00:18.11,Cap,,0,0,0,,Ahora abre el mixer con su boton de la barra
+Dialogue: 2,0:00:14.38,0:00:14.52,Ring,,0,0,0,,{\an7\pos(1079,49)\1a&HFF&\3c&H0000E5FF&\bord3\p1}m 28 14 l 28 17 l 27 20 l 25 23 l 23 25 l 20 27 l 17 28 l 14 28 l 11 28 l 8 27 l 5 25 l 3 23 l 1 20 l 0 17 l 0 14 l 0 11 l 1 8 l 3 5 l 5 3 l 8 1 l 11 0 l 14 0 l 17 0 l 20 1 l 23 3 l 25 5 l 27 8 l 28 11{\p0}
+Dialogue: 2,0:00:14.50,0:00:14.64,Ring,,0,0,0,,{\an7\pos(1067,37)\1a&HFF&\3c&H0000E5FF&\bord3\p1}m 52 26 l 51 32 l 49 37 l 46 42 l 42 46 l 37 49 l 32 51 l 26 52 l 20 51 l 15 49 l 10 46 l 6 42 l 3 37 l 1 32 l 0 26 l 1 20 l 3 15 l 6 10 l 10 6 l 15 3 l 20 1 l 26 0 l 32 1 l 37 3 l 42 6 l 46 10 l 49 15 l 51 20{\p0}
+Dialogue: 2,0:00:14.62,0:00:14.76,Ring,,0,0,0,,{\an7\pos(1055,25)\1a&HFF&\3c&H0000E5FF&\bord3\p1}m 76 38 l 75 46 l 72 54 l 68 62 l 62 68 l 54 72 l 46 75 l 38 76 l 30 75 l 22 72 l 14 68 l 8 62 l 4 54 l 1 46 l 0 38 l 1 30 l 4 22 l 8 14 l 14 8 l 22 4 l 30 1 l 38 0 l 46 1 l 54 4 l 62 8 l 68 14 l 72 22 l 75 30{\p0}
+Dialogue: 1,0:00:18.57,0:00:24.84,Cap,,0,0,0,,Abajo del mixer esta la vista de dispositivos de la pista seleccionada.

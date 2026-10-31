@@ -1,0 +1,13 @@
+{
+  "app": "/home/user/THE-XALZITA-/Lemon-Studio/target/release/lemonstudio",
+  "size": "1600x900",
+  "out": "/home/user/THE-XALZITA-/Tutoriales/demo_salida",
+  "boot": 8,
+  "steps": [
+    {"do": "say", "say": "Bienvenido a Xadaw: te muestro la vista Session y el mezclador."},
+    {"do": "click", "x": 160, "y": 63, "say": "Abre el menu VIEW", "shot": "menu-view"},
+    {"do": "click", "x": 200, "y": 279, "say": "Elige Session view: pads para lanzar patrones", "shot": "session"},
+    {"do": "click", "x": 1093, "y": 63, "say": "Ahora abre el mixer con su boton de la barra", "shot": "mixer"},
+    {"do": "say", "say": "Abajo del mixer esta la vista de dispositivos de la pista seleccionada."}
+  ]
+}

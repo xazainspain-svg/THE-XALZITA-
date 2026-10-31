@@ -1,0 +1,20 @@
+1
+00:00:00,201 --> 00:00:05,901
+Bienvenido a Xadaw: te muestro la vista Session y el mezclador.
+
+2
+00:00:05,901 --> 00:00:08,315
+Abre el menu VIEW
+
+3
+00:00:08,830 --> 00:00:13,244
+Elige Session view: pads para lanzar patrones
+
+4
+00:00:13,768 --> 00:00:18,110
+Ahora abre el mixer con su boton de la barra
+
+5
+00:00:18,568 --> 00:00:24,839
+Abajo del mixer esta la vista de dispositivos de la pista seleccionada.
+

@@ -1,0 +1,91 @@
+{
+ "display": ":90",
+ "size": [
+  1600,
+  900
+ ],
+ "out": "/home/user/THE-XALZITA-/Tutoriales/demo_salida",
+ "xvfb": 12002,
+ "app": 12005,
+ "ff": 12045,
+ "t0": 1793405964.7199144,
+ "t0_wall": 24.72,
+ "events": [
+  {
+   "t": 0.201,
+   "wall": 24.92,
+   "kind": "caption",
+   "text": "Bienvenido a Xadaw: te muestro la vista Session y el mezclador.",
+   "dur": 5.7
+  },
+  {
+   "t": 5.901,
+   "wall": 30.62,
+   "kind": "caption",
+   "text": "Abre el menu VIEW",
+   "dur": 2.414285714285714
+  },
+  {
+   "t": 6.521,
+   "wall": 31.24,
+   "kind": "click",
+   "x": 160,
+   "y": 63,
+   "button": 1
+  },
+  {
+   "t": 8.83,
+   "wall": 33.55,
+   "kind": "caption",
+   "text": "Elige Session view: pads para lanzar patrones",
+   "dur": 4.414285714285715
+  },
+  {
+   "t": 9.455,
+   "wall": 34.18,
+   "kind": "click",
+   "x": 200,
+   "y": 279,
+   "button": 1
+  },
+  {
+   "t": 13.768,
+   "wall": 38.49,
+   "kind": "caption",
+   "text": "Ahora abre el mixer con su boton de la barra",
+   "dur": 4.3428571428571425
+  },
+  {
+   "t": 14.378,
+   "wall": 39.1,
+   "kind": "click",
+   "x": 1093,
+   "y": 63,
+   "button": 1
+  },
+  {
+   "t": 18.568,
+   "wall": 43.29,
+   "kind": "caption",
+   "text": "Abajo del mixer esta la vista de dispositivos de la pista seleccionada.",
+   "dur": 6.271428571428571
+  }
+ ],
+ "shots": [
+  {
+   "t": 8.83,
+   "file": "capturas/01-menu-view.png",
+   "text": "Abre el menu VIEW"
+  },
+  {
+   "t": 13.77,
+   "file": "capturas/02-session.png",
+   "text": "Elige Session view: pads para lanzar patrones"
+  },
+  {
+   "t": 18.57,
+   "file": "capturas/03-mixer.png",
+   "text": "Ahora abre el mixer con su boton de la barra"
+  }
+ ]
+}
